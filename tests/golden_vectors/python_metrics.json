@@ -1,0 +1,45 @@
+{
+  "device": "mps",
+  "dtype": "bfloat16",
+  "load_time_sec": 2.5174865419976413,
+  "peak_rss_mb": 1211.0625,
+  "latencies_ms": {
+    "short_query (~10 words)": {
+      "median_ms": 15.498354499868583,
+      "p95_ms": 16.265839897823756,
+      "min_ms": 14.831082997261547
+    },
+    "medium_passage (~50 words)": {
+      "median_ms": 15.972208500897978,
+      "p95_ms": 32.04258125442742,
+      "min_ms": 15.317208999476861
+    },
+    "long_passage (~200 words)": {
+      "median_ms": 17.572000000654953,
+      "p95_ms": 27.738308353218727,
+      "min_ms": 17.3369170006481
+    }
+  },
+  "throughput": {
+    "batch_1": {
+      "batch_size": 1,
+      "median_time_ms": 15.958166499331128,
+      "items_per_sec": 62.663840488311365
+    },
+    "batch_8": {
+      "batch_size": 8,
+      "median_time_ms": 19.60143749965937,
+      "items_per_sec": 408.13333206500914
+    },
+    "batch_16": {
+      "batch_size": 16,
+      "median_time_ms": 22.32387499680044,
+      "items_per_sec": 716.7214474320965
+    },
+    "batch_32": {
+      "batch_size": 32,
+      "median_time_ms": 24.47118700001738,
+      "items_per_sec": 1307.6603108781471
+    }
+  }
+}

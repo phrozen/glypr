@@ -1,0 +1,42 @@
+{
+  "cpu_f32": {
+    "latencies_ms": {
+      "long_passage (~200 words)": {
+        "median_ms": 233.63845799999999,
+        "min_ms": 229.632208,
+        "p95_ms": 241.47479199999998
+      },
+      "medium_passage (~50 words)": {
+        "median_ms": 121.362083,
+        "min_ms": 117.742583,
+        "p95_ms": 129.239
+      },
+      "short_query (~10 words)": {
+        "median_ms": 67.978208,
+        "min_ms": 64.790458,
+        "p95_ms": 72.882125
+      }
+    },
+    "load_time_sec": 0.407018375
+  },
+  "metal_bf16": {
+    "latencies_ms": {
+      "long_passage (~200 words)": {
+        "median_ms": 18.53,
+        "min_ms": 18.352125,
+        "p95_ms": 18.724125
+      },
+      "medium_passage (~50 words)": {
+        "median_ms": 12.671708,
+        "min_ms": 12.568209,
+        "p95_ms": 12.962125
+      },
+      "short_query (~10 words)": {
+        "median_ms": 11.665792,
+        "min_ms": 11.5805,
+        "p95_ms": 11.862375
+      }
+    },
+    "load_time_sec": 0.409813292
+  }
+}

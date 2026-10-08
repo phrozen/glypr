@@ -1,0 +1,1457 @@
+{
+  "model_id": "google/embeddinggemma-2",
+  "description": "Expanded golden reference oracle embeddings (8k scaling, 10 languages, task prompts)",
+  "dimensions": [
+    768,
+    512,
+    256,
+    128
+  ],
+  "entries": {
+    "doc_physics_64t": {
+      "id": "doc_physics_64t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 72,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 0.999020516872406,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_physics_64t"
+    },
+    "doc_science_64t": {
+      "id": "doc_science_64t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 74,
+      "domain": "biology",
+      "l2_norms": {
+        "768d": 1.0021809339523315,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "doc_code_64t": {
+      "id": "doc_code_64t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 71,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 0.9998353719711304,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_code_64t"
+    },
+    "query_physics_64t": {
+      "id": "query_physics_64t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 30,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 0.9985912442207336,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_physics_64t",
+      "relevant_query_id": null
+    },
+    "query_code_64t": {
+      "id": "query_code_64t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 30,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 0.9995130300521851,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_code_64t",
+      "relevant_query_id": null
+    },
+    "doc_physics_256t": {
+      "id": "doc_physics_256t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 256,
+      "actual_tokens": 264,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 0.9984390139579773,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_physics_256t"
+    },
+    "doc_science_256t": {
+      "id": "doc_science_256t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 256,
+      "actual_tokens": 266,
+      "domain": "biology",
+      "l2_norms": {
+        "768d": 1.0031521320343018,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "doc_code_256t": {
+      "id": "doc_code_256t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 256,
+      "actual_tokens": 263,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 1.0020948648452759,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_code_256t"
+    },
+    "query_physics_256t": {
+      "id": "query_physics_256t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 256,
+      "actual_tokens": 31,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 0.9992506504058838,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_physics_256t",
+      "relevant_query_id": null
+    },
+    "query_code_256t": {
+      "id": "query_code_256t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 256,
+      "actual_tokens": 31,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 0.9997177124023438,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_code_256t",
+      "relevant_query_id": null
+    },
+    "doc_physics_512t": {
+      "id": "doc_physics_512t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 512,
+      "actual_tokens": 520,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 0.9998135566711426,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_physics_512t"
+    },
+    "doc_science_512t": {
+      "id": "doc_science_512t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 512,
+      "actual_tokens": 522,
+      "domain": "biology",
+      "l2_norms": {
+        "768d": 0.9989040493965149,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "doc_code_512t": {
+      "id": "doc_code_512t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 512,
+      "actual_tokens": 519,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 0.9989343881607056,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_code_512t"
+    },
+    "query_physics_512t": {
+      "id": "query_physics_512t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 512,
+      "actual_tokens": 31,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 1.003418207168579,
+        "512d": 0.9999999403953552,
+        "256d": 0.9999998807907104,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_physics_512t",
+      "relevant_query_id": null
+    },
+    "query_code_512t": {
+      "id": "query_code_512t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 512,
+      "actual_tokens": 31,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 0.9985403418540955,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_code_512t",
+      "relevant_query_id": null
+    },
+    "doc_physics_1024t": {
+      "id": "doc_physics_1024t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 1024,
+      "actual_tokens": 1032,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 0.9990188479423523,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_physics_1024t"
+    },
+    "doc_science_1024t": {
+      "id": "doc_science_1024t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 1024,
+      "actual_tokens": 1034,
+      "domain": "biology",
+      "l2_norms": {
+        "768d": 0.9995549917221069,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "doc_code_1024t": {
+      "id": "doc_code_1024t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 1024,
+      "actual_tokens": 1031,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 0.9983919262886047,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_code_1024t"
+    },
+    "query_physics_1024t": {
+      "id": "query_physics_1024t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 1024,
+      "actual_tokens": 32,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 1.002919316291809,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": "doc_physics_1024t",
+      "relevant_query_id": null
+    },
+    "query_code_1024t": {
+      "id": "query_code_1024t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 1024,
+      "actual_tokens": 32,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 0.998568594455719,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": "doc_code_1024t",
+      "relevant_query_id": null
+    },
+    "doc_physics_2048t": {
+      "id": "doc_physics_2048t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 2048,
+      "actual_tokens": 2056,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 1.0010141134262085,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_physics_2048t"
+    },
+    "doc_science_2048t": {
+      "id": "doc_science_2048t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 2048,
+      "actual_tokens": 2058,
+      "domain": "biology",
+      "l2_norms": {
+        "768d": 1.0022263526916504,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "doc_code_2048t": {
+      "id": "doc_code_2048t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 2048,
+      "actual_tokens": 2055,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 1.0023176670074463,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_code_2048t"
+    },
+    "query_physics_2048t": {
+      "id": "query_physics_2048t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 2048,
+      "actual_tokens": 32,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 1.0023061037063599,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_physics_2048t",
+      "relevant_query_id": null
+    },
+    "query_code_2048t": {
+      "id": "query_code_2048t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 2048,
+      "actual_tokens": 32,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 0.9999783635139465,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_code_2048t",
+      "relevant_query_id": null
+    },
+    "doc_physics_4096t": {
+      "id": "doc_physics_4096t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 4096,
+      "actual_tokens": 4104,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 1.0016099214553833,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_physics_4096t"
+    },
+    "doc_science_4096t": {
+      "id": "doc_science_4096t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 4096,
+      "actual_tokens": 4106,
+      "domain": "biology",
+      "l2_norms": {
+        "768d": 0.9984766840934753,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "doc_code_4096t": {
+      "id": "doc_code_4096t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 4096,
+      "actual_tokens": 4103,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 0.9990447759628296,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_code_4096t"
+    },
+    "query_physics_4096t": {
+      "id": "query_physics_4096t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 4096,
+      "actual_tokens": 32,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 0.9986335635185242,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_physics_4096t",
+      "relevant_query_id": null
+    },
+    "query_code_4096t": {
+      "id": "query_code_4096t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 4096,
+      "actual_tokens": 32,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 1.0005199909210205,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_code_4096t",
+      "relevant_query_id": null
+    },
+    "doc_physics_8192t": {
+      "id": "doc_physics_8192t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 8192,
+      "actual_tokens": 8200,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 1.0004774332046509,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_physics_8192t"
+    },
+    "doc_science_8192t": {
+      "id": "doc_science_8192t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 8192,
+      "actual_tokens": 8202,
+      "domain": "biology",
+      "l2_norms": {
+        "768d": 0.9998397827148438,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 1.0000001192092896
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "doc_code_8192t": {
+      "id": "doc_code_8192t",
+      "category": "length_scaling",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 8192,
+      "actual_tokens": 8199,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 1.0022425651550293,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_code_8192t"
+    },
+    "query_physics_8192t": {
+      "id": "query_physics_8192t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 8192,
+      "actual_tokens": 32,
+      "domain": "physics",
+      "l2_norms": {
+        "768d": 1.0023748874664307,
+        "512d": 1.0000001192092896,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_physics_8192t",
+      "relevant_query_id": null
+    },
+    "query_code_8192t": {
+      "id": "query_code_8192t",
+      "category": "length_scaling",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 8192,
+      "actual_tokens": 32,
+      "domain": "computing",
+      "l2_norms": {
+        "768d": 0.9989640712738037,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 0.9999998807907104
+      },
+      "target_doc_id": "doc_code_8192t",
+      "relevant_query_id": null
+    },
+    "doc_lang_en": {
+      "id": "doc_lang_en",
+      "category": "multilingual",
+      "type": "document",
+      "language": "en",
+      "bucket_tokens": 128,
+      "actual_tokens": 41,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.001276969909668,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_lang_en"
+    },
+    "distractor_lang_en": {
+      "id": "distractor_lang_en",
+      "category": "multilingual",
+      "type": "document",
+      "language": "en",
+      "bucket_tokens": 128,
+      "actual_tokens": 32,
+      "domain": "humanities",
+      "l2_norms": {
+        "768d": 1.0007798671722412,
+        "512d": 0.9999998807907104,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_lang_en": {
+      "id": "query_lang_en",
+      "category": "multilingual",
+      "type": "query",
+      "language": "en",
+      "bucket_tokens": 64,
+      "actual_tokens": 22,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 0.9997239708900452,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_lang_en",
+      "relevant_query_id": null
+    },
+    "doc_lang_es": {
+      "id": "doc_lang_es",
+      "category": "multilingual",
+      "type": "document",
+      "language": "es",
+      "bucket_tokens": 128,
+      "actual_tokens": 61,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 0.998292088508606,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_lang_es"
+    },
+    "distractor_lang_es": {
+      "id": "distractor_lang_es",
+      "category": "multilingual",
+      "type": "document",
+      "language": "es",
+      "bucket_tokens": 128,
+      "actual_tokens": 50,
+      "domain": "humanities",
+      "l2_norms": {
+        "768d": 0.998768150806427,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_lang_es": {
+      "id": "query_lang_es",
+      "category": "multilingual",
+      "type": "query",
+      "language": "es",
+      "bucket_tokens": 64,
+      "actual_tokens": 28,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 0.999253511428833,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_lang_es",
+      "relevant_query_id": null
+    },
+    "doc_lang_de": {
+      "id": "doc_lang_de",
+      "category": "multilingual",
+      "type": "document",
+      "language": "de",
+      "bucket_tokens": 128,
+      "actual_tokens": 65,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 0.9993165135383606,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_lang_de"
+    },
+    "distractor_lang_de": {
+      "id": "distractor_lang_de",
+      "category": "multilingual",
+      "type": "document",
+      "language": "de",
+      "bucket_tokens": 128,
+      "actual_tokens": 65,
+      "domain": "humanities",
+      "l2_norms": {
+        "768d": 0.9990240931510925,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_lang_de": {
+      "id": "query_lang_de",
+      "category": "multilingual",
+      "type": "query",
+      "language": "de",
+      "bucket_tokens": 64,
+      "actual_tokens": 29,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.000064730644226,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": "doc_lang_de",
+      "relevant_query_id": null
+    },
+    "doc_lang_fr": {
+      "id": "doc_lang_fr",
+      "category": "multilingual",
+      "type": "document",
+      "language": "fr",
+      "bucket_tokens": 128,
+      "actual_tokens": 63,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.002886414527893,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_lang_fr"
+    },
+    "distractor_lang_fr": {
+      "id": "distractor_lang_fr",
+      "category": "multilingual",
+      "type": "document",
+      "language": "fr",
+      "bucket_tokens": 128,
+      "actual_tokens": 48,
+      "domain": "humanities",
+      "l2_norms": {
+        "768d": 0.9991445541381836,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_lang_fr": {
+      "id": "query_lang_fr",
+      "category": "multilingual",
+      "type": "query",
+      "language": "fr",
+      "bucket_tokens": 64,
+      "actual_tokens": 32,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 0.9989489912986755,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_lang_fr",
+      "relevant_query_id": null
+    },
+    "doc_lang_ja": {
+      "id": "doc_lang_ja",
+      "category": "multilingual",
+      "type": "document",
+      "language": "ja",
+      "bucket_tokens": 128,
+      "actual_tokens": 61,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.0012564659118652,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_lang_ja"
+    },
+    "distractor_lang_ja": {
+      "id": "distractor_lang_ja",
+      "category": "multilingual",
+      "type": "document",
+      "language": "ja",
+      "bucket_tokens": 128,
+      "actual_tokens": 47,
+      "domain": "humanities",
+      "l2_norms": {
+        "768d": 0.9993988871574402,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0000001192092896
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_lang_ja": {
+      "id": "query_lang_ja",
+      "category": "multilingual",
+      "type": "query",
+      "language": "ja",
+      "bucket_tokens": 64,
+      "actual_tokens": 28,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.0026733875274658,
+        "512d": 1.0000001192092896,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_lang_ja",
+      "relevant_query_id": null
+    },
+    "doc_lang_zh": {
+      "id": "doc_lang_zh",
+      "category": "multilingual",
+      "type": "document",
+      "language": "zh",
+      "bucket_tokens": 128,
+      "actual_tokens": 68,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.0027141571044922,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_lang_zh"
+    },
+    "distractor_lang_zh": {
+      "id": "distractor_lang_zh",
+      "category": "multilingual",
+      "type": "document",
+      "language": "zh",
+      "bucket_tokens": 128,
+      "actual_tokens": 57,
+      "domain": "humanities",
+      "l2_norms": {
+        "768d": 1.001824140548706,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_lang_zh": {
+      "id": "query_lang_zh",
+      "category": "multilingual",
+      "type": "query",
+      "language": "zh",
+      "bucket_tokens": 64,
+      "actual_tokens": 30,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 0.9994191527366638,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": "doc_lang_zh",
+      "relevant_query_id": null
+    },
+    "doc_lang_ko": {
+      "id": "doc_lang_ko",
+      "category": "multilingual",
+      "type": "document",
+      "language": "ko",
+      "bucket_tokens": 128,
+      "actual_tokens": 82,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.0003011226654053,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_lang_ko"
+    },
+    "distractor_lang_ko": {
+      "id": "distractor_lang_ko",
+      "category": "multilingual",
+      "type": "document",
+      "language": "ko",
+      "bucket_tokens": 128,
+      "actual_tokens": 63,
+      "domain": "humanities",
+      "l2_norms": {
+        "768d": 0.9982559680938721,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_lang_ko": {
+      "id": "query_lang_ko",
+      "category": "multilingual",
+      "type": "query",
+      "language": "ko",
+      "bucket_tokens": 64,
+      "actual_tokens": 37,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.0023610591888428,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_lang_ko",
+      "relevant_query_id": null
+    },
+    "doc_lang_ru": {
+      "id": "doc_lang_ru",
+      "category": "multilingual",
+      "type": "document",
+      "language": "ru",
+      "bucket_tokens": 128,
+      "actual_tokens": 62,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.001099705696106,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 0.9999998807907104
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_lang_ru"
+    },
+    "distractor_lang_ru": {
+      "id": "distractor_lang_ru",
+      "category": "multilingual",
+      "type": "document",
+      "language": "ru",
+      "bucket_tokens": 128,
+      "actual_tokens": 49,
+      "domain": "humanities",
+      "l2_norms": {
+        "768d": 0.9996365308761597,
+        "512d": 1.0000001192092896,
+        "256d": 0.9999999403953552,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_lang_ru": {
+      "id": "query_lang_ru",
+      "category": "multilingual",
+      "type": "query",
+      "language": "ru",
+      "bucket_tokens": 64,
+      "actual_tokens": 30,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 0.9997555613517761,
+        "512d": 1.0000001192092896,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_lang_ru",
+      "relevant_query_id": null
+    },
+    "doc_lang_el": {
+      "id": "doc_lang_el",
+      "category": "multilingual",
+      "type": "document",
+      "language": "el",
+      "bucket_tokens": 128,
+      "actual_tokens": 79,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.000527024269104,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_lang_el"
+    },
+    "distractor_lang_el": {
+      "id": "distractor_lang_el",
+      "category": "multilingual",
+      "type": "document",
+      "language": "el",
+      "bucket_tokens": 128,
+      "actual_tokens": 81,
+      "domain": "humanities",
+      "l2_norms": {
+        "768d": 1.0025337934494019,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_lang_el": {
+      "id": "query_lang_el",
+      "category": "multilingual",
+      "type": "query",
+      "language": "el",
+      "bucket_tokens": 64,
+      "actual_tokens": 39,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.0010128021240234,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_lang_el",
+      "relevant_query_id": null
+    },
+    "doc_lang_ar": {
+      "id": "doc_lang_ar",
+      "category": "multilingual",
+      "type": "document",
+      "language": "ar",
+      "bucket_tokens": 128,
+      "actual_tokens": 70,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 1.0011314153671265,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": "query_lang_ar"
+    },
+    "distractor_lang_ar": {
+      "id": "distractor_lang_ar",
+      "category": "multilingual",
+      "type": "document",
+      "language": "ar",
+      "bucket_tokens": 128,
+      "actual_tokens": 58,
+      "domain": "humanities",
+      "l2_norms": {
+        "768d": 0.998274564743042,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_lang_ar": {
+      "id": "query_lang_ar",
+      "category": "multilingual",
+      "type": "query",
+      "language": "ar",
+      "bucket_tokens": 64,
+      "actual_tokens": 29,
+      "domain": "technical",
+      "l2_norms": {
+        "768d": 0.9996175169944763,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": "doc_lang_ar",
+      "relevant_query_id": null
+    },
+    "query_task_classification": {
+      "id": "query_task_classification",
+      "category": "task_prompts",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 26,
+      "domain": "general",
+      "l2_norms": {
+        "768d": 1.000185251235962,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_task_clustering": {
+      "id": "query_task_clustering",
+      "category": "task_prompts",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 21,
+      "domain": "general",
+      "l2_norms": {
+        "768d": 1.0035275220870972,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_task_qa": {
+      "id": "query_task_qa",
+      "category": "task_prompts",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 22,
+      "domain": "general",
+      "l2_norms": {
+        "768d": 1.0018799304962158,
+        "512d": 1.0000001192092896,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_task_factchecking": {
+      "id": "query_task_factchecking",
+      "category": "task_prompts",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 42,
+      "domain": "general",
+      "l2_norms": {
+        "768d": 1.001468300819397,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_task_coderetrieval": {
+      "id": "query_task_coderetrieval",
+      "category": "task_prompts",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 24,
+      "domain": "general",
+      "l2_norms": {
+        "768d": 1.0005699396133423,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 0.9999999403953552
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "query_task_similarity": {
+      "id": "query_task_similarity",
+      "category": "task_prompts",
+      "type": "query",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 23,
+      "domain": "general",
+      "l2_norms": {
+        "768d": 0.9997308254241943,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "doc_task_titled": {
+      "id": "doc_task_titled",
+      "category": "task_prompts",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 33,
+      "domain": "general",
+      "l2_norms": {
+        "768d": 1.0039494037628174,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    },
+    "doc_task_untitled": {
+      "id": "doc_task_untitled",
+      "category": "task_prompts",
+      "type": "document",
+      "language": null,
+      "bucket_tokens": 64,
+      "actual_tokens": 28,
+      "domain": "general",
+      "l2_norms": {
+        "768d": 0.9988518953323364,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
+      },
+      "target_doc_id": null,
+      "relevant_query_id": null
+    }
+  },
+  "pairwise_evaluations": {
+    "physics_64t_768d": {
+      "query": "query_physics_64t",
+      "positive_doc": "doc_physics_64t",
+      "negative_doc": "doc_science_64t",
+      "positive_sim": 0.7147924900054932,
+      "negative_sim": 0.5302730798721313,
+      "margin": 0.18451941013336182
+    },
+    "physics_64t_512d": {
+      "query": "query_physics_64t",
+      "positive_doc": "doc_physics_64t",
+      "negative_doc": "doc_science_64t",
+      "positive_sim": 0.7191124558448792,
+      "negative_sim": 0.5446448922157288,
+      "margin": 0.1744675636291504
+    },
+    "physics_256t_768d": {
+      "query": "query_physics_256t",
+      "positive_doc": "doc_physics_256t",
+      "negative_doc": "doc_science_256t",
+      "positive_sim": 0.7000899314880371,
+      "negative_sim": 0.5399945974349976,
+      "margin": 0.16009533405303955
+    },
+    "physics_256t_512d": {
+      "query": "query_physics_256t",
+      "positive_doc": "doc_physics_256t",
+      "negative_doc": "doc_science_256t",
+      "positive_sim": 0.7059242129325867,
+      "negative_sim": 0.5552194118499756,
+      "margin": 0.15070480108261108
+    },
+    "physics_512t_768d": {
+      "query": "query_physics_512t",
+      "positive_doc": "doc_physics_512t",
+      "negative_doc": "doc_science_512t",
+      "positive_sim": 0.7007269263267517,
+      "negative_sim": 0.5500653982162476,
+      "margin": 0.15066152811050415
+    },
+    "physics_512t_512d": {
+      "query": "query_physics_512t",
+      "positive_doc": "doc_physics_512t",
+      "negative_doc": "doc_science_512t",
+      "positive_sim": 0.7052456736564636,
+      "negative_sim": 0.5634252429008484,
+      "margin": 0.14182043075561523
+    },
+    "physics_1024t_768d": {
+      "query": "query_physics_1024t",
+      "positive_doc": "doc_physics_1024t",
+      "negative_doc": "doc_science_1024t",
+      "positive_sim": 0.7039262652397156,
+      "negative_sim": 0.5573104023933411,
+      "margin": 0.1466158628463745
+    },
+    "physics_1024t_512d": {
+      "query": "query_physics_1024t",
+      "positive_doc": "doc_physics_1024t",
+      "negative_doc": "doc_science_1024t",
+      "positive_sim": 0.7101800441741943,
+      "negative_sim": 0.5615288615226746,
+      "margin": 0.14865118265151978
+    },
+    "physics_2048t_768d": {
+      "query": "query_physics_2048t",
+      "positive_doc": "doc_physics_2048t",
+      "negative_doc": "doc_science_2048t",
+      "positive_sim": 0.7134219408035278,
+      "negative_sim": 0.5837448239326477,
+      "margin": 0.12967711687088013
+    },
+    "physics_2048t_512d": {
+      "query": "query_physics_2048t",
+      "positive_doc": "doc_physics_2048t",
+      "negative_doc": "doc_science_2048t",
+      "positive_sim": 0.7182068228721619,
+      "negative_sim": 0.5930477380752563,
+      "margin": 0.12515908479690552
+    },
+    "physics_4096t_768d": {
+      "query": "query_physics_4096t",
+      "positive_doc": "doc_physics_4096t",
+      "negative_doc": "doc_science_4096t",
+      "positive_sim": 0.7346963286399841,
+      "negative_sim": 0.5900830030441284,
+      "margin": 0.1446133255958557
+    },
+    "physics_4096t_512d": {
+      "query": "query_physics_4096t",
+      "positive_doc": "doc_physics_4096t",
+      "negative_doc": "doc_science_4096t",
+      "positive_sim": 0.739321231842041,
+      "negative_sim": 0.6023133397102356,
+      "margin": 0.13700789213180542
+    },
+    "physics_8192t_768d": {
+      "query": "query_physics_8192t",
+      "positive_doc": "doc_physics_8192t",
+      "negative_doc": "doc_science_8192t",
+      "positive_sim": 0.727139949798584,
+      "negative_sim": 0.592574954032898,
+      "margin": 0.13456499576568604
+    },
+    "physics_8192t_512d": {
+      "query": "query_physics_8192t",
+      "positive_doc": "doc_physics_8192t",
+      "negative_doc": "doc_science_8192t",
+      "positive_sim": 0.7336362600326538,
+      "negative_sim": 0.6048945188522339,
+      "margin": 0.12874174118041992
+    },
+    "multilingual_en_768d": {
+      "language": "en",
+      "query": "query_lang_en",
+      "positive_doc": "doc_lang_en",
+      "negative_doc": "distractor_lang_en",
+      "positive_sim": 0.841606080532074,
+      "negative_sim": 0.5138465166091919,
+      "margin": 0.3277595639228821
+    },
+    "multilingual_es_768d": {
+      "language": "es",
+      "query": "query_lang_es",
+      "positive_doc": "doc_lang_es",
+      "negative_doc": "distractor_lang_es",
+      "positive_sim": 0.7999307513237,
+      "negative_sim": 0.5321589112281799,
+      "margin": 0.26777184009552
+    },
+    "multilingual_de_768d": {
+      "language": "de",
+      "query": "query_lang_de",
+      "positive_doc": "doc_lang_de",
+      "negative_doc": "distractor_lang_de",
+      "positive_sim": 0.7950249910354614,
+      "negative_sim": 0.553600013256073,
+      "margin": 0.24142497777938843
+    },
+    "multilingual_fr_768d": {
+      "language": "fr",
+      "query": "query_lang_fr",
+      "positive_doc": "doc_lang_fr",
+      "negative_doc": "distractor_lang_fr",
+      "positive_sim": 0.8251555562019348,
+      "negative_sim": 0.5039287805557251,
+      "margin": 0.3212267756462097
+    },
+    "multilingual_ja_768d": {
+      "language": "ja",
+      "query": "query_lang_ja",
+      "positive_doc": "doc_lang_ja",
+      "negative_doc": "distractor_lang_ja",
+      "positive_sim": 0.8514198660850525,
+      "negative_sim": 0.4819973409175873,
+      "margin": 0.3694225251674652
+    },
+    "multilingual_zh_768d": {
+      "language": "zh",
+      "query": "query_lang_zh",
+      "positive_doc": "doc_lang_zh",
+      "negative_doc": "distractor_lang_zh",
+      "positive_sim": 0.7954872250556946,
+      "negative_sim": 0.5082312822341919,
+      "margin": 0.2872559428215027
+    },
+    "multilingual_ko_768d": {
+      "language": "ko",
+      "query": "query_lang_ko",
+      "positive_doc": "doc_lang_ko",
+      "negative_doc": "distractor_lang_ko",
+      "positive_sim": 0.8319879770278931,
+      "negative_sim": 0.5261753797531128,
+      "margin": 0.3058125972747803
+    },
+    "multilingual_ru_768d": {
+      "language": "ru",
+      "query": "query_lang_ru",
+      "positive_doc": "doc_lang_ru",
+      "negative_doc": "distractor_lang_ru",
+      "positive_sim": 0.8158867359161377,
+      "negative_sim": 0.5468698740005493,
+      "margin": 0.2690168619155884
+    },
+    "multilingual_el_768d": {
+      "language": "el",
+      "query": "query_lang_el",
+      "positive_doc": "doc_lang_el",
+      "negative_doc": "distractor_lang_el",
+      "positive_sim": 0.8454414010047913,
+      "negative_sim": 0.5739737153053284,
+      "margin": 0.2714676856994629
+    },
+    "multilingual_ar_768d": {
+      "language": "ar",
+      "query": "query_lang_ar",
+      "positive_doc": "doc_lang_ar",
+      "negative_doc": "distractor_lang_ar",
+      "positive_sim": 0.8001884818077087,
+      "negative_sim": 0.509943962097168,
+      "margin": 0.29024451971054077
+    }
+  }
+}
