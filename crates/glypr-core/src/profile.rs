@@ -1,0 +1,273 @@
+use candle_core::{DType, Device, Module, Result, Tensor, D};
+use serde::{Deserialize, Serialize};
+use std::time::Instant;
+
+use crate::attention::repeat_kv;
+use crate::config::LayerType;
+use crate::model::EmbeddingGemma2Model;
+use crate::ple::gelu_tanh;
+use crate::rope::apply_rotary_pos_emb;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerProfile {
+    pub layer_idx: usize,
+    pub is_sliding: bool,
+    pub input_norm_ms: f64,
+    pub qkv_proj_ms: f64,
+    pub qk_norm_rope_ms: f64,
+    pub attn_core_ms: f64,
+    pub out_proj_ms: f64,
+    pub post_attn_norm_ms: f64,
+    pub ffn_pre_norm_ms: f64,
+    pub mlp_ms: f64,
+    pub post_ffn_norm_ms: f64,
+    pub ple_block_ms: f64,
+    pub total_layer_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardProfile {
+    pub batch_size: usize,
+    pub seq_len: usize,
+    pub embed_tokens_ms: f64,
+    pub ple_input_ms: f64,
+    pub rope_calc_ms: f64,
+    pub mask_build_ms: f64,
+    pub layers: Vec<LayerProfile>,
+    pub total_layers_ms: f64,
+    pub final_norm_proj_ms: f64,
+    pub total_forward_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineProfile {
+    pub batch_size: usize,
+    pub seq_len: usize,
+    pub tokenizer_ms: f64,
+    pub forward: ForwardProfile,
+    pub pooling_ms: f64,
+    pub mrl_l2norm_ms: f64,
+    pub total_pipeline_ms: f64,
+    pub tokens_per_sec: f64,
+}
+
+fn sync(t: &Tensor) -> Result<()> {
+    let _ = t.flatten_all()?.narrow(0, 0, 1)?.to_device(&Device::Cpu)?;
+    Ok(())
+}
+
+fn elapsed_ms(t0: Instant) -> f64 {
+    t0.elapsed().as_secs_f64() * 1000.0
+}
+
+impl EmbeddingGemma2Model {
+    pub fn forward_profiled(
+        &self,
+        input_ids: &Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> Result<(Tensor, ForwardProfile)> {
+        let (batch, seq_len) = input_ids.dims2()?;
+        let t_start_total = Instant::now();
+
+        // 1. Embed tokens with scaling
+        let t0 = Instant::now();
+        let inputs_embeds = self.embed_tokens.forward(input_ids)?;
+        let inputs_embeds = (inputs_embeds * self.embed_scale)?;
+        sync(&inputs_embeds)?;
+        let embed_tokens_ms = elapsed_ms(t0);
+
+        // 2. Per-layer embeddings: [batch, seq_len, 24, 512]
+        let t0 = Instant::now();
+        let per_layer_projections = self.ple.project(&inputs_embeds)?;
+        sync(&per_layer_projections)?;
+        let ple_input_ms = elapsed_ms(t0);
+
+        // 3. Precompute RoPE (cos, sin)
+        let t0 = Instant::now();
+        let (cos_sliding, sin_sliding) = self.rope_sliding.get_cos_sin(seq_len, &self.device, self.dtype)?;
+        let (cos_full, sin_full) = self.rope_full.get_cos_sin(seq_len, &self.device, self.dtype)?;
+        sync(&cos_sliding)?;
+        let rope_calc_ms = elapsed_ms(t0);
+
+        // 4. Attention masks
+        let t0 = Instant::now();
+        let sliding_mask = self.build_attention_mask(batch, seq_len, Some(self.config.sliding_window), attention_mask)?;
+        let full_mask = self.build_attention_mask(batch, seq_len, None, attention_mask)?;
+        if let Some(ref m) = sliding_mask {
+            sync(m)?;
+        }
+        let mask_build_ms = elapsed_ms(t0);
+
+        // 5. Execute 24 layers with detailed timings
+        let mut hidden_states = inputs_embeds;
+        let mut layer_profiles = Vec::with_capacity(self.config.num_hidden_layers);
+
+        for i in 0..self.config.num_hidden_layers {
+            let t_layer_start = Instant::now();
+            let layer = &self.layers[i];
+            let layer_type = self.config.layer_types[i];
+            let is_sliding = layer_type == LayerType::SlidingAttention;
+
+            let p_raw = per_layer_projections.narrow(2, i, 1)?.squeeze(2)?;
+            let per_layer_slice = self.ple.norm.forward(&p_raw)?;
+            let (cos, sin, mask) = match layer_type {
+                LayerType::SlidingAttention => (&cos_sliding, &sin_sliding, sliding_mask.as_ref()),
+                LayerType::FullAttention => (&cos_full, &sin_full, full_mask.as_ref()),
+            };
+
+            // Attention block input norm
+            let t0 = Instant::now();
+            let residual = hidden_states.clone();
+            let normed = layer.input_layernorm.forward(&hidden_states)?;
+            sync(&normed)?;
+            let input_norm_ms = elapsed_ms(t0);
+
+            // Self attention QKV proj
+            let t0 = Instant::now();
+            let q = layer.self_attn.q_proj.forward(&normed)?;
+            let k = layer.self_attn.k_proj.forward(&normed)?;
+            let v = layer.self_attn.v_proj.forward(&normed)?;
+            let q = q
+                .reshape((batch, seq_len, layer.self_attn.num_attention_heads, layer.self_attn.head_dim))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let k = k
+                .reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let v = v
+                .reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            sync(&v)?;
+            let qkv_proj_ms = elapsed_ms(t0);
+
+            // QK Norm + RoPE
+            let t0 = Instant::now();
+            let q = layer.self_attn.q_norm.forward(&q)?;
+            let k = layer.self_attn.k_norm.forward(&k)?;
+            let v = layer.self_attn.v_norm.forward(&v)?;
+            let q = apply_rotary_pos_emb(&q, cos, sin)?;
+            let k = apply_rotary_pos_emb(&k, cos, sin)?;
+            let num_groups = layer.self_attn.num_attention_heads / layer.self_attn.num_key_value_heads;
+            let k = repeat_kv(&k, num_groups)?;
+            let v = repeat_kv(&v, num_groups)?;
+            sync(&v)?;
+            let qk_norm_rope_ms = elapsed_ms(t0);
+
+            // Attention Core (QK matmul, mask add, softmax, V matmul)
+            let t0 = Instant::now();
+            let k_t = k.transpose(2, 3)?.contiguous()?;
+            let mut attn_weights = q.matmul(&k_t)?;
+            if let Some(m) = mask {
+                attn_weights = attn_weights.broadcast_add(m)?;
+            }
+            let orig_dtype = attn_weights.dtype();
+            let attn_weights_f32 = if orig_dtype != DType::F32 {
+                attn_weights.to_dtype(DType::F32)?
+            } else {
+                attn_weights
+            };
+            let attn_probs_f32 = candle_nn::ops::softmax(&attn_weights_f32, D::Minus1)?;
+            let attn_probs = if orig_dtype != DType::F32 {
+                attn_probs_f32.to_dtype(orig_dtype)?
+            } else {
+                attn_probs_f32
+            };
+            let context = attn_probs.matmul(&v)?;
+            let context = context
+                .transpose(1, 2)?
+                .contiguous()?
+                .reshape((batch, seq_len, layer.self_attn.num_attention_heads * layer.self_attn.head_dim))?;
+            sync(&context)?;
+            let attn_core_ms = elapsed_ms(t0);
+
+            // Output projection
+            let t0 = Instant::now();
+            let attn_out = layer.self_attn.o_proj.forward(&context)?;
+            sync(&attn_out)?;
+            let out_proj_ms = elapsed_ms(t0);
+
+            // Post-attn norm + residual add
+            let t0 = Instant::now();
+            let post_attn = layer.post_attention_layernorm.forward(&attn_out)?;
+            let hidden_states_next = residual.add(&post_attn)?;
+            sync(&hidden_states_next)?;
+            let post_attn_norm_ms = elapsed_ms(t0);
+
+            // FFN pre norm
+            let t0 = Instant::now();
+            let residual = hidden_states_next.clone();
+            let pre_ffn = layer.pre_feedforward_layernorm.forward(&hidden_states_next)?;
+            sync(&pre_ffn)?;
+            let ffn_pre_norm_ms = elapsed_ms(t0);
+
+            // MLP
+            let t0 = Instant::now();
+            let gate = layer.mlp.gate_proj.forward(&pre_ffn)?;
+            let gate_act = gelu_tanh(&gate)?;
+            let up = layer.mlp.up_proj.forward(&pre_ffn)?;
+            let gated = gate_act.broadcast_mul(&up)?;
+            let mlp_out = layer.mlp.down_proj.forward(&gated)?;
+            sync(&mlp_out)?;
+            let mlp_ms = elapsed_ms(t0);
+
+            // Post FFN norm + residual add
+            let t0 = Instant::now();
+            let post_ffn = layer.post_feedforward_layernorm.forward(&mlp_out)?;
+            let hidden_states_next = residual.add(&post_ffn)?;
+            sync(&hidden_states_next)?;
+            let post_ffn_norm_ms = elapsed_ms(t0);
+
+            // PLE Block + Layer scalar
+            let t0 = Instant::now();
+            let ple_out = layer.ple_block.forward(&hidden_states_next, &per_layer_slice)?;
+            let scalar = layer.layer_scalar.to_dtype(ple_out.dtype())?;
+            hidden_states = ple_out.broadcast_mul(&scalar)?;
+            sync(&hidden_states)?;
+            let ple_block_ms = elapsed_ms(t0);
+
+            let total_layer_ms = elapsed_ms(t_layer_start);
+            layer_profiles.push(LayerProfile {
+                layer_idx: i,
+                is_sliding,
+                input_norm_ms,
+                qkv_proj_ms,
+                qk_norm_rope_ms,
+                attn_core_ms,
+                out_proj_ms,
+                post_attn_norm_ms,
+                ffn_pre_norm_ms,
+                mlp_ms,
+                post_ffn_norm_ms,
+                ple_block_ms,
+                total_layer_ms,
+            });
+        }
+
+        // 6. Final norm & projection
+        let t0 = Instant::now();
+        let normed = self.norm.forward(&hidden_states)?;
+        let output = self.embedding_projection.forward(&normed)?;
+        sync(&output)?;
+        let final_norm_proj_ms = elapsed_ms(t0);
+
+        let total_forward_ms = elapsed_ms(t_start_total);
+        let total_layers_ms = layer_profiles.iter().map(|l| l.total_layer_ms).sum();
+
+        let profile = ForwardProfile {
+            batch_size: batch,
+            seq_len,
+            embed_tokens_ms,
+            ple_input_ms,
+            rope_calc_ms,
+            mask_build_ms,
+            layers: layer_profiles,
+            total_layers_ms,
+            final_norm_proj_ms,
+            total_forward_ms,
+        };
+
+        Ok((output, profile))
+    }
+}
