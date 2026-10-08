@@ -1,0 +1,25 @@
+[package]
+name = "glypr"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Native Rust CLI and embedding tool for EmbeddingGemma 2"
+
+[features]
+default = []
+metal = ["glypr-core/metal"]
+accelerate = ["glypr-core/accelerate"]
+
+[dependencies]
+glypr-core = { path = "../glypr-core" }
+candle-core = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+image = { workspace = true }
+hound = { workspace = true }
+
+[[bin]]
+name = "glypr"
+path = "src/main.rs"
