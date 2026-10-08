@@ -1,0 +1,106 @@
+{
+  "model_id": "google/embeddinggemma-2",
+  "description": "Deterministic ground-truth reference vectors for Rust implementation validation",
+  "supported_dims": [
+    768,
+    512,
+    256,
+    128
+  ],
+  "test_cases": {
+    "search_query_1": {
+      "id": "search_query_1",
+      "type": "query",
+      "task": "SearchQuery",
+      "text": "What causes the northern lights?",
+      "l2_norms": {
+        "768d": 1.0035980939865112,
+        "512d": 0.9995606541633606,
+        "256d": 1.0014287233352661,
+        "128d": 0.9973909854888916
+      }
+    },
+    "search_doc_1_titled": {
+      "id": "search_doc_1_titled",
+      "type": "document",
+      "title": "Aurora Borealis Explained",
+      "text": "The northern lights are caused by charged solar wind particles colliding with Earth atmospheric gases.",
+      "l2_norms": {
+        "768d": 1.000274896621704,
+        "512d": 0.9998270273208618,
+        "256d": 1.0012378692626953,
+        "128d": 0.9988199472427368
+      }
+    },
+    "search_doc_2_untitled": {
+      "id": "search_doc_2_untitled",
+      "type": "document",
+      "title": null,
+      "text": "Solar energetic particles interact with the magnetosphere near Earth magnetic poles.",
+      "l2_norms": {
+        "768d": 1.0001271963119507,
+        "512d": 0.9981881976127625,
+        "256d": 1.002622127532959,
+        "128d": 0.9985287189483643
+      }
+    },
+    "code_query_1": {
+      "id": "code_query_1",
+      "type": "query",
+      "task": "CodeRetrieval",
+      "text": "Fast inverse square root implementation in C",
+      "l2_norms": {
+        "768d": 1.0002121925354004,
+        "512d": 0.9996606111526489,
+        "256d": 1.0016847848892212,
+        "128d": 0.9990750551223755
+      }
+    },
+    "code_doc_1": {
+      "id": "code_doc_1",
+      "type": "document",
+      "title": "q_rsqrt.c",
+      "text": "float Q_rsqrt(float number) { long i; float x2, y; const float threehalfs = 1.5F; x2 = number * 0.5F; y = number; i = * ( long * ) &y; i = 0x5f3759df - ( i >> 1 ); y = * ( float * ) &i; y = y * ( threehalfs - ( x2 * y * y ) ); return y; }",
+      "l2_norms": {
+        "768d": 1.0012736320495605,
+        "512d": 1.0011922121047974,
+        "256d": 1.0029338598251343,
+        "128d": 0.99826580286026
+      }
+    },
+    "sim_sentence_1": {
+      "id": "sim_sentence_1",
+      "type": "symmetric",
+      "task": "SentenceSimilarity",
+      "text": "The stock market dropped significantly on Friday.",
+      "l2_norms": {
+        "768d": 1.0033553838729858,
+        "512d": 0.9984185099601746,
+        "256d": 1.0002477169036865,
+        "128d": 1.0003323554992676
+      }
+    },
+    "sim_sentence_2": {
+      "id": "sim_sentence_2",
+      "type": "symmetric",
+      "task": "SentenceSimilarity",
+      "text": "Equities experienced steep declines at the end of the trading week.",
+      "l2_norms": {
+        "768d": 1.0003674030303955,
+        "512d": 0.9979333877563477,
+        "256d": 0.9988413453102112,
+        "128d": 0.9995476603507996
+      }
+    }
+  },
+  "similarities": {
+    "search_query_1_vs_doc_1_titled_768d": 0.8466004729270935,
+    "search_query_1_vs_doc_1_titled_512d": 0.849097728729248,
+    "code_query_1_vs_code_doc_1_768d": 0.8152202367782593,
+    "sim_sentence_1_vs_2_768d": 0.912612795829773
+  },
+  "multimodal_files": {
+    "image": "test_gradient.png",
+    "audio": "test_tone_440hz.wav"
+  }
+}

@@ -1,0 +1,26 @@
+[project]
+name = "gemma-embeddings-2"
+version = "0.1.0"
+description = "Official reference harness and ground-truth embeddings for EmbeddingGemma 2"
+readme = "README.md"
+authors = [
+    { name = "Guillermo Estrada", email = "213238+phrozen@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "av>=19.0.1",
+    "numpy>=2.5.3",
+    "pillow>=12.3.0",
+    "pytest>=9.1.1",
+    "safetensors>=0.8.0",
+    "sentence-transformers>=6.1.0",
+    "torch>=2.14.1",
+    "torchaudio>=2.11.0",
+    "torchvision>=0.29.1",
+    "transformers>=4.49.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["tests"]
+testpaths = ["tests"]
+
