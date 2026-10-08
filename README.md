@@ -1,0 +1,197 @@
+# Glypr (`glypr` / `glypr-core`)
+
+> **High-Performance, 100% Self-Contained Rust Engine for Google DeepMind's EmbeddingGemma 2**
+
+`glypr` is a native Rust inference engine for **EmbeddingGemma 2**, providing hardware-optimized text and multimodal embeddings on Apple Silicon (Metal GPU) and Linux/macOS CPU.
+
+It deploys from a **single self-contained `.gguf` file**—extracting all model hyperparameters, layer configurations, and the Gemma 4 BPE tokenizer directly from the GGUF container without needing external `config.json` or `tokenizer.json` files.
+
+---
+
+## Key Highlights
+
+- **100% Self-Contained Single-File Deployment:** Point `glypr` to a single `.gguf` file (`embeddinggemma-2-BF16.gguf` or `embeddinggemma-2-Q8_0.gguf`). Model architecture and the complete 262,144-token BPE tokenizer are reconstructed in-memory in milliseconds.
+- **Beating PyTorch MPS at 8K Tokens:** Fused Metal Flash Attention drops 8,192-token latency to **868.00 ms** (outperforming PyTorch MPS's **875.00 ms**) with peak throughput reaching **14,673 tok/s** at 1K context.
+- **Ultra-Efficient Metal VRAM Footprint:** Through zero-copy GQA, sliced PLE RMSNorm, and query-chunked attention, peak Metal VRAM at 8,192 tokens dropped from **14.59 GB $\to$ 3.09 GB (Chunked) / 3.95 GB (Flash)**, saving up to **$3.5\text{ GB}$ vs PyTorch MPS (6.59 GB)**.
+- **Universal Cross-Platform CPU SIMD:** Powered by `pulp` and Rayon with runtime dynamic architecture dispatch (ARM64 NEON & x86_64 AVX2/AVX-512), delivering a **10.49x isolated kernel speedup** on GeGLU and eliminating ~30 GB of intermediate heap allocations.
+- **Full Parity Suite in 5.09 Seconds:** Evaluates the complete 292-vector golden test suite across context lengths from 64 to 8,192 tokens in just **5.09 s** (Flash BF16) and **5.29 s** (Flash Q8_0), beating PyTorch MPS (**5.73 s**) with **0.999949** average cosine similarity.
+- **Dynamic Multimodal Projector (`mmproj`):** Text embeddings remain lightweight and self-contained; vision and audio projector towers (`mmproj-embeddinggemma-2-*.gguf`) can be dynamically attached at runtime on demand.
+- **Matryoshka Representation Learning (MRL):** Native support for dynamic vector truncation ($768\text{d} \to 512\text{d}, 256\text{d}, 128\text{d}$) with automatic L2 re-normalization.
+
+---
+
+## Quickstart CLI
+
+### Installation / Build
+```bash
+# Build CLI with Apple Silicon Metal acceleration
+cargo build --release -p glypr --features metal
+```
+
+### 1. Generate Embeddings (Text & Code)
+```bash
+# Encodes text into a 768-dimensional normalized vector
+./target/release/glypr --metal embed "What is quantum mechanics?"
+
+# Specify asymmetric task prompt and Matryoshka dimension truncation (e.g. 256d)
+./target/release/glypr --metal embed "fn binary_search(arr: &[i32], target: i32)" --task CodeRetrieval --dim 256
+```
+
+### 2. Compute Cosine Similarity
+```bash
+./target/release/glypr --metal sim \
+  "What is quantum mechanics?" \
+  "Quantum mechanics is a fundamental theory in physics describing nature at atomic scales."
+# Output: Cosine Similarity (768d): 0.787881
+```
+
+### 3. Explicit Model Selection & Multimodal Attachment
+```bash
+# Load specific Q8_0 GGUF model directly
+./target/release/glypr --metal --model ./embeddinggemma-2-Q8_0.gguf embed "Single-file query"
+
+# Dynamically attach multimodal projector GGUF
+./target/release/glypr --metal --model ./embeddinggemma-2-Q8_0.gguf --mmproj ./mmproj-embeddinggemma-2-Q8_0.gguf embed "Multimodal search"
+```
+
+---
+
+## Rust SDK API
+
+Add `glypr-core` to your `Cargo.toml`:
+
+```toml
+[dependencies]
+glypr-core = { path = "crates/glypr-core", features = ["metal"] }
+```
+
+### Self-Contained GGUF Loading & Embedding
+
+```rust
+use anyhow::Result;
+use candle_core::Device;
+use glypr_core::{GlyprEmbedder, AttentionMode, cosine_similarity};
+
+fn main() -> Result<()> {
+    let device = Device::new_metal(0)?;
+
+    // 1. Load directly from a single GGUF file (no external config or tokenizer files required!)
+    let mut embedder = GlyprEmbedder::load_gguf_q8("embeddinggemma-2-Q8_0.gguf", &device)?;
+
+    // 2. Enable hardware-fused Metal FlashAttention (zero-copy GQA, 868 ms @ 8k tokens)
+    embedder.set_attention_mode(AttentionMode::MetalFlash);
+
+    // 3. Optional: Dynamically attach multimodal projector when needed
+    // embedder.attach_multimodal_projector("mmproj-embeddinggemma-2-Q8_0.gguf")?;
+
+    // 4. Asymmetric query embedding (automatically formats task prompt and adds BOS/EOS)
+    let query_vec = embedder.embed_query("What is quantum entanglement?", "SearchQuery", Some(768))?;
+
+    // 5. Document embedding (automatically formats title/content)
+    let doc_vec = embedder.embed_document(
+        "Quantum entanglement is a physical phenomenon occurring when a group of particles...",
+        Some("Quantum Entanglement"),
+        Some(768),
+    )?;
+
+    // 6. Compute semantic similarity
+    let score = cosine_similarity(&query_vec, &doc_vec);
+    println!("Cosine similarity: {:.4}", score);
+
+    Ok(())
+}
+```
+
+---
+
+## Empirical Benchmark & Hardware Memory Scorecard
+
+Tested on Apple Silicon Metal GPU across sequence lengths up to 8,192 tokens:
+
+| Context Length | Framework / Variant | Attention Engine | Base Model RAM | Peak Metal VRAM | Transient VRAM | Max Process RSS | Latency | Peak Throughput |
+| :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1,024t** | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $1,045.7\text{ MB}$ | $264.6\text{ MB}$ | $2,037.3\text{ MB}$ | $107.6\text{ ms}$ | $9,512\text{ tok/s}$ |
+| **1,024t** | `glypr-core` BF16 | Metal Flash (Fused) | $781.0\text{ MB}$ | **$1,015.3\text{ MB}$** | **$234.2\text{ MB}$** | $2,039.2\text{ MB}$ | **$69.8\text{ ms}$** | **$14,673\text{ tok/s}$** 🚀 |
+| **1,024t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$540.9\text{ MB}$** | **$779.2\text{ MB}$** | $238.2\text{ MB}$ | **$1,677.3\text{ MB}$** | **$72.8\text{ ms}$** | **$14,076\text{ tok/s}$** |
+| | | | | | | | | |
+| **2,048t** | `glypr-core` BF16 | Metal Flash (Fused) | $781.0\text{ MB}$ | **$1,253.3\text{ MB}$** | **$472.2\text{ MB}$** | $2,037.2\text{ MB}$ | **$147.9\text{ ms}$** | **$13,847\text{ tok/s}$** |
+| **2,048t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$540.9\text{ MB}$** | **$1,017.2\text{ MB}$** | $476.2\text{ MB}$ | **$1,677.3\text{ MB}$** | **$150.1\text{ ms}$** | **$13,645\text{ tok/s}$** |
+| | | | | | | | | |
+| **4,096t** | `glypr-core` BF16 | Metal Flash (Fused) | $781.0\text{ MB}$ | **$1,854.4\text{ MB}$** | **$1,073.3\text{ MB}$** | $2,037.2\text{ MB}$ | **$338.6\text{ ms}$** | **$12,098\text{ tok/s}$** |
+| **4,096t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$540.9\text{ MB}$** | **$1,622.3\text{ MB}$** | $1,081.3\text{ MB}$ | **$1,677.3\text{ MB}$** | **$349.3\text{ ms}$** | **$11,728\text{ tok/s}$** |
+| | | | | | | | | |
+| **8,192t** | **PyTorch MPS (Golden)** | **MPSGraph SDPA** | **$1,472.5\text{ MB}$** | **$6,592.8\text{ MB}$** | $5,120.3\text{ MB}$ | **$1,211.1\text{ MB}$** | **$875.5\text{ ms}$** | **$9,360\text{ tok/s}$** |
+| **8,192t** | `glypr-core` BF16 (Unopt) | Standard Dense | $781.0\text{ MB}$ | $4,608.2\text{ MB}$ | $3,827.2\text{ MB}$ | $2,037.2\text{ MB}$ | $3,086.7\text{ ms}$ | $2,654\text{ tok/s}$ |
+| **8,192t** | `glypr-core` BF16 (Opt) | Chunked Sliding | $781.0\text{ MB}$ | **$3,094.6\text{ MB}$** | **$2,313.5\text{ MB}$** | $2,037.2\text{ MB}$ | $1,267.9\text{ ms}$ | $6,461\text{ tok/s}$ |
+| **8,192t** | **`glypr-core` BF16 (Flash)** | **Metal Flash (Fused)** | **$781.0\text{ MB}$** | **$3,951.5\text{ MB}$** | $3,170.4\text{ MB}$ | $2,037.2\text{ MB}$ | **$868.0\text{ ms}$** 🏆 | **$9,438\text{ tok/s}$** |
+| **8,192t** | **`glypr-core` Q8_0 (Flash)** | **Metal Flash (Fused)** | **$540.9\text{ MB}$** | **$3,727.4\text{ MB}$** | $3,186.4\text{ MB}$ | **$1,677.3\text{ MB}$** | **$894.8\text{ ms}$** | **$9,155\text{ tok/s}$** |
+
+---
+
+## Golden Parity Across 292 Vectors Scorecard
+
+Validation against the official PyTorch MPS Golden Oracle across 10 languages, code, and 4 Matryoshka dimensions (768d, 512d, 256d, 128d):
+
+| Model & Precision | Attention Engine | Full Suite Time | Evaluation Rate | Avg Parity | Min Parity | Speedup vs Baseline |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| 🏆 **GGUF BF16** | **Metal Flash (Fused)** | **$5.09\text{ s}$** | **$57.37\text{ vec/s}$** | **0.999949** | **0.999870** | **2.77x** |
+| 🥈 **GGUF Q8_0** | **Metal Flash (Fused)** | **$5.29\text{ s}$** | **$55.20\text{ vec/s}$** | **0.999864** | **0.999602** | **2.67x** |
+| 🥉 **PyTorch MPS (Ref)**| **MPSGraph SDPA** | **$5.73\text{ s}$** | **$50.96\text{ vec/s}$** | 1.000000 | 1.000000 | **2.46x** |
+| **GGUF BF16** | **Chunked Sliding** | **$7.37\text{ s}$** | **$39.62\text{ vec/s}$** | **0.999943** | **0.999839** | **1.92x** |
+| **GGUF Q8_0** | **Chunked Sliding** | **$7.58\text{ s}$** | **$38.52\text{ vec/s}$** | **0.999860** | **0.999620** | **1.86x** |
+| **GGUF BF16** | **Standard Dense** | **$14.12\text{ s}$** | **$20.68\text{ vec/s}$** | **0.999943** | **0.999839** | **1.00x** (ref) |
+
+---
+
+## Universal Cross-Platform CPU SIMD
+
+`glypr-core` integrates portable runtime-dispatched SIMD via `pulp` with zero intermediate heap allocations:
+- **ARM64 NEON:** Accelerated on Apple Silicon (M1–M4) and AWS Graviton 3/4.
+- **x86_64 AVX2 / AVX-512:** Automatic runtime detection on Intel and AMD processors.
+- **Microbenchmarks:** GeGLU delivers **10.49x speedup** ($21.5\text{ ms} \to 2.05\text{ ms}$); RMSNorm delivers **1.55x speedup** ($0.34\text{ ms} \to 0.22\text{ ms}$).
+- **Heap Churn Elimination:** Intermediate allocations reduced from ~30 GB per 8K sequence to **0**, keeping CPU RSS flat at **1.0–1.2 GB** (Q8_0).
+
+---
+
+---
+
+## Multimodal (`mmproj`) Golden Parity Scorecard
+
+Validated against official Python `SentenceTransformer("google/embeddinggemma-2")` on the multimodal golden benchmark with exact numerical alignment:
+
+| Modality & Case | Input Data | Prompt Query | Soft Tokens | Total Seq Len | Target | Measured Parity | Status |
+| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| 🖼️ **Image Only** | 224x224 RGB image | *None* | 280 | 284 | $> 0.999$ | **0.999829** | ✅ **PASSED** |
+| 🖼️ **Image + Prompt** | 224x224 RGB image | `"Describe this picture"` | 280 | 288 | $> 0.999$ | **0.999719** | ✅ **PASSED** |
+| 🎙️ **Audio Only** | 1.0s 16 kHz WAV | *None* | 25 | 29 | $> 0.999$ | **0.999644** | ✅ **PASSED** |
+| 🎙️ **Audio + Prompt** | 1.0s 16 kHz WAV | `"A musical sound"` | 25 | 32 | $> 0.999$ | **0.999852** | ✅ **PASSED** |
+
+Suite execution time: **6.77 s** on Apple Silicon Metal. Zero runtime/memory overhead when `mmproj` is unattached.
+
+---
+
+## Documentation Navigation
+
+Comprehensive technical documentation is organized in [`docs/`](docs/):
+
+- **Architecture:**
+  - [`docs/architecture/specifications.md`](docs/architecture/specifications.md): Hyperparameters, hybrid 5:1 sliding/global attention, Per-Layer Embeddings (PLE).
+  - [`docs/architecture/hardware-acceleration.md`](docs/architecture/hardware-acceleration.md): Dual-track Metal GPU fusion, zero-copy GQA, and `pulp` CPU SIMD.
+  - [`docs/architecture/modularity.md`](docs/architecture/modularity.md): Dynamic encoder towers (270M text, 170M vision, 300M audio).
+- **Multimodal (`mmproj`):**
+  - [`docs/multimodal/mmproj-architecture.md`](docs/multimodal/mmproj-architecture.md): SigLIP Vision & Conformer Audio Tower architecture, Gemma 4 Clippable Linears, and soft token splicing.
+  - [`docs/multimodal/gguf-nuances-and-conversions.md`](docs/multimodal/gguf-nuances-and-conversions.md): Complete GGUF quirks, 963-tensor mapping dictionary, Clippable Linears, naming swaps, and quantization artifacts.
+  - [`docs/multimodal/inputs-and-budgeting.md`](docs/multimodal/inputs-and-budgeting.md): Vision token budgeting (70–1120 tokens) and audio feature processing.
+- **Benchmarks & Memory:**
+  - [`docs/benchmarks/leaderboards.md`](docs/benchmarks/leaderboards.md): MTEB/MMEB leaderboard rankings, PyTorch golden parity scorecard, latency scaling.
+  - [`docs/benchmarks/memory-and-vram.md`](docs/benchmarks/memory-and-vram.md): Apple Silicon unified memory mechanics, transient allocation analysis, Chunked vs Flash Pareto frontier.
+- **Deployment & Optimization:**
+  - [`docs/deployment/quantization-and-runtimes.md`](docs/deployment/quantization-and-runtimes.md): Precision guidelines, QAT INT4/INT8, single-file GGUF self-containment, runtimes.
+  - [`docs/vector-optimization/matryoshka-mrl.md`](docs/vector-optimization/matryoshka-mrl.md): Matryoshka dimension truncation and L2 re-normalization.
+  - [`docs/prompts/task-instructions.md`](docs/prompts/task-instructions.md): Asymmetric and symmetric task instructions and title conditioning.
+
+---
+
+## License
+
+Apache 2.0.
