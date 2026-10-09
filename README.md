@@ -24,41 +24,87 @@ It deploys from a **single self-contained `.gguf` file**—extracting all model 
 
 ### Installation / Build
 ```bash
-# Build CLI with Apple Silicon Metal acceleration
+# Build CLI with Apple Silicon Metal GPU acceleration
 cargo build --release -p glypr --features metal
+
+# Or standard universal CPU SIMD build
+cargo build --release -p glypr
 ```
 
-### 1. Generate Embeddings (Text & Code)
+The CLI defaults to `--device auto` (Metal GPU on Apple Silicon, falling back to CPU SIMD) and **BF16** precision. Canonical models are resolved and cached automatically from `ggml-org/embeddinggemma-2-GGUF` respecting standard Hugging Face cache paths (`$HF_HOME`, `$HF_HUB_CACHE`).
+
+### 1. Pre-Fetch / Cache Canonical GGUFs (`glypr pull`)
 ```bash
-# Encodes text into a 768-dimensional normalized vector
-./target/release/glypr --metal embed "What is quantum mechanics?"
+# Pre-fetch all 4 canonical models (BF16 & Q8_0 base models + multimodal projectors)
+./target/release/glypr pull
 
-# Specify asymmetric task prompt and Matryoshka dimension truncation (e.g. 256d)
-./target/release/glypr --metal embed "fn binary_search(arr: &[i32], target: i32)" --task CodeRetrieval --dim 256
+# Or selectively cache only Q8_0 weights:
+./target/release/glypr pull --q8 --q8-mmproj
 ```
 
-### 2. Compute Cosine Similarity
+### 2. Inspect Cache & Device Backend (`glypr info`)
 ```bash
-./target/release/glypr --metal sim \
-  "What is quantum mechanics?" \
-  "Quantum mechanics is a fundamental theory in physics describing nature at atomic scales."
-# Output: Cosine Similarity (768d): 0.787881
+./target/release/glypr info
 ```
 
-### 3. Explicit Model Selection & Multimodal Attachment
+### 3. Generate Embeddings (`glypr embed`)
+
+#### Text Embeddings
 ```bash
-# Load specific Q8_0 GGUF model directly
-./target/release/glypr --metal --model ./embeddinggemma-2-Q8_0.gguf embed "Single-file query"
+# Default BF16, 768-dimensional normalized vector preview
+./target/release/glypr embed "What is quantum mechanics?"
 
-# Dynamically attach multimodal projector GGUF
-./target/release/glypr --metal --model ./embeddinggemma-2-Q8_0.gguf --mmproj ./mmproj-embeddinggemma-2-Q8_0.gguf embed "Multimodal search"
+# Opt into Q8_0 precision with Matryoshka dimension truncation (256d) and JSON output
+./target/release/glypr --q8 embed "What is quantum mechanics?" --dim 256 -o json
+
+# Strongly-typed asymmetric task prompt
+./target/release/glypr embed "fn binary_search(arr: &[i32], target: i32)" --task CodeRetrieval --dim 512
 ```
 
-### 4. OpenAI-Compatible HTTP Serving Engine
+#### Pipe via Standard Input (STDIN)
+```bash
+# Pipe text from stdin
+cat query.txt | ./target/release/glypr embed -o json
+
+echo "Fast stream test" | ./target/release/glypr embed --encoding int8 -o json
+```
+
+#### Interleaved Multimodal (Text + Images + Audio)
+Arguments are parsed positionally in natural order. If an argument points to an existing `.png` image or 16 kHz `.wav` file on disk, `glypr` automatically streams it to the multimodal projector; otherwise, it is treated as text:
+```bash
+# Interleaved Text + PNG Card Image
+./target/release/glypr embed "Card illustration:" ./card.png "and card description."
+
+# Audio query
+./target/release/glypr embed "Query sound:" ./speech.wav --task SearchQuery
+
+# Adjust vision token budget (e.g. 140 for 480x680 card verbatim, 280 default, 560 high)
+./target/release/glypr embed ./card.png --image-token-budget 140
+```
+
+#### Vector Encodings & Raw Binary Streaming
+```bash
+# Zero-metadata INT8 quantization (values in [-127, 127]) formatted as JSON array
+./target/release/glypr embed "Database indexing" --encoding int8 -o json
+
+# Binary 1-bit quantization streamed directly as raw bytes to stdout (e.g. 768d = 96 raw bytes)
+./target/release/glypr embed "High-throughput search" --encoding binary -o raw > vector.bin
+```
+
+### 4. Custom Model & Projector Overrides
+To run local models or fine-tunes without contacting Hugging Face:
+```bash
+./target/release/glypr --model /path/to/custom-model.gguf --mmproj /path/to/custom-mmproj.gguf embed "Custom weights query"
+```
+
+### 5. OpenAI-Compatible HTTP Serving Engine (`glypr serve`)
 Launch a high-performance HTTP server with adaptive dynamic batching, MRL truncation, and quantization support:
 ```bash
-# Start server listening on port 8080 with Metal acceleration
-./target/release/glypr --metal serve --port 8080 --max-batch-size 32
+# Start server listening on port 8080 (defaults to auto Metal/CPU device and BF16)
+./target/release/glypr serve --port 8080 --max-batch-size 32
+
+# Or serve with Q8_0 weights:
+./target/release/glypr --q8 serve --port 8080
 ```
 
 Query with standard OpenAI API clients or `curl`:
