@@ -113,24 +113,18 @@ Execution time for the entire 4-case multimodal validation suite: **6.77 seconds
 
 ## 6. CLI Usage
 
-Generate embeddings for images and audio directly using the `glypr` CLI:
+Generate embeddings for images and audio directly using the `glypr` CLI with natural positional arguments:
 
 ```bash
-# 1. Image embedding with prompt query
-glypr --metal \
-  --model embeddinggemma-2-BF16.gguf \
-  --mmproj mmproj-embeddinggemma-2-BF16.gguf \
-  embed --image scene.png "Describe this picture"
+# 1. Image embedding with prompt query (auto-resolves mmproj, Metal device, and Flash attention)
+glypr embed "Describe this picture:" ./scene.png
 
 # 2. Audio embedding without prompt
-glypr --metal \
-  --model embeddinggemma-2-BF16.gguf \
-  --mmproj mmproj-embeddinggemma-2-BF16.gguf \
-  embed --audio recording.wav
+glypr embed ./recording.wav
 
 # 3. Audio embedding with prompt and Matryoshka dimension truncation (256d)
-glypr --metal \
-  --model embeddinggemma-2-BF16.gguf \
-  --mmproj mmproj-embeddinggemma-2-BF16.gguf \
-  embed --audio acoustic_guitar.wav "Acoustic instruments" --dim 256
+glypr embed "Acoustic instruments:" ./acoustic_guitar.wav --dim 256
+
+# 4. Custom vision budget (e.g. 140 tokens for native 480x680 card images, 280 default, 560 high-detail)
+glypr embed ./card.png --image-token-budget 140
 ```

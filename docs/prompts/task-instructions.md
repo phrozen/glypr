@@ -144,6 +144,18 @@ let dynamic_task = Task::from_name_and_title("CodeRetrieval", None);
 let doc_task = Task::from_name_and_title("Document", Some("main.rs"));
 ```
 
+### CLI Task Flag Usage (`glypr embed`)
+```bash
+# Asymmetric search query
+glypr embed "what is dark matter?" --task SearchQuery
+
+# Document with title conditioning
+glypr embed "Dark matter is a hypothetical form..." --task Document --title "Astrophysics Primer"
+
+# Code retrieval
+glypr embed "binary search implementation" --task CodeRetrieval
+```
+
 ---
 
 ## 5. Critical Rules & Common Pitfalls

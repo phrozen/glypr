@@ -42,6 +42,18 @@ A major capability in EmbeddingGemma 2 is the **configurable vision token budget
 * **Fine-Grained Visual Extraction:** Higher sequence lengths provide more expressive spatial representations for the transformer backbone to process, capturing small text labels, fine line graphs, and complex multi-object scenes.
 * **Throughput Optimization:** Lower sequence lengths drastically reduce transformer self-attention computations and memory allocation, allowing up to **~114 frames** to fit into a single forward pass.
 
+### Case Study: Trading Cards & Formatted Artwork (480x680 @ 140 vs 280 Tokens)
+When indexing large visual image catalogs such as trading cards (e.g. Magic: The Gathering 480x680 px):
+* **Native Grid Resolution:** Standard cards (480x680, aspect ratio ~0.706) project into $16 \times 16$ pixel patches ($30 \times 42 = 1,260$ raw patches). With $3 \times 3$ convolutional spatial pooling (stride 3), the resulting spatial grid maps to $10 \times 14 = 140$ soft tokens!
+* **140 Tokens (Verbatim Card Layout):** Budget `140` matches the downsampled aspect grid verbatim. It delivers 2x faster self-attention and doubles capacity in the context window while cleanly capturing the card art, frame, borders, color identity, and overarching semantic composition.
+* **280 Tokens (Default Fine Subtleties):** Allocates a higher density grid ($14 \times 20$), useful for capturing subtle micro-features such as expansion set symbols, rarity icons, collector card numbers, and fine artist credits.
+* **Hybrid Visual + Title Search Pattern:** In production card search, pairing the card image with title conditioning produces maximum separation against near-duplicate reprints:
+  ```bash
+  # CLI: Interleaved card title + image with 140-token budget
+  glypr embed "Card title: Black Lotus" ./black_lotus.png --image-token-budget 140 --task Document --title "Black Lotus"
+  ```
+
+
 ---
 
 ## 3. Audio & Video Sampling Protocols

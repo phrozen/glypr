@@ -236,11 +236,20 @@ embedder.attach_multimodal_projector("mmproj-embeddinggemma-2-Q8_0.gguf")?;
 ```
 
 ```bash
-# Via CLI:
-glypr --metal --model embeddinggemma-2-Q8_0.gguf embed "Single-file text embedding"
+# 1. Automatic resolution from Hugging Face cache (defaults to auto Metal GPU & BF16):
+glypr embed "Single-file text embedding"
 
-# With dynamic multimodal projector:
-glypr --metal --model embeddinggemma-2-Q8_0.gguf --mmproj mmproj-embeddinggemma-2-Q8_0.gguf embed "Multimodal query"
+# 2. Opt into Q8_0 weights with Matryoshka dimension truncation and JSON output:
+glypr --q8 embed "Single-file text embedding" --dim 256 -o json
+
+# 3. Interleaved multimodal with automatic mmproj resolution and attachment:
+glypr embed "Multimodal query:" ./image.png
+
+# 4. Explicit local file overrides (disables auto-downloading):
+glypr --model ./custom.gguf --mmproj ./custom-mmproj.gguf embed "Local model query"
+
+# 5. Launch high-throughput OpenAI-compatible HTTP embedding server:
+glypr serve --port 8080 --max-batch-size 32
 ```
 
 ---

@@ -171,6 +171,23 @@ let sim = cosine_similarity(&query_512, &doc_512);
 println!("Cosine Similarity (512d): {:.4}", sim);
 ```
 
+### Native Rust CLI & OpenAI-Compatible HTTP Serving Engine (`glypr`)
+
+```bash
+# 1. Pre-fetch canonical models into local Hugging Face cache
+glypr pull
+
+# 2. Inspect active device, cache, and attention backend
+glypr info
+
+# 3. Embed text or multimodal sequences (defaults to auto Metal GPU, BF16, and Metal Flash Attention)
+glypr embed "What is quantum mechanics?"
+glypr embed "Card illustration:" ./card.png --image-token-budget 140
+
+# 4. Launch high-throughput OpenAI-compatible HTTP server with dynamic batching
+glypr serve --port 8080 --max-batch-size 32
+```
+
 ---
 
 ## Critical Caveats & Engineering Lessons
