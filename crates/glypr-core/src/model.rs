@@ -396,6 +396,14 @@ impl EmbeddingGemma2Model {
         input_ids: &Tensor,
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
+        let (_batch, seq_len) = input_ids.dims2()?;
+        if seq_len > self.config.max_position_embeddings {
+            candle_core::bail!(
+                "Input sequence length ({}) exceeds model max_position_embeddings ({})",
+                seq_len,
+                self.config.max_position_embeddings
+            );
+        }
         let inputs_embeds = self.embed_tokens.forward(input_ids)?;
         let inputs_embeds = (inputs_embeds * self.embed_scale)?;
         self.forward_embeds(&inputs_embeds, attention_mask)
@@ -409,6 +417,13 @@ impl EmbeddingGemma2Model {
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         let (batch, seq_len, _hidden_size) = inputs_embeds.dims3()?;
+        if seq_len > self.config.max_position_embeddings {
+            candle_core::bail!(
+                "Input sequence length ({}) exceeds model max_position_embeddings ({})",
+                seq_len,
+                self.config.max_position_embeddings
+            );
+        }
 
         // 2. Per-layer embeddings: [batch, seq_len, 24, 512]
         // Compute unnormalized projections in BF16, then normalize slice on demand in layer loop

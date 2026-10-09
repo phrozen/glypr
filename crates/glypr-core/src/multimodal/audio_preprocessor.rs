@@ -207,3 +207,60 @@ pub fn preprocess_audio(samples: &[f32]) -> Result<ProcessedAudio> {
         num_mels: AUDIO_NUM_MELS,
     })
 }
+
+/// Compute exact number of soft tokens produced by Audio Tower from raw 16 kHz sample count in O(1).
+///
+/// EmbeddingGemma 2 Audio Tower pipeline:
+/// 1. Audio preprocessor pads 160 zeros at left, unpacks 321-sample frames with hop 160:
+///    num_frames = (pad_left + len - 321) / 160 + 1
+/// 2. AudioSubsampleConv runs two Conv2D layers with kernel=3, stride=2, padding=1:
+///    L1 = (num_frames + 1) / 2
+///    L2 = (L1 + 1) / 2
+/// Output soft tokens = L2
+pub fn compute_audio_soft_token_count(samples_len: usize) -> usize {
+    if samples_len == 0 {
+        return 0;
+    }
+    let pad_left = AUDIO_FRAME_LEN / 2; // 160
+    let total_len = pad_left + samples_len;
+    let len_padded = if total_len < 321 { 321 } else { total_len };
+    let num_frames = (len_padded - 321) / AUDIO_HOP_LEN + 1;
+    let l1 = (num_frames + 1) / 2;
+    (l1 + 1) / 2
+}
+
+/// Compute total tokens required for an audio input including framing tokens (<|audio> and <audio|>).
+pub fn compute_audio_total_tokens(samples_len: usize) -> usize {
+    if samples_len == 0 {
+        return 0;
+    }
+    compute_audio_soft_token_count(samples_len) + 2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_audio_soft_token_count_exactness() {
+        assert_eq!(compute_audio_soft_token_count(0), 0);
+        assert_eq!(compute_audio_total_tokens(0), 0);
+
+        // 1.0 second (16,000 samples) -> 25 soft tokens (+2 framing = 27)
+        assert_eq!(compute_audio_soft_token_count(16000), 25);
+        assert_eq!(compute_audio_total_tokens(16000), 27);
+
+        // 5.0 seconds (80,000 samples) -> 125 soft tokens (+2 framing = 127)
+        assert_eq!(compute_audio_soft_token_count(80000), 125);
+        assert_eq!(compute_audio_total_tokens(80000), 127);
+
+        // ~12.27 seconds (196,348 samples, lena_16k.wav) -> 307 soft tokens
+        assert_eq!(compute_audio_soft_token_count(196348), 307);
+        assert_eq!(compute_audio_total_tokens(196348), 309);
+
+        // ~12.68 seconds (202,915 samples, female_voice_16k.wav) -> 317 soft tokens
+        assert_eq!(compute_audio_soft_token_count(202915), 317);
+        assert_eq!(compute_audio_total_tokens(202915), 319);
+    }
+}
+

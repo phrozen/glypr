@@ -272,7 +272,10 @@ impl AudioAttention {
 
         // 3. matrix_ac
         let k_perm = k_ctx.permute((0, 3, 1, 4, 2))?.contiguous()?;
-        let matrix_ac = q_blocks.matmul(&k_perm)?; // [batch, num_heads, num_blocks, 12, 24]
+        let b_h_n = batch * self.num_heads * num_blocks;
+        let q_flat_ac = q_blocks.reshape((b_h_n, chunk_size, self.head_dim))?;
+        let k_flat_ac = k_perm.reshape((b_h_n, self.head_dim, 24))?;
+        let matrix_ac = q_flat_ac.matmul(&k_flat_ac)?.reshape((batch, self.num_heads, num_blocks, chunk_size, 24))?;
 
         // 4. matrix_bd (relative position bias)
         let rel_k = self.relative_k_proj.forward(rel_pos_emb)?.to_dtype(DType::F32)?;
@@ -316,7 +319,9 @@ impl AudioAttention {
 
         // 9. Multiply values
         let v_perm = v_ctx.permute((0, 3, 1, 2, 4))?.contiguous()?; // [batch, num_heads, num_blocks, 24, head_dim]
-        let attn_out = attn_probs.matmul(&v_perm)?; // [batch, num_heads, num_blocks, 12, head_dim]
+        let probs_flat = attn_probs.reshape((b_h_n, chunk_size, 24))?;
+        let v_flat = v_perm.reshape((b_h_n, 24, self.head_dim))?;
+        let attn_out = probs_flat.matmul(&v_flat)?.reshape((batch, self.num_heads, num_blocks, chunk_size, self.head_dim))?;
 
         // 10. Permute back, flatten blocks, slice [:seq_len], project out
         let attn_out = attn_out
