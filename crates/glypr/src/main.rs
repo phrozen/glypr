@@ -64,6 +64,20 @@ enum Commands {
         #[arg(short, long, default_value_t = 768)]
         dim: usize,
     },
+    /// Launch an OpenAI-compatible HTTP embedding server
+    Serve {
+        /// Host address to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port to listen on
+        #[arg(short, long, default_value_t = 8080)]
+        port: u16,
+
+        /// Maximum dynamic batch size
+        #[arg(long, default_value_t = 32)]
+        max_batch_size: usize,
+    },
 }
 
 enum ModelTarget {
@@ -185,6 +199,18 @@ fn main() -> Result<()> {
             }
             let sim = cosine_similarity(&vec1, &vec2);
             println!("Cosine Similarity ({}d): {:.6}", dim, sim);
+        }
+        Commands::Serve { host, port, max_batch_size } => {
+            let config = glypr_server::ServerConfig {
+                host,
+                port,
+                max_batch_size,
+                model_id: "embeddinggemma-2".to_string(),
+            };
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                glypr_server::run_server(config, embedder).await
+            })?;
         }
     }
 

@@ -2,6 +2,7 @@
 members = [
     "crates/glypr-core",
     "crates/glypr",
+    "crates/glypr-server",
 ]
 resolver = "2"
 
@@ -33,3 +34,10 @@ rayon = "1.12"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 hound = "3.5"
 hf-hub = "0.4"
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+base64 = "0.22"

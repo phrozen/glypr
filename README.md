@@ -54,6 +54,30 @@ cargo build --release -p glypr --features metal
 ./target/release/glypr --metal --model ./embeddinggemma-2-Q8_0.gguf --mmproj ./mmproj-embeddinggemma-2-Q8_0.gguf embed "Multimodal search"
 ```
 
+### 4. OpenAI-Compatible HTTP Serving Engine
+Launch a high-performance HTTP server with adaptive dynamic batching, MRL truncation, and quantization support:
+```bash
+# Start server listening on port 8080 with Metal acceleration
+./target/release/glypr --metal serve --port 8080 --max-batch-size 32
+```
+
+Query with standard OpenAI API clients or `curl`:
+```bash
+# Minimal request (defaults to model="embeddinggemma-2", dim=768, encoding_format="float", task="Raw")
+curl -X POST http://127.0.0.1:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Deep learning embeddings"}'
+
+# MRL truncation (256d) and fast zero-cost INT8 quantization:
+curl -X POST http://127.0.0.1:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Vector search engine", "dimensions": 256, "encoding_format": "int8"}'
+
+# Inspect models & health:
+curl http://127.0.0.1:8080/v1/models
+curl http://127.0.0.1:8080/health
+```
+
 ---
 
 ## Rust SDK API
