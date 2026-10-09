@@ -35,6 +35,15 @@ enum OutputArg {
     Raw,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+enum AttentionArg {
+    #[default]
+    Auto,
+    Flash,
+    Chunked,
+    Standard,
+}
+
 #[derive(Parser)]
 #[command(
     name = "glypr",
@@ -61,6 +70,10 @@ struct Cli {
     /// Hardware acceleration device: auto, metal, cpu
     #[arg(long, global = true, value_enum, default_value_t = DeviceArg::Auto)]
     device: DeviceArg,
+
+    /// Attention kernel implementation: auto (Flash on Metal, Chunked on CPU), flash, chunked, standard
+    #[arg(long, global = true, value_enum, default_value_t = AttentionArg::Auto)]
+    attention: AttentionArg,
 
     /// Legacy flag for Metal acceleration (alias for --device metal)
     #[arg(long, global = true, hide = true)]
@@ -211,6 +224,30 @@ fn resolve_device_and_dtype(device_arg: DeviceArg, legacy_metal: bool) -> Result
     }
 }
 
+fn resolve_attention_mode(arg: AttentionArg, device: &Device) -> Result<glypr_core::AttentionMode> {
+    match arg {
+        AttentionArg::Auto => {
+            #[cfg(feature = "metal")]
+            if device.is_metal() {
+                return Ok(glypr_core::AttentionMode::MetalFlash);
+            }
+            Ok(glypr_core::AttentionMode::ChunkedSliding)
+        }
+        AttentionArg::Flash => {
+            #[cfg(feature = "metal")]
+            if device.is_metal() {
+                return Ok(glypr_core::AttentionMode::MetalFlash);
+            }
+            anyhow::bail!(
+                "Flash attention requested but not supported on device {:?}. Flash attention requires Metal GPU (compiled with --features metal).",
+                device
+            );
+        }
+        AttentionArg::Chunked => Ok(glypr_core::AttentionMode::ChunkedSliding),
+        AttentionArg::Standard => Ok(glypr_core::AttentionMode::Standard),
+    }
+}
+
 enum OwnedInputItem {
     Text(String),
     Image(image::DynamicImage),
@@ -357,10 +394,12 @@ fn main() -> Result<()> {
         println!("Hardware & Backend:");
         if metal_avail {
             println!("  Device:             Apple Silicon Metal GPU (BF16)");
-            println!("  Attention Kernel:   Chunked Sliding Attention (Window: 1024)");
+            println!("  Attention Kernel:   Metal Flash Attention (Fused Hardware Tile-Skipping, Auto)");
+            println!("  Supported Kernels:  Flash (MetalFlash), Chunked (ChunkedSliding), Standard");
         } else {
-            println!("  Device:             CPU (F32)");
-            println!("  Attention Kernel:   Standard Sliding Attention (Window: 1024)");
+            println!("  Device:             CPU SIMD (FP32)");
+            println!("  Attention Kernel:   Chunked Sliding Attention (Window: 1024, Auto)");
+            println!("  Supported Kernels:  Chunked (ChunkedSliding), Standard");
         }
         println!("  Max Context Window: 8,320 tokens");
         println!();
@@ -381,7 +420,8 @@ fn main() -> Result<()> {
         ModelTarget::Gguf(path) => GlyprEmbedder::load_gguf(&path, &device, dtype)?,
         ModelTarget::Directory(dir) => GlyprEmbedder::load(&dir, &device, dtype)?,
     };
-    embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
+    let attn_mode = resolve_attention_mode(cli.attention, &device)?;
+    embedder.set_attention_mode(attn_mode);
 
     // Resolve Multimodal Projector
     let mmproj_override = cli.mmproj;

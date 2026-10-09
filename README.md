@@ -31,7 +31,7 @@ cargo build --release -p glypr --features metal
 cargo build --release -p glypr
 ```
 
-The CLI defaults to `--device auto` (Metal GPU on Apple Silicon, falling back to CPU SIMD) and **BF16** precision. Canonical models are resolved and cached automatically from `ggml-org/embeddinggemma-2-GGUF` respecting standard Hugging Face cache paths (`$HF_HOME`, `$HF_HUB_CACHE`).
+The CLI defaults to `--device auto` (Metal GPU on Apple Silicon, falling back to CPU SIMD), **BF16** precision, and `--attention auto` (automatically utilizing fused **Metal Flash Attention** on Apple Silicon GPU, falling back to **Chunked Sliding Attention** on CPU SIMD). Canonical models are resolved and cached automatically from `ggml-org/embeddinggemma-2-GGUF` respecting standard Hugging Face cache paths (`$HF_HOME`, `$HF_HUB_CACHE`).
 
 ### 1. Pre-Fetch / Cache Canonical GGUFs (`glypr pull`)
 ```bash
@@ -51,8 +51,11 @@ The CLI defaults to `--device auto` (Metal GPU on Apple Silicon, falling back to
 
 #### Text Embeddings
 ```bash
-# Default BF16, 768-dimensional normalized vector preview
+# Default BF16 + Auto Metal Flash Attention, 768-dimensional normalized vector preview
 ./target/release/glypr embed "What is quantum mechanics?"
+
+# Explicitly choose attention kernel: auto (default), flash, chunked, or standard
+./target/release/glypr --attention flash embed "Quantum mechanics"
 
 # Opt into Q8_0 precision with Matryoshka dimension truncation (256d) and JSON output
 ./target/release/glypr --q8 embed "What is quantum mechanics?" --dim 256 -o json

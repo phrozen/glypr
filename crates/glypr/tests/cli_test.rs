@@ -172,3 +172,39 @@ fn test_cli_embed_multimodal_interleaved() {
         .expect("Multimodal output should be valid JSON array of floats");
     assert_eq!(values.len(), 64);
 }
+
+#[test]
+fn test_cli_attention_modes() {
+    // 1. Explicit --attention chunked
+    let output_chunked = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args([
+            "--attention",
+            "chunked",
+            "embed",
+            "Attention mode chunked verification",
+            "--dim",
+            "32",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("Failed to execute glypr with --attention chunked");
+    assert!(output_chunked.status.success());
+
+    // 2. Explicit --attention flash
+    let output_flash = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args([
+            "--attention",
+            "flash",
+            "embed",
+            "Attention mode flash verification",
+            "--dim",
+            "32",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("Failed to execute glypr with --attention flash");
+    assert!(output_flash.status.success());
+}
+
