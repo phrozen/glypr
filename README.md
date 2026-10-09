@@ -24,11 +24,14 @@ It deploys from a **single self-contained `.gguf` file**—extracting all model 
 
 ### Installation / Build
 ```bash
-# Build CLI with Apple Silicon Metal GPU acceleration
-cargo build --release -p glypr --features metal
+# 1. Install globally to ~/.cargo/bin with Metal GPU acceleration (recommended):
+cargo install --path crates/glypr --features metal
 
-# Or standard universal CPU SIMD build
-cargo build --release -p glypr
+# Or install with universal CPU SIMD:
+cargo install --path crates/glypr
+
+# 2. Or build locally in-tree:
+cargo build --release -p glypr --features metal
 ```
 
 The CLI defaults to `--device auto` (Metal GPU on Apple Silicon, falling back to CPU SIMD), **BF16** precision, and `--attention auto` (automatically utilizing fused **Metal Flash Attention** on Apple Silicon GPU, falling back to **Chunked Sliding Attention** on CPU SIMD). Canonical models are resolved and cached automatically from `ggml-org/embeddinggemma-2-GGUF` respecting standard Hugging Face cache paths (`$HF_HOME`, `$HF_HUB_CACHE`).
