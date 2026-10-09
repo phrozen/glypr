@@ -14,7 +14,7 @@ fn standard_attention(
     let mut mask_vec = vec![0.0f32; s * s];
     for i in 0..s {
         for j in 0..s {
-            let diff = if i >= j { i - j } else { j - i };
+            let diff = i.abs_diff(j);
             if diff > window {
                 mask_vec[i * s + j] = -1e9f32;
             }
@@ -64,7 +64,7 @@ fn chunked_sliding_attention(
     }
 
     let chunk_size = window;
-    let num_chunks = (s + chunk_size - 1) / chunk_size;
+    let num_chunks = s.div_ceil(chunk_size);
 
     let mut out_chunks = Vec::with_capacity(num_chunks);
 
@@ -94,7 +94,7 @@ fn chunked_sliding_attention(
             let global_q = q_start + i;
             for j in 0..kv_len {
                 let global_k = kv_start + j;
-                let diff = if global_q >= global_k { global_q - global_k } else { global_k - global_q };
+                let diff = global_q.abs_diff(global_k);
                 if diff > window {
                     local_mask[i * kv_len + j] = -1e9f32;
                     has_masked = true;

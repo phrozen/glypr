@@ -192,7 +192,7 @@ async fn test_server_embeddings_quantization_formats() -> Result<()> {
     assert_eq!(ints.len(), 768);
     for val in ints {
         let i = val.as_i64().unwrap();
-        assert!(i >= -127 && i <= 127);
+        assert!((-127..=127).contains(&i));
     }
 
     // 3. Binary format (packed u64 bit bytes as base64 string)

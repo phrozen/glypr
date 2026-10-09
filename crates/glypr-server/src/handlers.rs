@@ -65,6 +65,7 @@ fn internal_error(message: impl Into<String>) -> (StatusCode, Json<ErrorResponse
 }
 
 /// Handler for `POST /v1/embeddings`.
+#[allow(clippy::result_large_err)]
 pub async fn handle_embeddings(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<EmbeddingRequest>,

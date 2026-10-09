@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
                 let mut mask_vec = vec![0.0f32; seq_len * seq_len];
                 for i in 0..seq_len {
                     for j in 0..seq_len {
-                        let diff = if i >= j { i - j } else { j - i };
+                        let diff = i.abs_diff(j);
                         if diff > window_size {
                             mask_vec[i * seq_len + j] = -1e9f32;
                         }
@@ -101,8 +101,8 @@ fn main() -> anyhow::Result<()> {
             let v_buf = match &*v_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
             let out_buf = match &*out_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
 
-            let nq = (seq_len + bq - 1) / bq;
-            let nk = (seq_len + bk - 1) / bk;
+            let nq = seq_len.div_ceil(bq);
+            let nk = seq_len.div_ceil(bk);
             let nq_aligned = seq_len / bq;
             let nk_aligned = seq_len / bk;
 

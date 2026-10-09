@@ -1,3 +1,4 @@
+#[allow(clippy::duplicated_attributes)]
 #[link(name = "Metal", kind = "framework")]
 #[link(name = "Foundation", kind = "framework")]
 extern "C" {
@@ -14,7 +15,7 @@ fn get_metal_allocated_bytes() -> u64 {
         if dev.is_null() {
             return 0;
         }
-        let sel = sel_registerName(b"currentAllocatedSize\0".as_ptr() as *const _);
+        let sel = sel_registerName(c"currentAllocatedSize".as_ptr());
         let size = objc_msgSend(dev, sel);
         size as u64
     }
