@@ -16,6 +16,7 @@ dependencies = [
     "sentence-transformers>=6.1.0",
     "torch>=2.14.1",
     "torchaudio>=2.11.0",
+    "torchcodec>=0.17.0",
     "torchvision>=0.29.1",
     "transformers>=4.49.0",
 ]
