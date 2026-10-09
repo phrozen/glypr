@@ -27,7 +27,10 @@ pub use multimodal::{
 };
 pub use profile::{ForwardProfile, LayerProfile, PipelineProfile};
 pub use task::Task;
-pub use util::{cosine_similarity, l2_normalize, truncate_mrl};
+pub use util::{
+    binary_cosine_similarity, cosine_similarity, hamming_distance, int8_cosine_similarity,
+    int8_dot_product, l2_normalize, quantize_binary, quantize_int8, truncate_mrl,
+};
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Module, Tensor};

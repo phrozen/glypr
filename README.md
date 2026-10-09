@@ -120,6 +120,34 @@ fn main() -> Result<()> {
 }
 ```
 
+### Vector Quantization & High-Throughput Search (`glypr::util`)
+
+`glypr` provides zero-cost functional quantization utilities over raw primitives (`&[f32]`, `&[u64]`, `&[i8]`):
+
+```rust
+use glypr_core::util::{
+    quantize_int8, int8_dot_product, int8_cosine_similarity,
+    quantize_binary, hamming_distance, binary_cosine_similarity,
+};
+
+// 1. Static INT8 (Zero-metadata, exactly D bytes/vec, 16.1x faster SIMD dot product)
+let q_int8 = quantize_int8(&query_vec); // Vec<i8> (768 bytes for 768d, mmap flat file ready)
+let sim_int8 = int8_cosine_similarity(&q_int8, &doc_int8); // 52.6 ns SIMD dot product
+
+// 2. Binary 1-bit (32x compression, 470x faster hardware POPCNT)
+let q_bin = quantize_binary(&query_vec)?; // Vec<u64> (96 bytes for 768d)
+let dist = hamming_distance(&q_bin, &doc_bin); // 1.80 ns POPCNT distance
+let sim_bin = binary_cosine_similarity(&q_bin, &doc_bin); // Charikar angular cosine
+```
+
+| Scheme | Dimension | Memory / 1M Vecs | Compute Latency | Throughput | Speedup vs Float32 | Accuracy ($\Delta$) |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Float32 Baseline** | 768d | 3,072 MB | 847.8 ns | 1.2 Mop/s | 1.00x | 0.0000 |
+| **Static INT8 Dot (SIMD)** | 768d | **768 MB** (4x comp) | **52.6 ns** | **19.0 Mop/s** | **16.10x** | $\le 0.0043$ |
+| **Binary POPCNT Hamming** | 768d | **96 MB** (32x comp) | **1.80 ns** | **555.4 Mop/s** | **470.87x** | $\le 0.1500$ |
+
+> 📖 **Deep Dive:** See [`docs/vector-optimization/quantization.md`](docs/vector-optimization/quantization.md) for 2-pass hierarchical KNN benchmarks and Turso's Block-Scaled Q8 (BSQ8) technical blueprint.
+
 ---
 
 ## Empirical Benchmark & Hardware Memory Scorecard

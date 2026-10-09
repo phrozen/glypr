@@ -34,7 +34,8 @@ docs/
 │   ├── leaderboards.md                    # MTEB/MMEB scores, competitor comparison, golden parity scorecard
 │   └── memory-and-vram.md                 # [NEW] Metal VRAM profiling, transient churn, Pareto trade-offs
 ├── vector-optimization/
-│   └── matryoshka-mrl.md                  # MRL dimension truncation (768d, 512d, 256d, 128d), L2 normalization
+│   ├── matryoshka-mrl.md                  # MRL dimension truncation (768d, 512d, 256d, 128d), L2 normalization
+│   └── quantization.md                    # [NEW] Static INT8, Binary 1-bit, 2-pass KNN, Turso BSQ8 blueprint
 ├── prompts/
 │   └── task-instructions.md               # Asymmetric & symmetric task prefixes, title formatting
 └── multimodal/
