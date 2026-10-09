@@ -224,24 +224,22 @@ fn resolve_device_and_dtype(device_arg: DeviceArg, legacy_metal: bool) -> Result
     }
 }
 
-fn resolve_attention_mode(arg: AttentionArg, device: &Device) -> Result<glypr_core::AttentionMode> {
+fn resolve_attention_mode(arg: AttentionArg, _device: &Device) -> Result<glypr_core::AttentionMode> {
     match arg {
         AttentionArg::Auto => {
             #[cfg(feature = "metal")]
-            if device.is_metal() {
+            if _device.is_metal() {
                 return Ok(glypr_core::AttentionMode::MetalFlash);
             }
             Ok(glypr_core::AttentionMode::ChunkedSliding)
         }
         AttentionArg::Flash => {
             #[cfg(feature = "metal")]
-            if device.is_metal() {
+            if _device.is_metal() {
                 return Ok(glypr_core::AttentionMode::MetalFlash);
             }
-            anyhow::bail!(
-                "Flash attention requested but not supported on device {:?}. Flash attention requires Metal GPU (compiled with --features metal).",
-                device
-            );
+            eprintln!("Warning: Flash attention requested but running on CPU. Falling back to Chunked Sliding Attention.");
+            Ok(glypr_core::AttentionMode::ChunkedSliding)
         }
         AttentionArg::Chunked => Ok(glypr_core::AttentionMode::ChunkedSliding),
         AttentionArg::Standard => Ok(glypr_core::AttentionMode::Standard),
