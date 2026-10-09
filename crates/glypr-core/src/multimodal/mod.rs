@@ -5,7 +5,30 @@ pub mod projector;
 pub mod vision;
 
 pub use audio::AudioTower;
-pub use audio_preprocessor::{preprocess_audio, ProcessedAudio};
-pub use image_preprocessor::{preprocess_image, ProcessedImage};
+pub use audio_preprocessor::{compute_audio_soft_token_count, compute_audio_total_tokens, preprocess_audio, ProcessedAudio};
+pub use image_preprocessor::{
+    compute_image_total_tokens, compute_soft_token_count, preprocess_image, validate_vision_budget,
+    ProcessedImage, VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH, VISION_BUDGET_LOW,
+    VISION_BUDGET_MAX, VISION_BUDGET_MEDIUM, VISION_BUDGET_MIN, VISION_BUDGET_ULTRA,
+};
 pub use projector::MultimodalProjector;
 pub use vision::VisionTower;
+
+/// An individual part in an ordered multimodal sequence (matching Python sentence-transformers list format).
+#[derive(Debug, Clone)]
+pub enum ModalityPart<'a> {
+    Text(&'a str),
+    Image {
+        image: &'a image::DynamicImage,
+        budget: Option<usize>,
+    },
+    Audio {
+        samples: &'a [f32],
+    },
+    VideoFrame {
+        frame: &'a image::DynamicImage,
+        budget: Option<usize>,
+    },
+}
+
+

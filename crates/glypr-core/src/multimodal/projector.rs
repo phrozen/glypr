@@ -67,15 +67,23 @@ impl MultimodalProjector {
         })
     }
 
-    /// Encode an image into soft tokens [num_soft_tokens, 512]
+    /// Encode an image into soft tokens [num_soft_tokens, 512] using default token budget (280)
     pub fn encode_image(&self, img: &DynamicImage) -> Result<(Tensor, usize)> {
+        let budget = self.vision_tower.as_ref()
+            .map(|t| t.config.default_output_length)
+            .unwrap_or(280);
+        self.encode_image_with_budget(img, budget)
+    }
+
+    /// Encode an image with a specific token budget (e.g. 70, 140, 280, 560, 1120) into soft tokens [num_soft_tokens, 512]
+    pub fn encode_image_with_budget(&self, img: &DynamicImage, budget: usize) -> Result<(Tensor, usize)> {
         let tower = self.vision_tower.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Vision Tower is not available in this multimodal projector")
         })?;
 
         let processed: ProcessedImage = preprocess_image(
             img,
-            tower.config.default_output_length,
+            budget,
             tower.config.patch_size,
             tower.config.pooling_kernel_size,
         )?;

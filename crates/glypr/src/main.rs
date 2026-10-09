@@ -1,7 +1,7 @@
 use anyhow::Result;
 use candle_core::{DType, Device};
 use clap::{Parser, Subcommand};
-use glypr_core::{cosine_similarity, GlyprEmbedder};
+use glypr_core::{cosine_similarity, truncate_mrl, GlyprEmbedder, Task};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -149,22 +149,23 @@ fn main() -> Result<()> {
                 Some(text.trim())
             };
 
-            let vec = if let Some(img_path) = image {
+            let mut vec = if let Some(img_path) = image {
                 let img = image::open(&img_path)
                     .map_err(|e| anyhow::anyhow!("Failed to open image {:?}: {}", img_path, e))?;
-                embedder.embed_image(&img, prompt, Some(dim))?
+                embedder.embed_image(&img, prompt)?
             } else if let Some(aud_path) = audio {
                 let mut reader = hound::WavReader::open(&aud_path)
                     .map_err(|e| anyhow::anyhow!("Failed to open WAV audio {:?}: {}", aud_path, e))?;
                 let samples: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / 32767.0).collect();
-                embedder.embed_audio(&samples, prompt, Some(dim))?
-            } else if let Some(t) = title {
-                embedder.embed_document(&text, Some(&t), Some(dim))?
-            } else if task == "Document" {
-                embedder.embed_document(&text, None, Some(dim))?
+                embedder.embed_audio(&samples, prompt)?
             } else {
-                embedder.embed_query(&text, &task, Some(dim))?
+                let task_enum = Task::from_name_and_title(&task, title.as_deref());
+                embedder.embed_text(&text, task_enum)?
             };
+
+            if dim < 768 {
+                vec = truncate_mrl(&vec, dim)?;
+            }
 
             println!("Embedding dimension: {}", vec.len());
             let preview = if vec.len() > 6 {
@@ -176,8 +177,12 @@ fn main() -> Result<()> {
             println!("Vector preview: {}", preview);
         }
         Commands::Sim { text1, text2, dim } => {
-            let vec1 = embedder.embed_query(&text1, "SearchQuery", Some(dim))?;
-            let vec2 = embedder.embed_document(&text2, None, Some(dim))?;
+            let mut vec1 = embedder.embed_text(&text1, Task::SearchQuery)?;
+            let mut vec2 = embedder.embed_text(&text2, Task::Document { title: None })?;
+            if dim < 768 {
+                vec1 = truncate_mrl(&vec1, dim)?;
+                vec2 = truncate_mrl(&vec2, dim)?;
+            }
             let sim = cosine_similarity(&vec1, &vec2);
             println!("Cosine Similarity ({}d): {:.6}", dim, sim);
         }

@@ -1,6 +1,29 @@
 use anyhow::{bail, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
 
+/// Standard discrete vision token budget operating points:
+pub const VISION_BUDGET_LOW: usize = 70;
+pub const VISION_BUDGET_MEDIUM: usize = 140;
+pub const VISION_BUDGET_DEFAULT: usize = 280;
+pub const VISION_BUDGET_HIGH: usize = 560;
+pub const VISION_BUDGET_ULTRA: usize = 1120;
+
+pub const VISION_BUDGET_MIN: usize = 16;
+pub const VISION_BUDGET_MAX: usize = 2048;
+
+/// Validate that a vision token budget is within supported bounds [16..2048]
+pub fn validate_vision_budget(budget: usize) -> Result<()> {
+    if budget < VISION_BUDGET_MIN || budget > VISION_BUDGET_MAX {
+        bail!(
+            "Vision token budget {} is out of supported range [{}..{}]",
+            budget,
+            VISION_BUDGET_MIN,
+            VISION_BUDGET_MAX
+        );
+    }
+    Ok(())
+}
+
 /// Processed image ready for Vision Tower encoding
 #[derive(Debug, Clone)]
 pub struct ProcessedImage {
@@ -77,6 +100,40 @@ pub fn get_aspect_ratio_preserving_size(
     Ok((target_height, target_width))
 }
 
+/// Calculate the exact number of soft tokens an image will produce for a given token budget
+pub fn compute_soft_token_count(
+    orig_width: usize,
+    orig_height: usize,
+    max_soft_tokens: usize,
+    patch_size: usize,
+    pooling_kernel_size: usize,
+) -> Result<usize> {
+    validate_vision_budget(max_soft_tokens)?;
+    let max_patches = max_soft_tokens * pooling_kernel_size * pooling_kernel_size;
+    let (target_height, target_width) = get_aspect_ratio_preserving_size(
+        orig_height,
+        orig_width,
+        patch_size,
+        max_patches,
+        pooling_kernel_size,
+    )?;
+    let patch_width = target_width / patch_size;
+    let patch_height = target_height / patch_size;
+    let num_patches = patch_width * patch_height;
+    let k_squared = pooling_kernel_size * pooling_kernel_size;
+    Ok(num_patches / k_squared)
+}
+
+/// Calculate the total number of tokens for an image including framing tokens (<|image> and <image|>)
+pub fn compute_image_total_tokens(
+    orig_width: usize,
+    orig_height: usize,
+    budget: usize,
+) -> Result<usize> {
+    let soft_tokens = compute_soft_token_count(orig_width, orig_height, budget, 16, 3)?;
+    Ok(soft_tokens + 2)
+}
+
 /// Preprocess image matching Google Gemma 4 Vision Image Processor
 pub fn preprocess_image(
     img: &DynamicImage,
@@ -84,6 +141,7 @@ pub fn preprocess_image(
     patch_size: usize,
     pooling_kernel_size: usize,
 ) -> Result<ProcessedImage> {
+    validate_vision_budget(max_soft_tokens)?;
     let (orig_width, orig_height) = img.dimensions();
     let max_patches = max_soft_tokens * pooling_kernel_size * pooling_kernel_size;
 

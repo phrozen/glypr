@@ -137,10 +137,12 @@ impl GlyprTokenizer {
         Ok(ids)
     }
 
-    /// Encode a batch of texts into padded [batch_size, max_seq_len] tensors with attention mask
-    pub fn encode_batch_padded(
+    /// Encode a batch of texts into padded [batch_size, max_seq_len] tensors with attention mask,
+    /// enforcing an optional upper limit on maximum sequence length.
+    pub fn encode_batch_padded_with_limit(
         &self,
         texts: &[&str],
+        max_limit: usize,
         device: &candle_core::Device,
     ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
         let batch_size = texts.len();
@@ -150,8 +152,16 @@ impl GlyprTokenizer {
 
         let mut all_ids = Vec::with_capacity(batch_size);
         let mut max_len = 0;
-        for &text in texts {
+        for (i, &text) in texts.iter().enumerate() {
             let ids = self.encode(text)?;
+            if ids.len() > max_limit {
+                anyhow::bail!(
+                    "Batch item {} sequence length ({} tokens) exceeds maximum context limit ({} tokens)",
+                    i,
+                    ids.len(),
+                    max_limit
+                );
+            }
             if ids.len() > max_len {
                 max_len = ids.len();
             }
@@ -173,6 +183,15 @@ impl GlyprTokenizer {
         let attention_mask = candle_core::Tensor::from_vec(attention_mask_vec, (batch_size, max_len), device)?;
 
         Ok((input_ids, attention_mask))
+    }
+
+    /// Encode a batch of texts into padded [batch_size, max_seq_len] tensors with attention mask
+    pub fn encode_batch_padded(
+        &self,
+        texts: &[&str],
+        device: &candle_core::Device,
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
+        self.encode_batch_padded_with_limit(texts, usize::MAX, device)
     }
 
     /// Construct token sequence for an image query:
@@ -230,6 +249,269 @@ impl GlyprTokenizer {
         tokens.push(TOKEN_EOS);
         Ok(tokens)
     }
+
+    /// Construct token sequence and slot map for an interleaved multimodal sequence:
+    /// Supports manual placeholder tags `<|image|>`, `<|audio|>`, `<|video|>` in prompt,
+    /// or prepends media placeholders if no manual tags are present.
+    /// Returns (token_ids, Vec<MediaSlot>).
+    pub fn encode_interleaved(
+        &self,
+        prompt: Option<&str>,
+        media_items: &[MediaPlaceholder],
+    ) -> Result<(Vec<u32>, Vec<MediaSlot>)> {
+        let mut tokens = Vec::new();
+        let mut slots = Vec::with_capacity(media_items.len());
+
+        tokens.push(TOKEN_BOS);
+
+        let prompt_text = prompt.unwrap_or("").trim();
+        let has_placeholders = prompt_text.contains("<|image|>")
+            || prompt_text.contains("<|audio|>")
+            || prompt_text.contains("<|video|>");
+
+        if has_placeholders {
+            let mut media_idx = 0;
+            let tags = ["<|image|>", "<|audio|>", "<|video|>"];
+
+            let mut remaining = prompt_text;
+            while !remaining.is_empty() {
+                let mut earliest_pos = None;
+                let mut found_tag = "";
+
+                for tag in &tags {
+                    if let Some(pos) = remaining.find(tag) {
+                        if earliest_pos.map_or(true, |p| pos < p) {
+                            earliest_pos = Some(pos);
+                            found_tag = tag;
+                        }
+                    }
+                }
+
+                if let Some(pos) = earliest_pos {
+                    let prefix = &remaining[..pos];
+                    if !prefix.is_empty() {
+                        let enc = self
+                            .tokenizer
+                            .encode(prefix, false)
+                            .map_err(|e| anyhow::anyhow!("Encode prefix error: {}", e))?;
+                        tokens.extend(enc.get_ids());
+                    }
+
+                    if media_idx < media_items.len() {
+                        match &media_items[media_idx] {
+                            MediaPlaceholder::Image { num_soft_tokens } => {
+                                tokens.push(TOKEN_BOI);
+                                let slot_start = tokens.len();
+                                for _ in 0..*num_soft_tokens {
+                                    tokens.push(TOKEN_IMAGE);
+                                }
+                                tokens.push(TOKEN_EOI);
+                                slots.push(MediaSlot {
+                                    start_idx: slot_start,
+                                    length: *num_soft_tokens,
+                                });
+                            }
+                            MediaPlaceholder::Audio { num_soft_tokens } => {
+                                tokens.push(TOKEN_BOA);
+                                let slot_start = tokens.len();
+                                for _ in 0..*num_soft_tokens {
+                                    tokens.push(TOKEN_AUDIO);
+                                }
+                                tokens.push(TOKEN_EOA);
+                                slots.push(MediaSlot {
+                                    start_idx: slot_start,
+                                    length: *num_soft_tokens,
+                                });
+                            }
+                            MediaPlaceholder::Video { num_frames, soft_tokens_per_frame } => {
+                                for _ in 0..*num_frames {
+                                    tokens.push(TOKEN_BOI);
+                                    let slot_start = tokens.len();
+                                    for _ in 0..*soft_tokens_per_frame {
+                                        tokens.push(TOKEN_VIDEO);
+                                    }
+                                    tokens.push(TOKEN_EOI);
+                                    slots.push(MediaSlot {
+                                        start_idx: slot_start,
+                                        length: *soft_tokens_per_frame,
+                                    });
+                                }
+                            }
+                        }
+                        media_idx += 1;
+                    }
+
+                    remaining = &remaining[pos + found_tag.len()..];
+                } else {
+                    let enc = self
+                        .tokenizer
+                        .encode(remaining, false)
+                        .map_err(|e| anyhow::anyhow!("Encode text error: {}", e))?;
+                    tokens.extend(enc.get_ids());
+                    break;
+                }
+            }
+        } else {
+            for item in media_items {
+                match item {
+                    MediaPlaceholder::Image { num_soft_tokens } => {
+                        tokens.push(TOKEN_BOI);
+                        let slot_start = tokens.len();
+                        for _ in 0..*num_soft_tokens {
+                            tokens.push(TOKEN_IMAGE);
+                        }
+                        tokens.push(TOKEN_EOI);
+                        slots.push(MediaSlot {
+                            start_idx: slot_start,
+                            length: *num_soft_tokens,
+                        });
+                    }
+                    MediaPlaceholder::Audio { num_soft_tokens } => {
+                        tokens.push(TOKEN_BOA);
+                        let slot_start = tokens.len();
+                        for _ in 0..*num_soft_tokens {
+                            tokens.push(TOKEN_AUDIO);
+                        }
+                        tokens.push(TOKEN_EOA);
+                        slots.push(MediaSlot {
+                            start_idx: slot_start,
+                            length: *num_soft_tokens,
+                        });
+                    }
+                    MediaPlaceholder::Video { num_frames, soft_tokens_per_frame } => {
+                        for _ in 0..*num_frames {
+                            tokens.push(TOKEN_BOI);
+                            let slot_start = tokens.len();
+                            for _ in 0..*soft_tokens_per_frame {
+                                tokens.push(TOKEN_VIDEO);
+                            }
+                            tokens.push(TOKEN_EOI);
+                            slots.push(MediaSlot {
+                                start_idx: slot_start,
+                                length: *soft_tokens_per_frame,
+                            });
+                        }
+                    }
+                }
+            }
+
+            if !prompt_text.is_empty() {
+                let enc = self
+                    .tokenizer
+                    .encode(prompt_text, false)
+                    .map_err(|e| anyhow::anyhow!("Encode prompt error: {}", e))?;
+                tokens.extend(enc.get_ids());
+            }
+        }
+
+        tokens.push(TOKEN_EOS);
+        Ok((tokens, slots))
+    }
+
+    /// Encode an ordered sequence of ModalityPart items with an optional Task prompt.
+    /// Returns (token_ids, Vec<MediaSlot>).
+    pub fn encode_modality_sequence(
+        &self,
+        parts: &[crate::multimodal::ModalityPart],
+        task: crate::task::Task,
+    ) -> Result<(Vec<u32>, Vec<MediaSlot>)> {
+        let mut tokens = Vec::new();
+        let mut slots = Vec::new();
+
+        tokens.push(TOKEN_BOS);
+
+        // Prepend task prompt prefix if present
+        if let Some(prefix) = task.prompt_prefix() {
+            let enc = self
+                .tokenizer
+                .encode(prefix.as_str(), false)
+                .map_err(|e| anyhow::anyhow!("Encode task prefix error: {}", e))?;
+            tokens.extend(enc.get_ids());
+        }
+
+        for part in parts {
+            match part {
+                crate::multimodal::ModalityPart::Text(s) => {
+                    if !s.is_empty() {
+                        let enc = self
+                            .tokenizer
+                            .encode(*s, false)
+                            .map_err(|e| anyhow::anyhow!("Encode text part error: {}", e))?;
+                        tokens.extend(enc.get_ids());
+                    }
+                }
+                crate::multimodal::ModalityPart::Image { image, budget } => {
+                    let b = budget.unwrap_or(crate::multimodal::VISION_BUDGET_DEFAULT);
+                    let n_tokens = crate::multimodal::compute_soft_token_count(
+                        image.width() as usize,
+                        image.height() as usize,
+                        b,
+                        16,
+                        3,
+                    )?;
+                    tokens.push(TOKEN_BOI);
+                    let slot_start = tokens.len();
+                    for _ in 0..n_tokens {
+                        tokens.push(TOKEN_IMAGE);
+                    }
+                    tokens.push(TOKEN_EOI);
+                    slots.push(MediaSlot {
+                        start_idx: slot_start,
+                        length: n_tokens,
+                    });
+                }
+                crate::multimodal::ModalityPart::Audio { samples } => {
+                    let n_tokens = crate::multimodal::compute_audio_soft_token_count(samples.len());
+                    tokens.push(TOKEN_BOA);
+                    let slot_start = tokens.len();
+                    for _ in 0..n_tokens {
+                        tokens.push(TOKEN_AUDIO);
+                    }
+                    tokens.push(TOKEN_EOA);
+                    slots.push(MediaSlot {
+                        start_idx: slot_start,
+                        length: n_tokens,
+                    });
+                }
+                crate::multimodal::ModalityPart::VideoFrame { frame, budget } => {
+                    let b = budget.unwrap_or(crate::multimodal::VISION_BUDGET_MEDIUM);
+                    let n_tokens = crate::multimodal::compute_soft_token_count(
+                        frame.width() as usize,
+                        frame.height() as usize,
+                        b,
+                        16,
+                        3,
+                    )?;
+                    tokens.push(TOKEN_BOI);
+                    let slot_start = tokens.len();
+                    for _ in 0..n_tokens {
+                        tokens.push(TOKEN_VIDEO);
+                    }
+                    tokens.push(TOKEN_EOI);
+                    slots.push(MediaSlot {
+                        start_idx: slot_start,
+                        length: n_tokens,
+                    });
+                }
+            }
+        }
+
+        tokens.push(TOKEN_EOS);
+        Ok((tokens, slots))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum MediaPlaceholder {
+    Image { num_soft_tokens: usize },
+    Audio { num_soft_tokens: usize },
+    Video { num_frames: usize, soft_tokens_per_frame: usize },
+}
+
+#[derive(Debug, Clone)]
+pub struct MediaSlot {
+    pub start_idx: usize,
+    pub length: usize,
 }
 
 pub const TOKEN_PAD: u32 = 0;
@@ -241,4 +523,5 @@ pub const TOKEN_IMAGE: u32 = 258880;
 pub const TOKEN_AUDIO: u32 = 258881;
 pub const TOKEN_EOI: u32 = 258882;
 pub const TOKEN_EOA: u32 = 258883;
+pub const TOKEN_VIDEO: u32 = 258884;
 
