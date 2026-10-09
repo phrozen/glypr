@@ -136,7 +136,10 @@ High-performance, zero-overhead Rust inference on Apple Silicon Metal and Linux/
 
 ```rust
 use candle_core::Device;
-use glypr_core::{GlyprEmbedder, AttentionMode};
+use glypr_core::{
+    cosine_similarity, truncate_mrl, AttentionMode, GlyprEmbedder, ModalityPart, Task,
+    VISION_BUDGET_DEFAULT,
+};
 
 // Initialize Metal GPU device (or Device::Cpu with pulp SIMD acceleration)
 let device = Device::new_metal(0)?;
@@ -147,19 +150,24 @@ let mut embedder = GlyprEmbedder::load_gguf_q8("embeddinggemma-2-Q8_0.gguf", &de
 // Enable hardware-fused Metal FlashAttention (zero-copy GQA, 868 ms @ 8k tokens, beats PyTorch MPS)
 embedder.set_attention_mode(AttentionMode::MetalFlash);
 
-// Embed query with asymmetric task conditioning and 512d MRL truncation
-let query_vec = embedder.embed_query(
+// 1. Embed query with strongly-typed Task conditioning (returns native 768d vector)
+let query_vec = embedder.embed_text(
     "Fast inverse square root algorithm",
-    "CodeRetrieval",
-    Some(512), // Truncate to 512d with automatic L2 normalization
+    Task::CodeRetrieval,
 )?;
 
-// Embed document passage
-let doc_vec = embedder.embed_document(
+// 2. Embed document passage with optional title conditioning
+let doc_vec = embedder.embed_text(
     "float Q_rsqrt(float number) { long i; ... }",
-    Some("Q_rsqrt.c"),
-    Some(512),
+    Task::Document { title: Some("Q_rsqrt.c") },
 )?;
+
+// 3. Truncate to 512d with O(K) L2 re-normalization via dedicated util module
+let query_512 = truncate_mrl(&query_vec, 512)?;
+let doc_512 = truncate_mrl(&doc_vec, 512)?;
+
+let sim = cosine_similarity(&query_512, &doc_512);
+println!("Cosine Similarity (512d): {:.4}", sim);
 ```
 
 ---

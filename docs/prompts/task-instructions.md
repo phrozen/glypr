@@ -81,8 +81,8 @@ doc_vec = model.encode(code_snippet)
 print("Code Match Score:", model.similarity(query_vec, doc_vec).item())
 
 # Native Rust (glypr-core):
-let query_vec = embedder.embed_query(code_query, "CodeRetrieval", None)?;
-let doc_vec = embedder.embed_document(code_body, Some("src/io/reader.rs"), None)?;
+let query_vec = embedder.embed_text(code_query, Task::CodeRetrieval)?;
+let doc_vec = embedder.embed_text(code_body, Task::Document { title: Some("src/io/reader.rs") })?;
 ```
 
 ---
@@ -106,7 +106,47 @@ print("Similarity between 0 and 2:", similarity_matrix[0, 2].item())  # Low
 
 ---
 
-## 4. Critical Rules & Common Pitfalls
+## 4. Native Rust Engine (`glypr-core`) Unified Task API
+
+`glypr-core` replaces fragmented string parameters with a strongly-typed, compile-time verified [`Task<'a>`](crates/glypr-core/src/task.rs) enum that automates prefix formatting and title conditioning:
+
+```rust
+use glypr_core::{GlyprEmbedder, Task};
+
+// 1. Asymmetric Search Query ("task: search result | query: {query}")
+let q_emb = embedder.embed_text("what is dark matter?", Task::SearchQuery)?;
+
+// 2. Document with Title ("title: {title} | text: {content}")
+let doc_titled = embedder.embed_text(
+    "Dark matter is a hypothetical form of matter...",
+    Task::Document { title: Some("Astrophysics Primer") },
+)?;
+
+// 3. Document without Title ("title: none | text: {content}")
+let doc_untitled = embedder.embed_text(
+    "Unidentified gravitational anomalies in galaxy clusters...",
+    Task::Document { title: None },
+)?;
+
+// 4. Code Retrieval ("task: code retrieval | query: {query}")
+let code_q = embedder.embed_text("binary search implementation", Task::CodeRetrieval)?;
+
+// 5. Symmetric Tasks
+let cls_emb = embedder.embed_text("Urgent security alert", Task::Classification)?;
+let sim_emb = embedder.embed_text("Paraphrase sentence", Task::SentenceSimilarity)?;
+let fact_emb = embedder.embed_text("Atmospheric CO2 levels", Task::FactChecking)?;
+
+// 6. Raw / Unconditioned Text (No prefix)
+let raw_emb = embedder.embed_text("Standalone representation", Task::Raw)?;
+
+// 7. Dynamic Construction from CLI / Configuration Strings
+let dynamic_task = Task::from_name_and_title("CodeRetrieval", None);
+let doc_task = Task::from_name_and_title("Document", Some("main.rs"));
+```
+
+---
+
+## 5. Critical Rules & Common Pitfalls
 
 ### ⚠️ Gotcha 1: The `prompt_name="Document"` Trap
 * In `sentence-transformers`, calling `model.encode(text, prompt_name="Document")` automatically prefixes the text with `title: none | text: {text}`.

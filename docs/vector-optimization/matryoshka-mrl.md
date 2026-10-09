@@ -60,10 +60,13 @@ vec = model.encode(
     normalize_embeddings=True,  # Handles L2 normalization automatically
 )
 
-// In glypr-core (Rust): Pass Some(truncate_dim)
-// Slicing and float32 L2 normalization are executed automatically on the tensor
-let vec = embedder.embed_query("sample text", "SearchQuery", Some(512))?;
-assert_eq!(vec.len(), 512);
+// In glypr-core (Rust): Engine returns native 768d unit vectors.
+// Slice and re-normalize in O(K) using the dedicated glypr_core::util module:
+use glypr_core::{truncate_mrl, Task};
+
+let raw_768 = embedder.embed_text("sample text", Task::SearchQuery)?;
+let vec_512 = truncate_mrl(&raw_768, 512)?;
+assert_eq!(vec_512.len(), 512);
 ```
 
 ### ⚠️ Rule 2: Dimension Matching
@@ -115,3 +118,47 @@ top_100_vectors = corpus_embeddings[top_100_idx]
 fine_scores = np.dot(top_100_vectors, query_emb)
 final_top_10 = top_100_idx[np.argsort(fine_scores)[-10:]]
 ```
+
+### Rust Implementation (`glypr-core`):
+
+```rust
+use anyhow::Result;
+use glypr_core::{cosine_similarity, truncate_mrl, GlyprEmbedder, Task};
+
+fn two_stage_search(
+    query_768: &[f32],
+    corpus_768: &[Vec<f32>],
+    top_k: usize,
+) -> Result<Vec<(usize, f32)>> {
+    // 1. Slice query to coarse 128d
+    let q_128 = truncate_mrl(query_768, 128)?;
+
+    // 2. Coarse Stage: Scan corpus with 128d dot product
+    let mut coarse_scored: Vec<(usize, f32)> = corpus_768
+        .iter()
+        .enumerate()
+        .map(|(idx, doc)| {
+            let doc_128 = truncate_mrl(doc, 128).unwrap();
+            let score = cosine_similarity(&q_128, &doc_128);
+            (idx, score)
+        })
+        .collect();
+
+    coarse_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let candidates = &coarse_scored[..coarse_scored.len().min(100)];
+
+    // 3. Fine Stage: Re-rank top 100 with full 768d (or 512d) precision
+    let mut fine_scored: Vec<(usize, f32)> = candidates
+        .iter()
+        .map(|&(idx, _)| {
+            let score = cosine_similarity(query_768, &corpus_768[idx]);
+            (idx, score)
+        })
+        .collect();
+
+    fine_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    fine_scored.truncate(top_k);
+    Ok(fine_scored)
+}
+```
+

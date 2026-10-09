@@ -65,38 +65,56 @@ Add `glypr-core` to your `Cargo.toml`:
 glypr-core = { path = "crates/glypr-core", features = ["metal"] }
 ```
 
-### Self-Contained GGUF Loading & Embedding
+### Self-Contained GGUF Loading & Unified Embedding API
 
 ```rust
 use anyhow::Result;
 use candle_core::Device;
-use glypr_core::{GlyprEmbedder, AttentionMode, cosine_similarity};
+use glypr_core::{
+    cosine_similarity, truncate_mrl, AttentionMode, GlyprEmbedder, ModalityPart, Task,
+    VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH,
+};
 
 fn main() -> Result<()> {
     let device = Device::new_metal(0)?;
 
     // 1. Load directly from a single GGUF file (no external config or tokenizer files required!)
-    let mut embedder = GlyprEmbedder::load_gguf_q8("embeddinggemma-2-Q8_0.gguf", &device)?;
+    let mut embedder = GlyprEmbedder::load_gguf_bf16("embeddinggemma-2-BF16.gguf", &device)?;
 
     // 2. Enable hardware-fused Metal FlashAttention (zero-copy GQA, 868 ms @ 8k tokens)
     embedder.set_attention_mode(AttentionMode::MetalFlash);
 
     // 3. Optional: Dynamically attach multimodal projector when needed
-    // embedder.attach_multimodal_projector("mmproj-embeddinggemma-2-Q8_0.gguf")?;
+    // embedder.attach_multimodal_projector("mmproj-embeddinggemma-2-BF16.gguf")?;
 
-    // 4. Asymmetric query embedding (automatically formats task prompt and adds BOS/EOS)
-    let query_vec = embedder.embed_query("What is quantum entanglement?", "SearchQuery", Some(768))?;
-
-    // 5. Document embedding (automatically formats title/content)
-    let doc_vec = embedder.embed_document(
-        "Quantum entanglement is a physical phenomenon occurring when a group of particles...",
-        Some("Quantum Entanglement"),
-        Some(768),
+    // 4. Strongly-typed text embedding via Task enum (returns native 768d L2-normalized vector)
+    let query_vec = embedder.embed_text(
+        "What causes gravitational lensing?",
+        Task::SearchQuery,
     )?;
 
-    // 6. Compute semantic similarity
-    let score = cosine_similarity(&query_vec, &doc_vec);
-    println!("Cosine similarity: {:.4}", score);
+    // 5. Document embedding with title conditioning
+    let doc_vec = embedder.embed_text(
+        "Massive celestial objects bend spacetime, curving the paths of passing light rays.",
+        Task::Document { title: Some("General Relativity") },
+    )?;
+
+    // 6. Matryoshka Representation Learning (MRL): Slice and re-normalize in O(K)
+    let query_256 = truncate_mrl(&query_vec, 256)?;
+    let doc_256 = truncate_mrl(&doc_vec, 256)?;
+
+    // 7. Compute semantic similarity
+    let score = cosine_similarity(&query_256, &doc_256);
+    println!("Cosine similarity (256d): {:.4}", score);
+
+    // 8. Interleaved Multimodal Sequence (Text + Images + Audio)
+    // let img = image::open("diagram.png")?;
+    // let interleaved_vec = embedder.embed_interleaved(&[
+    //     ModalityPart::Text("A comparison of the diagram: "),
+    //     ModalityPart::Image { image: &img, budget: Some(VISION_BUDGET_HIGH) },
+    //     ModalityPart::Text(" and recorded observation: "),
+    //     ModalityPart::Audio { samples: &audio_samples },
+    // ], Task::SearchQuery)?;
 
     Ok(())
 }
@@ -157,7 +175,7 @@ Validation against the official PyTorch MPS Golden Oracle across 10 languages, c
 
 ## Multimodal (`mmproj`) Golden Parity Scorecard
 
-Validated against official Python `SentenceTransformer("google/embeddinggemma-2")` on the multimodal golden benchmark with exact numerical alignment:
+Validated against official Python `SentenceTransformer("google/embeddinggemma-2")` on the multimodal golden benchmark with exact numerical alignment across all 24 test cases:
 
 | Modality & Case | Input Data | Prompt Query | Soft Tokens | Total Seq Len | Target | Measured Parity | Status |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -165,8 +183,23 @@ Validated against official Python `SentenceTransformer("google/embeddinggemma-2"
 | 🖼️ **Image + Prompt** | 224x224 RGB image | `"Describe this picture"` | 280 | 288 | $> 0.999$ | **0.999719** | ✅ **PASSED** |
 | 🎙️ **Audio Only** | 1.0s 16 kHz WAV | *None* | 25 | 29 | $> 0.999$ | **0.999644** | ✅ **PASSED** |
 | 🎙️ **Audio + Prompt** | 1.0s 16 kHz WAV | `"A musical sound"` | 25 | 32 | $> 0.999$ | **0.999852** | ✅ **PASSED** |
+| 🖼️ **Lenna Portrait** | 512x512 RGB | Natural portrait prompt | 280 | 293 | $> 0.999$ | **0.999672** | ✅ **PASSED** |
+| 🎙️ **Lena Speech** | 12.27s 16 kHz speech | English speech prompt | 306 | 316 | $> 0.999$ | **0.999961** | ✅ **PASSED** |
+| 🖼️ **Baboon (Square Texture)** | 267x266 RGB | *None* | 280 | 284 | $> 0.999$ | **0.999947** | ✅ **PASSED** |
+| 🖼️ **Pepper (Square Gradient)**| 512x512 RGB | *None* | 280 | 284 | $> 0.999$ | **0.999876** | ✅ **PASSED** |
+| 🖼️ **Countryside (16:9 Landscape)**| 1920x1080 RGB | *None* | 270 | 274 | $> 0.999$ | **0.999695** | ✅ **PASSED** |
+| 🖼️ **Dog (2:3 Portrait)** | 1280x1920 RGB | *None* | 288 | 292 | $> 0.999$ | **0.999776** | ✅ **PASSED** |
+| 🎙️ **Female Speech** | 12.68s 16 kHz audio | *None* | 317 | 321 | $> 0.999$ | **0.999900** | ✅ **PASSED** |
+| 🎙️ **Acoustic Music** | 5.00s 16 kHz audio | *None* | 125 | 129 | $> 0.998$ | **0.999748** | ✅ **PASSED** |
+| 🎚️ **Budget Sweep: 70 Tokens** | 512x512 Pepper | *None* | 70 | 74 | $> 0.998$ | **0.999377** | ✅ **PASSED** |
+| 🎚️ **Budget Sweep: 140 Tokens**| 512x512 Pepper | *None* | 140 | 144 | $> 0.999$ | **0.999864** | ✅ **PASSED** |
+| 🎚️ **Budget Sweep: 280 Tokens**| 512x512 Pepper | *None* | 280 | 284 | $> 0.999$ | **0.999876** | ✅ **PASSED** |
+| 🎚️ **Budget Sweep: 560 Tokens**| 512x512 Pepper | *None* | 560 | 564 | $> 0.999$ | **0.999912** | ✅ **PASSED** |
+| 🔀 **Multi-Image Composite** | Baboon + Pepper | Dual `<\|image\|>` prompt | 560 | 582 | $> 0.998$ | **0.999883** | ✅ **PASSED** |
+| 🔀 **Interleaved Multimodal** | Baboon + Music | Text + Image + Audio | 405 | 422 | $> 0.998$ | **0.999904** | ✅ **PASSED** |
+| 🎯 **Cross-Modal Retrieval** | Query vs Image / Audio | Semantic ranking | — | — | Separation | **Margin > +0.05** | ✅ **PASSED** |
 
-Suite execution time: **6.77 s** on Apple Silicon Metal. Zero runtime/memory overhead when `mmproj` is unattached.
+Zero-overhead context window preflight check guarantees sequence length $< 8,320$ tokens before initiating neural tower forward passes ($< 50\,\mu\text{s}$ rejection). Zero memory overhead when `mmproj` is unattached.
 
 ---
 

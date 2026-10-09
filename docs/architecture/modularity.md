@@ -164,7 +164,20 @@ To keep text-only deployments minimal (only 295 MB for Q8_0), vision and audio p
 // 1. Text embedding runs standalone from a 295 MB Q8_0 container
 let mut embedder = GlyprEmbedder::load_gguf_q8("embeddinggemma-2-Q8_0.gguf", &device)?;
 
+// Pure text/code queries run with zero multimodal memory overhead
+let text_vec = embedder.embed_text("fn main() {}", Task::CodeRetrieval)?;
+
 // 2. Attach vision/audio projector on demand when multimodal search is needed
 embedder.attach_multimodal_projector("mmproj-embeddinggemma-2-Q8_0.gguf")?;
+
+// Encode images with discrete budget (or default 280 tokens)
+let img_vec = embedder.embed_image(&img, Some("Diagram description"))?;
+
+// Encode interleaved mixed sequences (Text + Image + Audio)
+let interleaved_vec = embedder.embed_interleaved(&[
+    ModalityPart::Text("Diagram: "),
+    ModalityPart::Image { image: &img, budget: Some(VISION_BUDGET_DEFAULT) },
+    ModalityPart::Audio { samples: &audio_samples },
+], Task::SearchQuery)?;
 ```
 This guarantees zero memory overhead when processing text/code, while enabling seamless runtime upgrading to full multimodal search.
