@@ -77,13 +77,16 @@ fn main() -> Result<()> {
     println!("\n--- Running Sequential Embedding on all {} cards (Budget 140) ---", card_paths.len());
     let t_start = Instant::now();
     let mut latencies = Vec::with_capacity(card_paths.len());
+    let mut sequential_vectors = Vec::with_capacity(card_paths.len());
 
     for (i, p) in card_paths.iter().enumerate() {
         let t_card = Instant::now();
         let img = image::open(p)?;
-        let _vec = embedder.embed_image_with_budget(&img, None, VISION_BUDGET_MEDIUM)?;
+        let vec = embedder.embed_image_with_budget(&img, None, VISION_BUDGET_MEDIUM)?;
         let dur = t_card.elapsed().as_secs_f64() * 1000.0;
         latencies.push(dur);
+        sequential_vectors.push(vec);
+
 
         if (i + 1) % 8 == 0 || i + 1 == card_paths.len() {
             println!(
@@ -112,5 +115,85 @@ fn main() -> Result<()> {
     println!("  Final Peak RSS:   {:.2} MB", get_peak_rss_mb());
     println!("============================================================");
 
+    // Pre-decode all 32 images into memory
+    println!("\nLoading and pre-decoding all 32 images for batched runs...");
+    let loaded_images: Vec<image::DynamicImage> = card_paths
+        .iter()
+        .map(|p| image::open(p).unwrap())
+        .collect();
+
+    println!("\n--- Running Batched Embeddings (embed_batch, Budget 140, ChunkedSliding) ---");
+    for &batch_size in &[4, 8, 16, 32] {
+        let subset = &loaded_images[..batch_size];
+        let inputs: Vec<glypr_core::MultimodalInput> = subset
+            .iter()
+            .map(|img| glypr_core::MultimodalInput::image(img, Some(VISION_BUDGET_MEDIUM), glypr_core::Task::Raw))
+            .collect();
+
+        let t_batch = Instant::now();
+        let batched_vectors = embedder.embed_batch(&inputs, None)?;
+        let batch_ms = t_batch.elapsed().as_secs_f64() * 1000.0;
+        let batch_throughput = batch_size as f64 / (batch_ms / 1000.0);
+
+        // Parity check against sequential
+        let mut min_sim = 1.0f32;
+        for (i, vec) in batched_vectors.iter().enumerate() {
+            let sim = glypr_core::cosine_similarity(&sequential_vectors[i], vec);
+            if sim < min_sim {
+                min_sim = sim;
+            }
+        }
+
+        println!(
+            "  Batch Size {:2} -> {:6.2} ms total ({:6.2} ms/card) | {:6.2} cards/sec | Min Sim: {:.6} | VRAM: {:6.2} MB | RSS: {:6.2} MB",
+            batch_size,
+            batch_ms,
+            batch_ms / batch_size as f64,
+            batch_throughput,
+            min_sim,
+            get_metal_allocated_mb(),
+            get_peak_rss_mb()
+        );
+    }
+
+    #[cfg(feature = "metal")]
+    {
+        println!("\n--- Running Batched Embeddings (embed_batch, Budget 140, MetalFlash) ---");
+        embedder.set_attention_mode(glypr_core::attention::AttentionMode::MetalFlash);
+        for &batch_size in &[4, 8, 16, 32] {
+            let subset = &loaded_images[..batch_size];
+            let inputs: Vec<glypr_core::MultimodalInput> = subset
+                .iter()
+                .map(|img| glypr_core::MultimodalInput::image(img, Some(VISION_BUDGET_MEDIUM), glypr_core::Task::Raw))
+                .collect();
+
+            let t_batch = Instant::now();
+            let batched_vectors = embedder.embed_batch(&inputs, None)?;
+            let batch_ms = t_batch.elapsed().as_secs_f64() * 1000.0;
+            let batch_throughput = batch_size as f64 / (batch_ms / 1000.0);
+
+            let mut min_sim = 1.0f32;
+            for (i, vec) in batched_vectors.iter().enumerate() {
+                let sim = glypr_core::cosine_similarity(&sequential_vectors[i], vec);
+                if sim < min_sim {
+                    min_sim = sim;
+                }
+            }
+
+            println!(
+                "  Batch Size {:2} -> {:6.2} ms total ({:6.2} ms/card) | {:6.2} cards/sec | Min Sim: {:.6} | VRAM: {:6.2} MB | RSS: {:6.2} MB",
+                batch_size,
+                batch_ms,
+                batch_ms / batch_size as f64,
+                batch_throughput,
+                min_sim,
+                get_metal_allocated_mb(),
+                get_peak_rss_mb()
+            );
+        }
+    }
+    println!("============================================================");
+
     Ok(())
 }
+

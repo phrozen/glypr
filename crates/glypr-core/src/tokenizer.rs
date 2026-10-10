@@ -420,28 +420,34 @@ impl GlyprTokenizer {
 
         tokens.push(TOKEN_BOS);
 
-        // Prepend task prompt prefix if present
-        if let Some(prefix) = task.prompt_prefix() {
-            let enc = self
-                .tokenizer
-                .encode(prefix.as_str(), false)
-                .map_err(|e| anyhow::anyhow!("Encode task prefix error: {}", e))?;
-            tokens.extend(enc.get_ids());
-        }
+        let mut pending_prefix = task.prompt_prefix();
 
         for part in parts {
             match part {
                 crate::multimodal::ModalityPart::Text(s) => {
-                    if !s.is_empty() {
+                    let full_str = if let Some(pfx) = pending_prefix.take() {
+                        format!("{}{}", pfx, s)
+                    } else {
+                        s.to_string()
+                    };
+                    if !full_str.is_empty() {
                         let enc = self
                             .tokenizer
-                            .encode(*s, false)
+                            .encode(full_str.as_str(), false)
                             .map_err(|e| anyhow::anyhow!("Encode text part error: {}", e))?;
                         tokens.extend(enc.get_ids());
                     }
                 }
                 crate::multimodal::ModalityPart::Image { image, budget } => {
+                    if let Some(pfx) = pending_prefix.take() {
+                        let enc = self
+                            .tokenizer
+                            .encode(pfx.as_str(), false)
+                            .map_err(|e| anyhow::anyhow!("Encode task prefix error: {}", e))?;
+                        tokens.extend(enc.get_ids());
+                    }
                     let b = budget.unwrap_or(crate::multimodal::VISION_BUDGET_DEFAULT);
+
                     let n_tokens = crate::multimodal::compute_soft_token_count(
                         image.width() as usize,
                         image.height() as usize,
@@ -461,7 +467,15 @@ impl GlyprTokenizer {
                     });
                 }
                 crate::multimodal::ModalityPart::Audio { samples } => {
+                    if let Some(pfx) = pending_prefix.take() {
+                        let enc = self
+                            .tokenizer
+                            .encode(pfx.as_str(), false)
+                            .map_err(|e| anyhow::anyhow!("Encode task prefix error: {}", e))?;
+                        tokens.extend(enc.get_ids());
+                    }
                     let n_tokens = crate::multimodal::compute_audio_soft_token_count(samples.len());
+
                     tokens.push(TOKEN_BOA);
                     let slot_start = tokens.len();
                     for _ in 0..n_tokens {
@@ -474,6 +488,13 @@ impl GlyprTokenizer {
                     });
                 }
                 crate::multimodal::ModalityPart::VideoFrame { frame, budget } => {
+                    if let Some(pfx) = pending_prefix.take() {
+                        let enc = self
+                            .tokenizer
+                            .encode(pfx.as_str(), false)
+                            .map_err(|e| anyhow::anyhow!("Encode task prefix error: {}", e))?;
+                        tokens.extend(enc.get_ids());
+                    }
                     let b = budget.unwrap_or(crate::multimodal::VISION_BUDGET_MEDIUM);
                     let n_tokens = crate::multimodal::compute_soft_token_count(
                         frame.width() as usize,
@@ -494,6 +515,14 @@ impl GlyprTokenizer {
                     });
                 }
             }
+        }
+
+        if let Some(pfx) = pending_prefix.take() {
+            let enc = self
+                .tokenizer
+                .encode(pfx.as_str(), false)
+                .map_err(|e| anyhow::anyhow!("Encode task prefix error: {}", e))?;
+            tokens.extend(enc.get_ids());
         }
 
         tokens.push(TOKEN_EOS);

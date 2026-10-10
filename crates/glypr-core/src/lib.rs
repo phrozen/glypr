@@ -69,6 +69,71 @@ pub enum MediaItem<'a> {
     },
 }
 
+/// An input item for unified multimodal batch embedding.
+/// Can represent plain text, a single image/audio, or an arbitrary interleaved sequence of parts,
+/// accompanied by an embedding Task.
+#[derive(Debug, Clone)]
+pub struct MultimodalInput<'a> {
+    pub parts: std::borrow::Cow<'a, [ModalityPart<'a>]>,
+    pub task: Task<'a>,
+}
+
+impl<'a> MultimodalInput<'a> {
+    pub fn new(parts: &'a [ModalityPart<'a>], task: Task<'a>) -> Self {
+        Self {
+            parts: std::borrow::Cow::Borrowed(parts),
+            task,
+        }
+    }
+
+    pub fn text(text: &'a str, task: Task<'a>) -> Self {
+        Self {
+            parts: std::borrow::Cow::Owned(vec![ModalityPart::Text(text)]),
+            task,
+        }
+    }
+
+    pub fn image(image: &'a image::DynamicImage, budget: Option<usize>, task: Task<'a>) -> Self {
+        Self {
+            parts: std::borrow::Cow::Owned(vec![ModalityPart::Image { image, budget }]),
+            task,
+        }
+    }
+
+    pub fn image_with_prompt(
+        image: &'a image::DynamicImage,
+        prompt: &'a str,
+        budget: Option<usize>,
+        task: Task<'a>,
+    ) -> Self {
+        Self {
+            parts: std::borrow::Cow::Owned(vec![
+                ModalityPart::Text(prompt),
+                ModalityPart::Image { image, budget },
+            ]),
+            task,
+        }
+    }
+
+    pub fn audio(samples: &'a [f32], task: Task<'a>) -> Self {
+        Self {
+            parts: std::borrow::Cow::Owned(vec![ModalityPart::Audio { samples }]),
+            task,
+        }
+    }
+
+    pub fn audio_with_prompt(samples: &'a [f32], prompt: &'a str, task: Task<'a>) -> Self {
+        Self {
+            parts: std::borrow::Cow::Owned(vec![
+                ModalityPart::Text(prompt),
+                ModalityPart::Audio { samples },
+            ]),
+            task,
+        }
+    }
+}
+
+
 impl GlyprEmbedder {
     pub fn load<P: AsRef<Path>>(model_dir: P, device: &Device, dtype: DType) -> Result<Self> {
         let dir = model_dir.as_ref();
@@ -497,32 +562,199 @@ impl GlyprEmbedder {
         self.encode_batch_texts(&formatted_refs, truncate_dim)
     }
 
+    /// Unified batch embedding across arbitrary modalities (text, images, audio, interleaved).
+    /// Dynamically optimizes homogeneous sequences into unpadded zero-mask passes,
+    /// and safely vectorizes heterogeneous sequences with padding attention masks.
+    pub fn embed_batch(
+        &self,
+        inputs: &[MultimodalInput],
+        truncate_dim: Option<usize>,
+    ) -> Result<Vec<Vec<f32>>> {
+        let b = inputs.len();
+        if b == 0 {
+            return Ok(Vec::new());
+        }
+        if b == 1 {
+            let single = self.embed_interleaved(&inputs[0].parts, inputs[0].task)?;
+            let vec = match truncate_dim {
+                Some(dim) if dim < 768 => truncate_mrl(&single, dim)?,
+                _ => single,
+            };
+            return Ok(vec![vec]);
+        }
+
+        with_autorelease_pool(|| self.embed_batch_inner(inputs, truncate_dim))
+    }
+
+    fn embed_batch_inner(
+        &self,
+        inputs: &[MultimodalInput],
+        truncate_dim: Option<usize>,
+    ) -> Result<Vec<Vec<f32>>> {
+        let b = inputs.len();
+
+        // 1. Check multimodal projector requirement if media parts exist
+        let has_any_media = inputs.iter().any(|inp| {
+            inp.parts.iter().any(|p| !matches!(p, ModalityPart::Text(_)))
+        });
+        if has_any_media && self.multimodal.is_none() {
+            anyhow::bail!("Multimodal input received in batch, but multimodal projector is not attached.");
+        }
+
+        // 2. Pre-extract and batch-encode all images across all items
+        let mut image_requests = Vec::new();
+        for (item_idx, inp) in inputs.iter().enumerate() {
+            for (part_idx, part) in inp.parts.iter().enumerate() {
+                if let ModalityPart::Image { image, budget } = part {
+                    let b = budget.unwrap_or(multimodal::VISION_BUDGET_DEFAULT);
+                    image_requests.push((item_idx, part_idx, *image, b));
+                }
+            }
+        }
+
+        let encoded_images: Vec<(Tensor, usize)> = if !image_requests.is_empty() {
+            let projector = self.multimodal.as_ref().unwrap();
+            let images_and_budgets: Vec<(&image::DynamicImage, usize)> = image_requests
+                .iter()
+                .map(|(_, _, img, b)| (*img, *b))
+                .collect();
+            projector.encode_images_batch(&images_and_budgets)?
+        } else {
+            Vec::new()
+        };
+
+        let mut image_iter = encoded_images.into_iter();
+
+        // 3. Assemble spliced token representations for each item
+        let mut item_embeds = Vec::with_capacity(b);
+        let mut seq_lens = Vec::with_capacity(b);
+
+
+        for inp in inputs {
+            let (token_ids, slots) = self.tokenizer.encode_modality_sequence(&inp.parts, inp.task)?;
+            let seq_len = token_ids.len();
+            if seq_len > self.max_seq_len {
+                anyhow::bail!(
+                    "Item sequence length ({}) exceeds max context limit ({})",
+                    seq_len,
+                    self.max_seq_len
+                );
+            }
+            seq_lens.push(seq_len);
+
+            let mut soft_tensors = Vec::new();
+            if let Some(projector) = self.multimodal.as_ref() {
+                for part in inp.parts.iter() {
+                    match part {
+                        ModalityPart::Text(_) => {}
+                        ModalityPart::Image { .. } => {
+                            let (soft_toks, _) = image_iter.next().expect("Image count mismatch");
+                            soft_tensors.push(soft_toks);
+                        }
+                        ModalityPart::Audio { samples } => {
+                            let (soft_toks, _) = projector.encode_audio(samples)?;
+                            soft_tensors.push(soft_toks);
+                        }
+                        ModalityPart::VideoFrame { frame, budget } => {
+                            let b = budget.unwrap_or(multimodal::VISION_BUDGET_MEDIUM);
+                            let (soft_toks, _) = projector.encode_image_with_budget(frame, b)?;
+                            soft_tensors.push(soft_toks);
+                        }
+                    }
+                }
+            }
+
+            let input_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
+            let text_embeds = (self.model.embed_tokens.forward(&input_tensor)? * self.model.embed_scale)?;
+
+            let mut chunks = Vec::new();
+            let mut curr = 0;
+
+            for (slot, soft_tensor) in slots.iter().zip(soft_tensors.iter()) {
+                if slot.start_idx > curr {
+                    chunks.push(text_embeds.narrow(1, curr, slot.start_idx - curr)?);
+                }
+                chunks.push(soft_tensor.unsqueeze(0)?);
+                curr = slot.start_idx + slot.length;
+            }
+
+            if curr < seq_len {
+                chunks.push(text_embeds.narrow(1, curr, seq_len - curr)?);
+            }
+
+            let chunks_refs: Vec<&Tensor> = chunks.iter().collect();
+            let merged = if chunks_refs.len() == 1 {
+                chunks_refs[0].clone()
+            } else {
+                Tensor::cat(&chunks_refs, 1)?
+            };
+            item_embeds.push(merged);
+        }
+
+        // 4. Batch stacking & Attention Mask construction
+
+        let max_len = *seq_lens.iter().max().unwrap();
+        let is_homogeneous = seq_lens.iter().all(|&l| l == max_len);
+
+        let (batched_embeds, pad_mask) = if is_homogeneous {
+            let refs: Vec<&Tensor> = item_embeds.iter().collect();
+            let stacked = Tensor::cat(&refs, 0)?; // [b, max_len, 512]
+            (stacked, None)
+        } else {
+            // Heterogeneous batch: pad shorter items to max_len with zeros
+            let mut padded_items = Vec::with_capacity(b);
+            let mut mask_vec = vec![0.0f32; b * max_len];
+
+            for (i, (item, &len)) in item_embeds.into_iter().zip(seq_lens.iter()).enumerate() {
+                for j in 0..len {
+                    mask_vec[i * max_len + j] = 1.0;
+                }
+
+                if len < max_len {
+                    let pad_len = max_len - len;
+                    let pad_tensor = Tensor::zeros((1, pad_len, 512), self.dtype, &self.device)?;
+                    let padded = Tensor::cat(&[&item, &pad_tensor], 1)?;
+                    padded_items.push(padded);
+                } else {
+                    padded_items.push(item);
+                }
+            }
+
+            let refs: Vec<&Tensor> = padded_items.iter().collect();
+            let stacked = Tensor::cat(&refs, 0)?; // [b, max_len, 512]
+            let mask_tensor = Tensor::from_vec(mask_vec, (b, max_len), &self.device)?
+                .to_dtype(self.dtype)?;
+            (stacked, Some(mask_tensor))
+        };
+
+        // 5. Forward through language model backbone and pool
+        let token_embeds = self.model.forward_embeds(&batched_embeds, pad_mask.as_ref())?;
+        let pooled = self.model.pool_and_normalize(&token_embeds, pad_mask.as_ref(), truncate_dim)?;
+        let pooled_f32 = pooled.to_dtype(DType::F32)?;
+        let out_dim = pooled_f32.dim(1)?;
+        let all_floats = pooled_f32.flatten_all()?.to_vec1::<f32>()?;
+
+        let mut results = Vec::with_capacity(b);
+        for chunk in all_floats.chunks_exact(out_dim) {
+            results.push(chunk.to_vec());
+        }
+
+        Ok(results)
+    }
+
+
     pub fn encode_batch_texts(
         &self,
         texts: &[&str],
         truncate_dim: Option<usize>,
     ) -> Result<Vec<Vec<f32>>> {
-        let batch_size = texts.len();
-        if batch_size == 0 {
-            return Ok(Vec::new());
-        }
-        if batch_size == 1 {
-            let single = self.encode_single_text(texts[0], truncate_dim)?;
-            return Ok(vec![single]);
-        }
-
-        let (input_ids, attention_mask) = self.tokenizer.encode_batch_padded_with_limit(texts, self.max_seq_len, &self.device)?;
-        let token_embeds = self.model.forward(&input_ids, Some(&attention_mask))?;
-        let pooled = self.model.pool_and_normalize(&token_embeds, Some(&attention_mask), truncate_dim)?;
-        let pooled_f32 = pooled.to_dtype(DType::F32)?;
-
-        let mut result = Vec::with_capacity(batch_size);
-        for b in 0..batch_size {
-            let vec = pooled_f32.get(b)?.to_vec1::<f32>()?;
-            result.push(vec);
-        }
-        Ok(result)
+        let inputs: Vec<MultimodalInput> = texts
+            .iter()
+            .map(|t| MultimodalInput::text(t, Task::Raw))
+            .collect();
+        self.embed_batch(&inputs, truncate_dim)
     }
+
 
     fn encode_single_text(&self, text: &str, truncate_dim: Option<usize>) -> Result<Vec<f32>> {
         let token_ids = self.tokenizer.encode(text)?;
