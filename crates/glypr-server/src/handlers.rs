@@ -117,9 +117,26 @@ pub async fn handle_embeddings(
         None
     };
 
-    // Dispatch inference tasks concurrently
-    let mut handles = Vec::with_capacity(items.len());
+    // 1. Offload image/audio decoding and preprocessing to Tokio's blocking threadpool
+    let mut decode_handles = Vec::with_capacity(items.len());
     for item in items {
+        decode_handles.push(tokio::task::spawn_blocking(move || {
+            crate::engine::prepare_input_item(item)
+        }));
+    }
+
+    let mut prepared_items = Vec::with_capacity(decode_handles.len());
+    for handle in decode_handles {
+        match handle.await {
+            Ok(Ok(prepared)) => prepared_items.push(prepared),
+            Ok(Err(e)) => return Err(bad_request(e.to_string()).into_response()),
+            Err(e) => return Err(internal_error(e.to_string()).into_response()),
+        }
+    }
+
+    // 2. Dispatch prepared inference tasks concurrently to engine
+    let mut handles = Vec::with_capacity(prepared_items.len());
+    for item in prepared_items {
         let engine = state.engine.clone();
         let task_clone = task.clone();
         handles.push(tokio::spawn(async move {

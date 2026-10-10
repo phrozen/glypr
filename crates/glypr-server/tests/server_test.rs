@@ -502,3 +502,102 @@ async fn test_server_multimodal_rejected_without_mmproj() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_server_concurrent_multimodal_batching() -> Result<()> {
+    let device = if candle_core::utils::metal_is_available() {
+        Device::new_metal(0).unwrap_or(Device::Cpu)
+    } else {
+        Device::Cpu
+    };
+    let dtype = if device.is_metal() {
+        DType::BF16
+    } else {
+        DType::F32
+    };
+
+    let base_gguf = match glypr_core::hub::resolve_default_gguf() {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
+    let mmproj_gguf = match glypr_core::hub::resolve_canonical_mmproj(false) {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
+
+    if !base_gguf.exists() || !mmproj_gguf.exists() {
+        eprintln!("Checkpoints not found, skipping concurrent multimodal test");
+        return Ok(());
+    }
+
+    let mut embedder = GlyprEmbedder::load_gguf(&base_gguf, &device, dtype)?;
+    embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
+    embedder.attach_multimodal_projector(&mmproj_gguf)?;
+
+    let engine = spawn_inference_engine(embedder, 32, "embeddinggemma-2".to_string());
+    let state = Arc::new(AppState { engine });
+    let app = build_router(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let base_url = format!("http://{}", addr);
+
+    let _handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    let img_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/golden_vectors/multimodal_test_image.png");
+    if !img_path.exists() {
+        eprintln!("multimodal_test_image.png not found, skipping");
+        return Ok(());
+    }
+
+    let img_bytes = std::fs::read(&img_path)?;
+    let img_b64 = format!("data:image/png;base64,{}", BASE64.encode(&img_bytes));
+
+    let req_image1 = json!({
+        "task": "Raw",
+        "input": [{ "image": &img_b64, "budget": 70 }]
+    });
+    let req_image2 = json!({
+        "task": "Query",
+        "input": [{ "text": "Describe picture", "image": &img_b64, "budget": 70 }]
+    });
+    let req_text1 = json!({
+        "task": "SearchQuery",
+        "input": "High fantasy trading card"
+    });
+    let req_text2 = json!({
+        "task": "Document",
+        "title": "Artifact",
+        "input": "Black Lotus card rules"
+    });
+
+    let payloads = vec![req_image1, req_image2, req_text1, req_text2];
+    let mut handles = Vec::new();
+
+    for p in payloads {
+        let c = client.clone();
+        let u = format!("{}/v1/embeddings", base_url);
+        handles.push(tokio::spawn(async move {
+            c.post(u).json(&p).send().await
+        }));
+    }
+
+    for handle in handles {
+        let resp = handle.await??;
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await?;
+        let emb = body["data"][0]["embedding"].as_array().unwrap();
+        assert_eq!(emb.len(), 768);
+    }
+
+    Ok(())
+}
+

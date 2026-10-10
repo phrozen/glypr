@@ -2,10 +2,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use glypr_core::{truncate_mrl, GlyprEmbedder, Task};
+use glypr_core::{truncate_mrl, with_autorelease_pool, GlyprEmbedder, MultimodalInput, Task};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::schema::{InputItem, MediaInputItem};
+use crate::schema::InputItem;
 
 /// Owned representation of Task to allow moving across thread boundaries.
 #[derive(Debug, Clone)]
@@ -58,9 +58,51 @@ impl OwnedTask {
     }
 }
 
+/// An item preprocessed and decoded on CPU (base64 decoded, image opened/decompressed, audio parsed).
+#[derive(Clone)]
+pub enum PreparedItem {
+    Text(String),
+    Image {
+        image: Arc<image::DynamicImage>,
+        text: Option<String>,
+        budget: Option<usize>,
+    },
+    Audio {
+        samples: Arc<Vec<f32>>,
+        text: Option<String>,
+    },
+}
+
+/// Decode and prepare an input item on a blocking CPU thread before submitting to the GPU worker queue.
+pub fn prepare_input_item(item: InputItem) -> Result<PreparedItem> {
+    match item {
+        InputItem::Text(s) => Ok(PreparedItem::Text(s)),
+        InputItem::Media(media) => {
+            if let Some(ref img_src) = media.image {
+                let img = decode_image(img_src).context("Failed to decode image input")?;
+                Ok(PreparedItem::Image {
+                    image: Arc::new(img),
+                    text: media.text,
+                    budget: media.budget,
+                })
+            } else if let Some(ref aud_src) = media.audio {
+                let samples = decode_audio(aud_src).context("Failed to decode audio input")?;
+                Ok(PreparedItem::Audio {
+                    samples: Arc::new(samples),
+                    text: media.text,
+                })
+            } else if let Some(text) = media.text {
+                Ok(PreparedItem::Text(text))
+            } else {
+                anyhow::bail!("Media input item has no text, image, or audio specified");
+            }
+        }
+    }
+}
+
 /// An individual item queued for inference.
 pub struct InferenceRequest {
-    pub item: InputItem,
+    pub item: PreparedItem,
     pub task: OwnedTask,
     pub truncate_dim: Option<usize>,
     pub sender: oneshot::Sender<Result<Vec<f32>>>,
@@ -86,7 +128,7 @@ impl EngineHandle {
     /// Submit a single request and await its embedding result.
     pub async fn infer(
         &self,
-        item: InputItem,
+        item: PreparedItem,
         task: OwnedTask,
         truncate_dim: Option<usize>,
     ) -> Result<Vec<f32>> {
@@ -147,7 +189,20 @@ pub fn spawn_inference_engine(
                     }
                 }
 
-                process_batch(&embedder, batch);
+                // If under capacity, yield briefly to coalesce concurrently arriving requests
+                if batch.len() < max_batch {
+                    std::thread::yield_now();
+                    while batch.len() < max_batch {
+                        match rx.try_recv() {
+                            Ok(req) => batch.push(req),
+                            Err(_) => break,
+                        }
+                    }
+                }
+
+                with_autorelease_pool(|| {
+                    process_batch(&embedder, batch);
+                });
             }
 
             tracing::info!("Inference worker shut down");
@@ -157,106 +212,57 @@ pub fn spawn_inference_engine(
     EngineHandle { sender: tx, meta }
 }
 
-/// Process a collected batch of inference requests.
+/// Process a collected batch of inference requests in a single unified multimodal batch.
 fn process_batch(embedder: &GlyprEmbedder, batch: Vec<InferenceRequest>) {
-    // Separate plain text items from multimodal items
-    let mut text_items: Vec<(usize, String, Option<usize>)> = Vec::new();
-    let mut media_items: Vec<(usize, MediaInputItem, OwnedTask, Option<usize>)> = Vec::new();
-
-    // Map each batch index to its sender
-    let mut senders = Vec::with_capacity(batch.len());
-
-    for (idx, req) in batch.into_iter().enumerate() {
-        senders.push(req.sender);
-        match req.item {
-            InputItem::Text(text) => {
-                let formatted = req.task.as_task().format_text(&text);
-                text_items.push((idx, formatted, req.truncate_dim));
-            }
-            InputItem::Media(media) => {
-                media_items.push((idx, media, req.task, req.truncate_dim));
-            }
-        }
-    }
-
-    // Process batched plain texts
-    if !text_items.is_empty() {
-        let texts_ref: Vec<&str> = text_items.iter().map(|(_, t, _)| t.as_str()).collect();
-
-        match embedder.encode_batch_texts(&texts_ref, None) {
-            Ok(embeddings) => {
-                for ((idx, _, truncate_dim), vec) in text_items.into_iter().zip(embeddings) {
-                    let final_vec = match truncate_dim {
-                        Some(dim) if dim < 768 => truncate_mrl(&vec, dim),
-                        _ => Ok(vec),
-                    };
-                    let sender = &mut senders[idx];
-                    // Replace with empty sender to take ownership
-                    let taken = std::mem::replace(sender, oneshot::channel().0);
-                    let _ = taken.send(final_vec);
+    let inputs: Vec<MultimodalInput> = batch
+        .iter()
+        .map(|req| {
+            let task = req.task.as_task();
+            match &req.item {
+                PreparedItem::Text(s) => MultimodalInput::text(s.as_str(), task),
+                PreparedItem::Image { image, text, budget } => {
+                    if let Some(prompt) = text {
+                        MultimodalInput::image_with_prompt(
+                            image.as_ref(),
+                            prompt.as_str(),
+                            *budget,
+                            task,
+                        )
+                    } else {
+                        MultimodalInput::image(image.as_ref(), *budget, task)
+                    }
+                }
+                PreparedItem::Audio { samples, text } => {
+                    if let Some(prompt) = text {
+                        MultimodalInput::audio_with_prompt(
+                            samples.as_slice(),
+                            prompt.as_str(),
+                            task,
+                        )
+                    } else {
+                        MultimodalInput::audio(samples.as_slice(), task)
+                    }
                 }
             }
-            Err(e) => {
-                let err_msg = e.to_string();
-                for (idx, _, _) in text_items {
-                    let sender = &mut senders[idx];
-                    let taken = std::mem::replace(sender, oneshot::channel().0);
-                    let _ = taken.send(Err(anyhow::anyhow!("Batch encoding error: {}", err_msg)));
-                }
+        })
+        .collect();
+
+    match embedder.embed_batch(&inputs, None) {
+        Ok(embeddings) => {
+            for (req, vec) in batch.into_iter().zip(embeddings) {
+                let final_vec = match req.truncate_dim {
+                    Some(dim) if dim < 768 => truncate_mrl(&vec, dim),
+                    _ => Ok(vec),
+                };
+                let _ = req.sender.send(final_vec);
             }
         }
-    }
-
-    // Process media items individually
-    for (idx, media, task, truncate_dim) in media_items {
-        let res = process_media_item(embedder, &media, &task, truncate_dim);
-        let sender = &mut senders[idx];
-        let taken = std::mem::replace(sender, oneshot::channel().0);
-        let _ = taken.send(res);
-    }
-}
-
-/// Process a single multimodal input item.
-fn process_media_item(
-    embedder: &GlyprEmbedder,
-    media: &MediaInputItem,
-    task: &OwnedTask,
-    truncate_dim: Option<usize>,
-) -> Result<Vec<f32>> {
-    if embedder.multimodal.is_none() {
-        anyhow::bail!(
-            "Multimodal input received, but server was started without a multimodal projector. \
-            Restart the server with --bf16-mmproj, --q8-mmproj, or --mmproj-file."
-        );
-    }
-
-    let formatted_prompt = match (media.text.as_deref(), task.as_task().prompt_prefix()) {
-        (Some(txt), Some(prefix)) => Some(format!("{}{}", prefix, txt)),
-        (Some(txt), None) => Some(txt.to_string()),
-        (None, Some(prefix)) => Some(prefix),
-        (None, None) => None,
-    };
-    let prompt = formatted_prompt.as_deref();
-
-    let vec = if let Some(ref img_src) = media.image {
-        let img = decode_image(img_src).context("Failed to decode image input")?;
-        match media.budget {
-            Some(budget) => embedder.embed_image_with_budget(&img, prompt, budget)?,
-            None => embedder.embed_image(&img, prompt)?,
+        Err(e) => {
+            let err_msg = e.to_string();
+            for req in batch {
+                let _ = req.sender.send(Err(anyhow::anyhow!("Batch inference error: {}", err_msg)));
+            }
         }
-    } else if let Some(ref aud_src) = media.audio {
-        let samples = decode_audio(aud_src).context("Failed to decode audio input")?;
-        embedder.embed_audio(&samples, prompt)?
-    } else if let Some(ref txt) = media.text {
-        // Text-only media item
-        embedder.embed_text(txt, task.as_task())?
-    } else {
-        anyhow::bail!("Media input item has no text, image, or audio specified");
-    };
-
-    match truncate_dim {
-        Some(dim) if dim < 768 => truncate_mrl(&vec, dim),
-        _ => Ok(vec),
     }
 }
 
