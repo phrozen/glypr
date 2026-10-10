@@ -76,7 +76,7 @@ echo "Fast stream test" | ./target/release/glypr embed --encoding int8 -o json
 ```
 
 #### Interleaved Multimodal (Text + Images + Audio)
-Multimodal projector loading is explicit and opt-in (defaulting to text-only with 0 extra memory or downloads). Pass `--bf16-mmproj`, `--q8-mmproj`, or `--mmproj-file <FILE>` to attach a projector. If an argument points to an existing image or 16 kHz audio file on disk, `glypr` streams it to the multimodal projector; otherwise, it is treated as text:
+Multimodal projector loading is explicit and opt-in (defaulting to text-only with 0 extra memory or downloads). Pass `--bf16-mmproj`, `--q8-mmproj`, or `--mmproj-file <FILE>` to attach a projector. If an argument points to an existing image (`.png`, `.jpg`, `.jpeg`, `.webp`) or 16 kHz `.wav` audio file on disk, `glypr` streams it to the multimodal projector; otherwise, it is treated as text:
 ```bash
 # Interleaved Text + PNG Card Image (with BF16 projector)
 ./target/release/glypr --bf16-mmproj embed "Card illustration:" ./card.png "and card description."

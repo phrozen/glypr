@@ -271,26 +271,30 @@ fn parse_interleaved_inputs(inputs: Vec<String>) -> Result<(Vec<OwnedInputItem>,
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            if ext == "png" {
-                let img =
-                    image::open(p).with_context(|| format!("Failed to open PNG image {:?}", p))?;
-                parts.push(OwnedInputItem::Image(img));
-                has_media = true;
-            } else if ext == "wav" {
-                let mut reader = hound::WavReader::open(p)
-                    .with_context(|| format!("Failed to open WAV audio {:?}", p))?;
-                let samples: Vec<f32> = reader
-                    .samples::<i16>()
-                    .map(|s| s.unwrap_or(0) as f32 / 32767.0)
-                    .collect();
-                parts.push(OwnedInputItem::Audio(samples));
-                has_media = true;
-            } else {
-                anyhow::bail!(
-                    "Unsupported media file format '.{}' for {:?}. V1 supports .png images and .wav audio files.",
-                    ext,
-                    p
-                );
+            match ext.as_str() {
+                "png" | "jpg" | "jpeg" | "webp" => {
+                    let img = image::open(p)
+                        .with_context(|| format!("Failed to open image file {:?}", p))?;
+                    parts.push(OwnedInputItem::Image(img));
+                    has_media = true;
+                }
+                "wav" => {
+                    let mut reader = hound::WavReader::open(p)
+                        .with_context(|| format!("Failed to open WAV audio {:?}", p))?;
+                    let samples: Vec<f32> = reader
+                        .samples::<i16>()
+                        .map(|s| s.unwrap_or(0) as f32 / 32767.0)
+                        .collect();
+                    parts.push(OwnedInputItem::Audio(samples));
+                    has_media = true;
+                }
+                _ => {
+                    anyhow::bail!(
+                        "Unsupported media file format '.{}' for {:?}. Supported image formats: .png, .jpg, .jpeg, .webp; supported audio formats: .wav.",
+                        ext,
+                        p
+                    );
+                }
             }
         } else {
             parts.push(OwnedInputItem::Text(arg));

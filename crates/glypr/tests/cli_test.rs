@@ -267,3 +267,63 @@ fn test_cli_attention_modes() {
     assert!(output_flash.status.success());
 }
 
+#[test]
+fn test_cli_embed_jpeg_and_webp() {
+    let png_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/golden_vectors/multimodal_test_image.png"
+    );
+    let img = image::open(png_path).expect("Failed to open test PNG");
+
+    let tmp_dir = std::env::temp_dir();
+    let jpg_path = tmp_dir.join("glypr_test_image.jpg");
+    let webp_path = tmp_dir.join("glypr_test_image.webp");
+
+    img.save(&jpg_path).expect("Failed to save test JPEG");
+    img.save(&webp_path).expect("Failed to save test WebP");
+
+    // 1. Embed JPEG
+    let output_jpg = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args([
+            "--bf16-mmproj",
+            "embed",
+            "JPEG card image:",
+            jpg_path.to_str().unwrap(),
+            "--dim",
+            "64",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("Failed to execute glypr embed with JPEG");
+    assert!(output_jpg.status.success());
+    let stdout_jpg = String::from_utf8_lossy(&output_jpg.stdout);
+    let values_jpg: Vec<f32> = serde_json::from_str(stdout_jpg.trim())
+        .expect("JPEG output should be valid JSON array of floats");
+    assert_eq!(values_jpg.len(), 64);
+
+    // 2. Embed WebP
+    let output_webp = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args([
+            "--bf16-mmproj",
+            "embed",
+            "WebP card image:",
+            webp_path.to_str().unwrap(),
+            "--dim",
+            "64",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("Failed to execute glypr embed with WebP");
+    assert!(output_webp.status.success());
+    let stdout_webp = String::from_utf8_lossy(&output_webp.stdout);
+    let values_webp: Vec<f32> = serde_json::from_str(stdout_webp.trim())
+        .expect("WebP output should be valid JSON array of floats");
+    assert_eq!(values_webp.len(), 64);
+
+    let _ = std::fs::remove_file(jpg_path);
+    let _ = std::fs::remove_file(webp_path);
+}
+
+
