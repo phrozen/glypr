@@ -180,9 +180,9 @@ glypr pull
 # 2. Inspect active device, cache, and attention backend
 glypr info
 
-# 3. Embed text or multimodal sequences (defaults to auto Metal GPU, BF16, and Metal Flash Attention)
+# 3. Embed text or multimodal sequences (multimodal requires explicit mmproj flag)
 glypr embed "What is quantum mechanics?"
-glypr embed "Card illustration:" ./card.png --image-token-budget 140
+glypr --bf16-mmproj embed "Card illustration:" ./card.png --image-token-budget 140
 
 # 4. Launch high-throughput OpenAI-compatible HTTP server with dynamic batching
 glypr serve --port 8080 --max-batch-size 32

@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::engine::{EngineHandle, OwnedTask};
 use crate::schema::{
     EmbeddingObject, EmbeddingOutput, EmbeddingRequest, EmbeddingResponse, EncodingFormat,
-    HealthResponse, ModelListResponse, ModelObject, Usage,
+    HealthResponse, InputItem, ModelListResponse, ModelObject, Usage,
 };
 
 /// Shared application state for Axum handlers.
@@ -94,6 +94,21 @@ pub async fn handle_embeddings(
     let items = payload.input.into_items();
     if items.is_empty() {
         return Err(bad_request("Input array cannot be empty").into_response());
+    }
+
+    // Reject multimodal inputs immediately if server has no multimodal projector
+    if !state.engine.meta.has_multimodal {
+        let has_media = items.iter().any(|item| match item {
+            InputItem::Media(m) => m.image.is_some() || m.audio.is_some(),
+            InputItem::Text(_) => false,
+        });
+        if has_media {
+            return Err(bad_request(
+                "Multimodal input received, but server was started without a multimodal projector. \
+                Restart the server with --bf16-mmproj, --q8-mmproj, or --mmproj-file.",
+            )
+            .into_response());
+        }
     }
 
     let truncate_dim = if dimensions < 768 {

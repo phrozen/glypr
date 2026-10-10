@@ -176,23 +176,25 @@ async fn test_server_embeddings_quantization_formats() -> Result<()> {
     let decoded_bytes = BASE64.decode(b64_str)?;
     assert_eq!(decoded_bytes.len(), 768 * 4); // 768 f32 floats = 3072 bytes
 
-    // 2. Int8 format
-    let payload_int8 = json!({
-        "input": "Int8 encoding test",
-        "encoding_format": "int8"
-    });
-    let resp = client
-        .post(format!("{}/v1/embeddings", base_url))
-        .json(&payload_int8)
-        .send()
-        .await?;
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let body: serde_json::Value = resp.json().await?;
-    let ints = body["data"][0]["embedding"].as_array().unwrap();
-    assert_eq!(ints.len(), 768);
-    for val in ints {
-        let i = val.as_i64().unwrap();
-        assert!((-127..=127).contains(&i));
+    // 2. Int8 format (testing both "int8" and "int")
+    for format_name in ["int8", "int"] {
+        let payload_int = json!({
+            "input": "Int8 encoding test",
+            "encoding_format": format_name
+        });
+        let resp = client
+            .post(format!("{}/v1/embeddings", base_url))
+            .json(&payload_int)
+            .send()
+            .await?;
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await?;
+        let ints = body["data"][0]["embedding"].as_array().unwrap();
+        assert_eq!(ints.len(), 768);
+        for val in ints {
+            let i = val.as_i64().unwrap();
+            assert!((-127..=127).contains(&i));
+        }
     }
 
     // 3. Binary format (packed u64 bit bytes as base64 string)
@@ -378,3 +380,55 @@ async fn test_server_embeddings_multimodal_request() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_server_multimodal_rejected_without_mmproj() -> Result<()> {
+    // start_test_server starts a server WITHOUT mmproj
+    let (base_url, _server) = match start_test_server().await {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("Skipping test: model not available ({})", e);
+            return Ok(());
+        }
+    };
+
+    let client = reqwest::Client::new();
+
+    let img_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/golden_vectors/multimodal_test_image.png");
+    if !img_path.exists() {
+        eprintln!("multimodal_test_image.png not found, skipping");
+        return Ok(());
+    }
+
+    let img_bytes = std::fs::read(&img_path)?;
+    let img_b64 = format!("data:image/png;base64,{}", BASE64.encode(&img_bytes));
+
+    let payload = json!({
+        "input": [
+            {
+                "text": "Describe this test picture",
+                "image": img_b64
+            }
+        ]
+    });
+
+    let resp = client
+        .post(format!("{}/v1/embeddings", base_url))
+        .json(&payload)
+        .send()
+        .await?;
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await?;
+    let error_msg = body["error"]["message"].as_str().unwrap();
+    assert!(error_msg.contains("started without a multimodal projector"));
+    assert!(error_msg.contains("--bf16-mmproj"));
+
+    Ok(())
+}
+

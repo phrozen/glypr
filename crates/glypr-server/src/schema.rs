@@ -7,6 +7,7 @@ pub enum EncodingFormat {
     #[default]
     Float,
     Base64,
+    #[serde(alias = "int")]
     Int8,
     Binary,
 }

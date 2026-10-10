@@ -224,7 +224,10 @@ fn process_media_item(
     truncate_dim: Option<usize>,
 ) -> Result<Vec<f32>> {
     if embedder.multimodal.is_none() {
-        anyhow::bail!("Multimodal projector not attached. Start server with --mmproj flag to enable image/audio embeddings.");
+        anyhow::bail!(
+            "Multimodal input received, but server was started without a multimodal projector. \
+            Restart the server with --bf16-mmproj, --q8-mmproj, or --mmproj-file."
+        );
     }
 
     let prompt = media.text.as_deref();

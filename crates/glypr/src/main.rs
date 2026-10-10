@@ -23,7 +23,8 @@ enum DeviceArg {
 enum EncodingArg {
     #[default]
     Float,
-    Int8,
+    #[value(alias = "int8")]
+    Int,
     Binary,
 }
 
@@ -51,27 +52,35 @@ enum AttentionArg {
     about = "Native Rust Embedding & Retrieval Engine for EmbeddingGemma 2"
 )]
 struct Cli {
-    /// Local model file (.gguf) or directory override (disables automatic downloads)
-    #[arg(short, long, global = true)]
-    model: Option<PathBuf>,
-
-    /// Path to model directory (alias for --model)
+    /// Use canonical BF16 base weights (embeddinggemma-2-BF16.gguf) [default]
     #[arg(long, global = true)]
-    model_dir: Option<PathBuf>,
+    bf16: bool,
 
-    /// Local multimodal projector (.gguf) override
-    #[arg(long, global = true)]
-    mmproj: Option<PathBuf>,
-
-    /// Use 8-bit quantized weights (Q8_0) instead of default BF16
+    /// Use canonical Q8_0 base weights (embeddinggemma-2-Q8_0.gguf)
     #[arg(long, global = true)]
     q8: bool,
 
-    /// Hardware acceleration device: auto, metal, cpu
+    /// Attach canonical BF16 multimodal projector (mmproj-embeddinggemma-2-BF16.gguf)
+    #[arg(long, global = true)]
+    bf16_mmproj: bool,
+
+    /// Attach canonical Q8_0 multimodal projector (mmproj-embeddinggemma-2-Q8_0.gguf)
+    #[arg(long, global = true)]
+    q8_mmproj: bool,
+
+    /// Override base model with local GGUF file (disables automatic downloads)
+    #[arg(long, global = true, value_name = "FILE")]
+    model_file: Option<PathBuf>,
+
+    /// Override multimodal projector with local GGUF file
+    #[arg(long, global = true, value_name = "FILE")]
+    mmproj_file: Option<PathBuf>,
+
+    /// Hardware acceleration device: auto (default), metal, cpu
     #[arg(long, global = true, value_enum, default_value_t = DeviceArg::Auto)]
     device: DeviceArg,
 
-    /// Attention kernel implementation: auto (Flash on Metal, Chunked on CPU), flash, chunked, standard
+    /// Attention kernel: auto (default), flash, chunked, standard
     #[arg(long, global = true, value_enum, default_value_t = AttentionArg::Auto)]
     attention: AttentionArg,
 
@@ -91,27 +100,27 @@ enum Commands {
         #[arg(value_name = "INPUTS")]
         inputs: Vec<String>,
 
-        /// Task prompt name: Raw, SearchQuery, CodeRetrieval, QuestionAnswering, Document
+        /// Task prompt name: Raw (default), SearchQuery, CodeRetrieval, Document, QuestionAnswering
         #[arg(short, long, default_value = "Raw")]
         task: String,
 
-        /// Document title (if encoding a titled document)
+        /// Document title (when --task Document is used)
         #[arg(long)]
         title: Option<String>,
 
-        /// Matryoshka dimension truncation (768, 512, 256, 128)
+        /// Output vector dimension: 768 (default), 512, 256, 128
         #[arg(short, long, default_value_t = 768)]
         dim: usize,
 
-        /// Output encoding format: float, int8, binary
+        /// Output encoding format: float (default), int, binary
         #[arg(short, long, value_enum, default_value_t = EncodingArg::Float)]
         encoding: EncodingArg,
 
-        /// Output display mode: preview, json, raw (binary bytes)
+        /// Output display mode: preview (default), json, raw
         #[arg(short, long, value_enum, default_value_t = OutputArg::Preview)]
         output: OutputArg,
 
-        /// Image token budget: 70, 140, 280, 560, 1120
+        /// Image soft token budget [default: 280] [range: 16-2048]
         #[arg(long, default_value_t = 280)]
         image_token_budget: usize,
     },
@@ -133,22 +142,6 @@ enum Commands {
 
     /// Pre-fetch canonical GGUF models into Hugging Face cache
     Pull {
-        /// Pull BF16 base weights (embeddinggemma-2-BF16.gguf)
-        #[arg(long)]
-        bf16: bool,
-
-        /// Pull BF16 multimodal projector (mmproj-embeddinggemma-2-BF16.gguf)
-        #[arg(long)]
-        bf16_mmproj: bool,
-
-        /// Pull Q8_0 base weights (embeddinggemma-2-Q8_0.gguf)
-        #[arg(long)]
-        q8: bool,
-
-        /// Pull Q8_0 multimodal projector (mmproj-embeddinggemma-2-Q8_0.gguf)
-        #[arg(long)]
-        q8_mmproj: bool,
-
         /// Pull all 4 canonical models (default if no specific flags provided)
         #[arg(long)]
         all: bool,
@@ -158,36 +151,37 @@ enum Commands {
     Info,
 }
 
-enum ModelTarget {
-    Gguf(PathBuf),
-    Directory(PathBuf),
+fn resolve_base_model_path(model_file: Option<PathBuf>, use_q8: bool) -> Result<PathBuf> {
+    if let Some(file) = model_file {
+        if !file.is_file() {
+            anyhow::bail!("Specified --model-file '{:?}' is not a valid file", file);
+        }
+        return Ok(file);
+    }
+    resolve_canonical_model(use_q8)
 }
 
-fn resolve_model(
-    explicit_model: Option<PathBuf>,
-    explicit_dir: Option<PathBuf>,
-    use_q8: bool,
-) -> Result<ModelTarget> {
-    let explicit = explicit_model.or(explicit_dir);
-    if let Some(p) = explicit {
-        if p.is_file() {
-            return Ok(ModelTarget::Gguf(p));
-        } else if p.is_dir() {
-            let q8_candidate = p.join(GGUF_Q8_0_FILE);
-            if q8_candidate.exists() {
-                return Ok(ModelTarget::Gguf(q8_candidate));
-            }
-            let bf16_candidate = p.join(GGUF_BF16_FILE);
-            if bf16_candidate.exists() {
-                return Ok(ModelTarget::Gguf(bf16_candidate));
-            }
-            return Ok(ModelTarget::Directory(p));
+fn resolve_projector_path(
+    mmproj_file: Option<PathBuf>,
+    use_bf16_mmproj: bool,
+    use_q8_mmproj: bool,
+) -> Result<Option<PathBuf>> {
+    if let Some(file) = mmproj_file {
+        if !file.is_file() {
+            anyhow::bail!("Specified --mmproj-file '{:?}' is not a valid file", file);
         }
+        return Ok(Some(file));
     }
-
-    // Default: resolve canonical GGUF from official repo
-    let path = resolve_canonical_model(use_q8)?;
-    Ok(ModelTarget::Gguf(path))
+    if use_bf16_mmproj && use_q8_mmproj {
+        anyhow::bail!("Cannot specify both --bf16-mmproj and --q8-mmproj simultaneously");
+    }
+    if use_bf16_mmproj {
+        return Ok(Some(resolve_canonical_mmproj(false)?));
+    }
+    if use_q8_mmproj {
+        return Ok(Some(resolve_canonical_mmproj(true)?));
+    }
+    Ok(None)
 }
 
 fn resolve_device_and_dtype(device_arg: DeviceArg, legacy_metal: bool) -> Result<(Device, DType)> {
@@ -322,27 +316,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Handle Pull command (runs without loading weights into GPU/RAM)
-    if let Commands::Pull {
-        bf16,
-        bf16_mmproj,
-        q8,
-        q8_mmproj,
-        all,
-    } = cli.command
-    {
-        let pull_all = all || (!bf16 && !bf16_mmproj && !q8 && !q8_mmproj);
+    if let Commands::Pull { all } = cli.command {
+        let pull_all = all || (!cli.bf16 && !cli.bf16_mmproj && !cli.q8 && !cli.q8_mmproj);
         let mut targets = Vec::new();
 
-        if pull_all || bf16 {
+        if pull_all || cli.bf16 {
             targets.push(GGUF_BF16_FILE);
         }
-        if pull_all || bf16_mmproj {
+        if pull_all || cli.bf16_mmproj {
             targets.push(MMPROJ_BF16_FILE);
         }
-        if pull_all || q8 {
+        if pull_all || cli.q8 {
             targets.push(GGUF_Q8_0_FILE);
         }
-        if pull_all || q8_mmproj {
+        if pull_all || cli.q8_mmproj {
             targets.push(MMPROJ_Q8_0_FILE);
         }
 
@@ -367,19 +354,28 @@ fn main() -> Result<()> {
         println!("Hugging Face Cache:   {}", cache_dir.display());
         println!("Default Repository:   {}", DEFAULT_GGUF_REPO);
         println!();
-        println!("Canonical GGUF Models:");
+        println!("Canonical Models:");
 
-        for (name, file) in [
-            ("BF16 Base", GGUF_BF16_FILE),
-            ("BF16 Projector", MMPROJ_BF16_FILE),
-            ("Q8_0 Base", GGUF_Q8_0_FILE),
-            ("Q8_0 Projector", MMPROJ_Q8_0_FILE),
+        for (flag, file, desc) in [
+            ("--bf16", GGUF_BF16_FILE, "base model, default"),
+            ("--q8", GGUF_Q8_0_FILE, "base model"),
+            ("--bf16-mmproj", MMPROJ_BF16_FILE, "projector"),
+            ("--q8-mmproj", MMPROJ_Q8_0_FILE, "projector"),
         ] {
             if let Some(path) = check_cached_file(DEFAULT_GGUF_REPO, file) {
                 let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                println!("  [✓] {:<16}: {} ({})", name, file, format_bytes(size));
+                println!(
+                    "  [✓] {:<16}: {} ({}) [{}]",
+                    flag,
+                    file,
+                    format_bytes(size),
+                    desc
+                );
             } else {
-                println!("  [ ] {:<16}: {} (Not cached)", name, file);
+                println!(
+                    "  [ ] {:<16}: {} (Not cached) [{}]",
+                    flag, file, desc
+                );
             }
         }
 
@@ -389,40 +385,52 @@ fn main() -> Result<()> {
         #[cfg(not(feature = "metal"))]
         let metal_avail = false;
 
-        println!("Hardware & Backend:");
+        println!("Hardware & Runtime:");
         if metal_avail {
             println!("  Device:             Apple Silicon Metal GPU (BF16)");
-            println!("  Attention Kernel:   Metal Flash Attention (Fused Hardware Tile-Skipping, Auto)");
-            println!("  Supported Kernels:  Flash (MetalFlash), Chunked (ChunkedSliding), Standard");
         } else {
             println!("  Device:             CPU SIMD (FP32)");
-            println!("  Attention Kernel:   Chunked Sliding Attention (Window: 1024, Auto)");
-            println!("  Supported Kernels:  Chunked (ChunkedSliding), Standard");
         }
-        println!("  Max Context Window: 8,320 tokens");
+        println!("  Context Window:     8,192 tokens");
         println!();
-        println!("Supported Capabilities:");
-        println!("  Native Dimensions:  768");
-        println!("  MRL Truncations:    512, 256, 128");
-        println!("  Quantizations:      Float32, Static INT8 ([-127, 127]), Binary 1-bit (POPCNT)");
-        println!("  Vision Budgets:     70, 140 (Native 480x680), 280, 560, 1120");
+        println!("Attention Kernels (--attention):");
+        if metal_avail {
+            println!("  flash               : Fused hardware FlashAttention (default)");
+            println!("  chunked             : Sliding-window banded attention");
+            println!("  standard            : Full dense NxN attention");
+        } else {
+            println!("  chunked             : Sliding-window banded attention (default)");
+            println!("  standard            : Full dense NxN attention");
+            println!("  flash               : Fused hardware FlashAttention (Requires Metal GPU)");
+        }
+        println!();
+        println!("Output Dimensions (--dim):");
+        println!("  768 (default), 512, 256, 128");
+        println!();
+        println!("Encoding Format (--encoding):");
+        println!("  float               : 32-bit floating point (default)");
+        println!("  int                 : 8-bit signed integer (4x compression)");
+        println!("  binary              : 1-bit packed binary (32x compression)");
+        println!();
+        println!("Vision Budget (--image-token-budget):");
+        println!("  280 (default) [range: 16–2048]");
         println!("================================================================================");
         return Ok(());
     }
 
     // Load Model & Engine
-    let target = resolve_model(cli.model, cli.model_dir, cli.q8)?;
+    let model_path = resolve_base_model_path(cli.model_file, cli.q8)?;
     let (device, dtype) = resolve_device_and_dtype(cli.device, cli.metal)?;
 
-    let mut embedder = match target {
-        ModelTarget::Gguf(path) => GlyprEmbedder::load_gguf(&path, &device, dtype)?,
-        ModelTarget::Directory(dir) => GlyprEmbedder::load(&dir, &device, dtype)?,
-    };
+    let mut embedder = GlyprEmbedder::load_gguf(&model_path, &device, dtype)?;
     let attn_mode = resolve_attention_mode(cli.attention, &device)?;
     embedder.set_attention_mode(attn_mode);
 
-    // Resolve Multimodal Projector
-    let mmproj_override = cli.mmproj;
+    // Resolve Multimodal Projector (opt-in; default is None)
+    let proj_path = resolve_projector_path(cli.mmproj_file, cli.bf16_mmproj, cli.q8_mmproj)?;
+    if let Some(ref p) = proj_path {
+        embedder.attach_multimodal_projector(p)?;
+    }
 
     match cli.command {
         Commands::Embed {
@@ -436,13 +444,12 @@ fn main() -> Result<()> {
         } => {
             let (owned_parts, has_media) = parse_interleaved_inputs(inputs)?;
 
-            // Attach multimodal projector if media is present
+            // Reject media if no multimodal projector was attached
             if has_media && embedder.multimodal.is_none() {
-                let proj_path = match mmproj_override {
-                    Some(p) => p,
-                    None => resolve_canonical_mmproj(cli.q8)?,
-                };
-                embedder.attach_multimodal_projector(&proj_path)?;
+                anyhow::bail!(
+                    "Media input detected in arguments, but no multimodal projector was attached.\n\
+                    Tip: Add --bf16-mmproj, --q8-mmproj, or --mmproj-file <FILE> to enable image/audio embeddings."
+                );
             }
 
             let parts: Vec<ModalityPart<'_>> = owned_parts
@@ -494,7 +501,7 @@ fn main() -> Result<()> {
                         std::io::stdout().flush()?;
                     }
                 },
-                EncodingArg::Int8 => {
+                EncodingArg::Int => {
                     let quantized = glypr_core::quantize_int8(&vec);
                     match output {
                         OutputArg::Preview => {
@@ -566,15 +573,6 @@ fn main() -> Result<()> {
             port,
             max_batch_size,
         } => {
-            // In server mode, automatically attach canonical multimodal projector if available
-            let proj_path = match mmproj_override {
-                Some(p) => Some(p),
-                None => resolve_canonical_mmproj(cli.q8).ok(),
-            };
-            if let Some(ref p) = proj_path {
-                embedder.attach_multimodal_projector(p)?;
-            }
-
             let config = glypr_server::ServerConfig {
                 host,
                 port,

@@ -49,8 +49,8 @@ When indexing large visual image catalogs such as trading cards (e.g. Magic: The
 * **280 Tokens (Default Fine Subtleties):** Allocates a higher density grid ($14 \times 20$), useful for capturing subtle micro-features such as expansion set symbols, rarity icons, collector card numbers, and fine artist credits.
 * **Hybrid Visual + Title Search Pattern:** In production card search, pairing the card image with title conditioning produces maximum separation against near-duplicate reprints:
   ```bash
-  # CLI: Interleaved card title + image with 140-token budget
-  glypr embed "Card title: Black Lotus" ./black_lotus.png --image-token-budget 140 --task Document --title "Black Lotus"
+  # CLI: Interleaved card title + image with 140-token budget (explicit BF16 projector)
+  glypr --bf16-mmproj embed "Card title: Black Lotus" ./black_lotus.png --image-token-budget 140 --task Document --title "Black Lotus"
   ```
 
 

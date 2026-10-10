@@ -28,17 +28,23 @@ fn test_cli_info() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("GLYPR ENGINE INFORMATION"));
     assert!(stdout.contains("Hugging Face Cache:"));
-    assert!(stdout.contains("Canonical GGUF Models:"));
-    assert!(stdout.contains("Hardware & Backend:"));
-    assert!(stdout.contains("Supported Capabilities:"));
+    assert!(stdout.contains("Canonical Models:"));
+    assert!(stdout.contains("--bf16"));
+    assert!(stdout.contains("--bf16-mmproj"));
+    assert!(stdout.contains("Hardware & Runtime:"));
+    assert!(stdout.contains("8,192 tokens"));
+    assert!(stdout.contains("Attention Kernels (--attention):"));
+    assert!(stdout.contains("Output Dimensions (--dim):"));
+    assert!(stdout.contains("Encoding Format (--encoding):"));
+    assert!(stdout.contains("Vision Budget (--image-token-budget):"));
 }
 
 #[test]
 fn test_cli_pull_dry_or_cached() {
     let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
-        .args(["pull", "--q8"])
+        .args(["--q8", "pull"])
         .output()
-        .expect("Failed to execute glypr pull --q8");
+        .expect("Failed to execute glypr --q8 pull");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -125,6 +131,33 @@ fn test_cli_embed_q8_int8_json() {
 }
 
 #[test]
+fn test_cli_embed_q8_int_json() {
+    let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args([
+            "--q8",
+            "embed",
+            "Magic: The Gathering Black Lotus card text",
+            "--encoding",
+            "int",
+            "--dim",
+            "64",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("Failed to execute glypr --q8 embed int");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let values: Vec<i8> = serde_json::from_str(stdout.trim())
+        .expect("Output should be valid JSON array of i8 integers");
+    assert_eq!(values.len(), 64);
+
+    // Ensure non-trivial values
+    assert!(values.iter().any(|&v| v != 0));
+}
+
+#[test]
 fn test_cli_embed_binary_raw_bytes() {
     let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
         .args([
@@ -154,6 +187,7 @@ fn test_cli_embed_multimodal_interleaved() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
         .args([
+            "--bf16-mmproj",
             "embed",
             "Card illustration:",
             image_path,
@@ -171,6 +205,31 @@ fn test_cli_embed_multimodal_interleaved() {
     let values: Vec<f32> = serde_json::from_str(stdout.trim())
         .expect("Multimodal output should be valid JSON array of floats");
     assert_eq!(values.len(), 64);
+}
+
+#[test]
+fn test_cli_embed_multimodal_fails_without_mmproj() {
+    let image_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/golden_vectors/multimodal_test_image.png"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args([
+            "embed",
+            "Card illustration:",
+            image_path,
+            "and title card.",
+            "--dim",
+            "64",
+        ])
+        .output()
+        .expect("Failed to execute glypr embed");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Media input detected in arguments, but no multimodal projector was attached"));
+    assert!(stderr.contains("--bf16-mmproj"));
 }
 
 #[test]

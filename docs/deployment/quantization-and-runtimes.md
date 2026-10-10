@@ -242,14 +242,17 @@ glypr embed "Single-file text embedding"
 # 2. Opt into Q8_0 weights with Matryoshka dimension truncation and JSON output:
 glypr --q8 embed "Single-file text embedding" --dim 256 -o json
 
-# 3. Interleaved multimodal with automatic mmproj resolution and attachment:
-glypr embed "Multimodal query:" ./image.png
+# 3. Interleaved multimodal with explicit projector opt-in:
+glypr --bf16-mmproj embed "Multimodal query:" ./image.png
 
-# 4. Explicit local file overrides (disables auto-downloading):
-glypr --model ./custom.gguf --mmproj ./custom-mmproj.gguf embed "Local model query"
+# 4. Explicit local file overrides:
+glypr --model-file ./custom.gguf --mmproj-file ./custom-mmproj.gguf embed "Local model query"
 
-# 5. Launch high-throughput OpenAI-compatible HTTP embedding server:
+# 5. Launch high-throughput OpenAI-compatible HTTP embedding server (text-only by default):
 glypr serve --port 8080 --max-batch-size 32
+
+# 6. Launch server with multimodal projector attached:
+glypr --bf16-mmproj serve --port 8080
 ```
 
 ---

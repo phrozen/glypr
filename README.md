@@ -76,22 +76,22 @@ echo "Fast stream test" | ./target/release/glypr embed --encoding int8 -o json
 ```
 
 #### Interleaved Multimodal (Text + Images + Audio)
-Arguments are parsed positionally in natural order. If an argument points to an existing `.png` image or 16 kHz `.wav` file on disk, `glypr` automatically streams it to the multimodal projector; otherwise, it is treated as text:
+Multimodal projector loading is explicit and opt-in (defaulting to text-only with 0 extra memory or downloads). Pass `--bf16-mmproj`, `--q8-mmproj`, or `--mmproj-file <FILE>` to attach a projector. If an argument points to an existing image or 16 kHz audio file on disk, `glypr` streams it to the multimodal projector; otherwise, it is treated as text:
 ```bash
-# Interleaved Text + PNG Card Image
-./target/release/glypr embed "Card illustration:" ./card.png "and card description."
+# Interleaved Text + PNG Card Image (with BF16 projector)
+./target/release/glypr --bf16-mmproj embed "Card illustration:" ./card.png "and card description."
 
 # Audio query
-./target/release/glypr embed "Query sound:" ./speech.wav --task SearchQuery
+./target/release/glypr --bf16-mmproj embed "Query sound:" ./speech.wav --task SearchQuery
 
 # Adjust vision token budget (e.g. 140 for 480x680 card verbatim, 280 default, 560 high)
-./target/release/glypr embed ./card.png --image-token-budget 140
+./target/release/glypr --bf16-mmproj embed ./card.png --image-token-budget 140
 ```
 
 #### Vector Encodings & Raw Binary Streaming
 ```bash
 # Zero-metadata INT8 quantization (values in [-127, 127]) formatted as JSON array
-./target/release/glypr embed "Database indexing" --encoding int8 -o json
+./target/release/glypr embed "Database indexing" --encoding int -o json
 
 # Binary 1-bit quantization streamed directly as raw bytes to stdout (e.g. 768d = 96 raw bytes)
 ./target/release/glypr embed "High-throughput search" --encoding binary -o raw > vector.bin
@@ -100,17 +100,20 @@ Arguments are parsed positionally in natural order. If an argument points to an 
 ### 4. Custom Model & Projector Overrides
 To run local models or fine-tunes without contacting Hugging Face:
 ```bash
-./target/release/glypr --model /path/to/custom-model.gguf --mmproj /path/to/custom-mmproj.gguf embed "Custom weights query"
+./target/release/glypr --model-file /path/to/custom-model.gguf --mmproj-file /path/to/custom-mmproj.gguf embed "Custom weights query"
 ```
 
 ### 5. OpenAI-Compatible HTTP Serving Engine (`glypr serve`)
-Launch a high-performance HTTP server with adaptive dynamic batching, MRL truncation, and quantization support:
+Launch a high-performance HTTP server with adaptive dynamic batching, MRL truncation, and quantization support. Like `embed`, the server defaults to text-only mode unless started with an mmproj flag:
 ```bash
-# Start server listening on port 8080 (defaults to auto Metal/CPU device and BF16)
+# Start text-only server listening on port 8080 (defaults to auto Metal/CPU device and BF16)
 ./target/release/glypr serve --port 8080 --max-batch-size 32
 
-# Or serve with Q8_0 weights:
-./target/release/glypr --q8 serve --port 8080
+# Or serve with multimodal support:
+./target/release/glypr --bf16-mmproj serve --port 8080
+
+# Or serve with Q8_0 base weights and Q8_0 multimodal projector:
+./target/release/glypr --q8 --q8-mmproj serve --port 8080
 ```
 
 Query with standard OpenAI API clients or `curl`:
