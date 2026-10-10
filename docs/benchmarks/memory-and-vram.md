@@ -168,8 +168,31 @@ During multimodal batch processing (such as indexing card images or visual docum
    - Under batch loops or concurrent requests, `MTLCommandBuffer` retained transient memory buffers until the command queue completed and drained.
    - At a batch of 8 to 16 cards, $8 \times 3.95\text{ GB} = \mathbf{31.6\text{ GB}}$ of transient allocations accumulated simultaneously, triggering aggressive swap thrashing and kernel memory pressure warnings.
 
-### The Glypr Fused SDPA Solution:
-- With **Fused Metal SDPA Attention**, the $N \times N$ attention weight matrix is **never materialized in memory**.
-- Scaled dot-product attention and online softmax are computed on-the-fly inside hardware threadgroup registers.
-- All $3.95\text{ GB}$ of transient allocations per image are **reduced to $0\text{ MB}$**.
-- Memory consumption per card is flat, predictable, and strictly bounded, enabling safe scaling to large batch sizes ($B=16, 32, 64$) without memory spikes.
+### The Glypr Fused SDPA & Autorelease Scoping Solution:
+1. **Fused Metal SDPA Attention:**
+   - The $N \times N$ attention weight matrix is **never materialized in memory**.
+   - Scaled dot-product attention and online softmax are computed on-the-fly inside hardware threadgroup registers.
+   - All $3.95\text{ GB}$ of transient allocations per image are **reduced to $0\text{ MB}$**.
+2. **Apple Metal Autorelease Pool Scoping (`AutoreleaseScope`):**
+   - Metal command buffer allocations and transient tensor buffers are scoped via `objc_autoreleasePoolPush()` / `objc_autoreleasePoolPop()`.
+   - Every batch iteration drains immediately, ensuring zero accumulation across consecutive batches or continuous server operation.
+   - CPU image decompression (PNG/JPEG) is pre-executed concurrently in Tokio blocking worker threads prior to GPU submission, leaving the GPU worker thread free from CPU heap inflation.
+
+### Empirical MTG Card Batch Memory Profile (32 Real Cards, Budget 140):
+
+```bash
+cargo run --example bench_cards --release --features metal
+```
+
+| Execution Configuration | Batch Size | Total Wallclock | Per-Card Latency | Throughput | Parity | Metal VRAM | Peak Process RSS |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Sequential Baseline** | 1 | 2,413.57 ms | 75.40 ms / card | 13.26 cards/sec | 1.000000 | 1,632.88 MB | **2,037.92 MB** |
+| **Batched (`ChunkedSliding`)** | 4 | 259.80 ms | **64.95 ms / card** | **15.40 cards/sec** | **1.000000** | 1,641.67 MB | **2,037.92 MB** |
+| **Batched (`ChunkedSliding`)** | 8 | 523.38 ms | **65.42 ms / card** | **15.29 cards/sec** | **1.000000** | 1,673.69 MB | **2,037.92 MB** |
+| **Batched (`ChunkedSliding`)** | 16 | 1,068.99 ms | **66.81 ms / card** | **14.97 cards/sec** | **1.000000** | 1,967.72 MB | **2,037.92 MB** |
+| **Batched (`ChunkedSliding`)** | 32 | 2,215.20 ms | **69.23 ms / card** | **14.45 cards/sec** | **1.000000** | 3,130.28 MB | **2,037.92 MB** |
+| **Batched (`MetalFlash`)** | 8 | 509.55 ms | **63.69 ms / card** | **15.70 cards/sec** | 0.999931 | 1,673.69 MB | **2,037.92 MB** |
+| **Batched (`MetalFlash`)** | 32 | 2,147.53 ms | **67.11 ms / card** | **14.90 cards/sec** | 0.999931 | 3,130.28 MB | **2,037.92 MB** |
+
+> [!NOTE]
+> Peak process RSS remains strictly locked at **$2,037.92\text{ MB}$** throughout the entire 32-card batch execution, with **zero memory leakage** and zero swap inflation. Parity with sequential single-item execution is **100% bit-exact (1.000000)** under `ChunkedSliding`.
