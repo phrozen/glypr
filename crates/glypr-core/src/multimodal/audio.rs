@@ -345,7 +345,14 @@ impl AudioLightConv1d {
         let dw_in = glu_out.transpose(1, 2)?.contiguous()?;
         // Causal padding: pad 4 on the left
         let dw_in = dw_in.pad_with_zeros(D::Minus1, 4, 0)?;
-        let dw_out = dw_in.conv1d(&self.depthwise_conv_weight, 0, 1, 1, self.hidden_size)?; // groups = hidden_size
+        let seq_len = glu_out.dim(1)?;
+
+        // Fused 5-tap depthwise convolution: replaces Candle's 1,024 single-group chunk & cat dispatches
+        let mut dw_out = dw_in.narrow(2, 0, seq_len)?.broadcast_mul(&self.depthwise_conv_weight.narrow(2, 0, 1)?)?;
+        for k in 1..5 {
+            let term = dw_in.narrow(2, k, seq_len)?.broadcast_mul(&self.depthwise_conv_weight.narrow(2, k, 1)?)?;
+            dw_out = (dw_out + term)?;
+        }
         let dw_out = dw_out.transpose(1, 2)?.contiguous()?; // [batch, seq_len, 1024]
 
         let conv_normed = self.conv_norm.forward(&dw_out)?;
@@ -586,7 +593,7 @@ impl AudioTower {
             let dw_pre_ln_w = load_gguf_norm_tensor(content, reader, &format!("{}.conv_norm.weight", prefix), device, dtype)?;
             let dw_pw1 = load_gguf_clippable_linear_op(content, reader, &format!("{}.conv_pw1", prefix), device, dtype)?;
             let dw_w = content.tensor(reader, &format!("{}.conv_dw.weight", prefix), device)?
-                .dequantize(device)?.to_dtype(dtype)?.unsqueeze(1)?; // [1024, 1, 5]
+                .dequantize(device)?.to_dtype(dtype)?.unsqueeze(0)?; // [1, 1024, 5]
             let dw_conv_norm_w = load_gguf_norm_tensor(content, reader, &format!("{}.norm_conv.weight", prefix), device, dtype)?;
             let dw_pw2 = load_gguf_clippable_linear_op(content, reader, &format!("{}.conv_pw2", prefix), device, dtype)?;
 
