@@ -83,19 +83,17 @@ impl VisionRotaryEmbedding {
         Self { head_dim, rope_theta }
     }
 
-    /// Rotate Q or K tensor of shape [batch, num_heads, num_patches, head_dim]
-    pub fn apply_rope(
+    /// Precompute (cos, sin) tensors once for all patches: [1, 1, num_patches, head_dim]
+    pub fn precompute(
         &self,
-        x: &Tensor,
-        position_ids: &Tensor, // [num_patches, 2] (x, y)
+        position_ids: &Tensor,
+        num_patches: usize,
         dtype: DType,
         device: &Device,
-    ) -> Result<Tensor> {
-        let (_batch, _heads, num_patches, head_dim) = x.dims4()?;
-        let spatial_dim = head_dim / 2; // 32
-        let num_freqs = spatial_dim / 2; // 16
+    ) -> Result<(Tensor, Tensor)> {
+        let spatial_dim = self.head_dim / 2;
+        let num_freqs = spatial_dim / 2;
 
-        // Compute inv_freq: 1.0 / (rope_theta ** (2i / spatial_dim))
         let mut inv_freq = Vec::with_capacity(num_freqs);
         for i in 0..num_freqs {
             let exponent = (2 * i) as f64 / (spatial_dim as f64);
@@ -105,41 +103,38 @@ impl VisionRotaryEmbedding {
         let pos_cpu = position_ids.to_device(&Device::Cpu)?.to_dtype(DType::U32)?;
         let pos_data: Vec<u32> = pos_cpu.flatten_all()?.to_vec1()?;
 
-        let mut cos_vec = vec![0.0f32; num_patches * head_dim];
-        let mut sin_vec = vec![0.0f32; num_patches * head_dim];
+        let mut cos_vec = vec![0.0f32; num_patches * self.head_dim];
+        let mut sin_vec = vec![0.0f32; num_patches * self.head_dim];
 
         for p in 0..num_patches {
-            let px = pos_data[p * 2] as f32;     // x coordinate
-            let py = pos_data[p * 2 + 1] as f32; // y coordinate
+            let px = pos_data[p * 2] as f32;
+            let py = pos_data[p * 2 + 1] as f32;
+            let offset = p * self.head_dim;
 
-            // 1. Width (X) frequencies (Half 0: channels 0..32)
             for i in 0..num_freqs {
-                let theta = px * inv_freq[i];
-                let c = theta.cos();
-                let s = theta.sin();
-                cos_vec[p * head_dim + i] = c;
-                cos_vec[p * head_dim + i + num_freqs] = c;
-                sin_vec[p * head_dim + i] = s;
-                sin_vec[p * head_dim + i + num_freqs] = s;
-            }
+                let theta_x = px * inv_freq[i];
+                let (sx, cx) = (theta_x.sin(), theta_x.cos());
+                cos_vec[offset + i] = cx;
+                cos_vec[offset + i + num_freqs] = cx;
+                sin_vec[offset + i] = sx;
+                sin_vec[offset + i + num_freqs] = sx;
 
-            // 2. Height (Y) frequencies (Half 1: channels 32..64)
-            for i in 0..num_freqs {
-                let theta = py * inv_freq[i];
-                let c = theta.cos();
-                let s = theta.sin();
-                cos_vec[p * head_dim + spatial_dim + i] = c;
-                cos_vec[p * head_dim + spatial_dim + i + num_freqs] = c;
-                sin_vec[p * head_dim + spatial_dim + i] = s;
-                sin_vec[p * head_dim + spatial_dim + i + num_freqs] = s;
+                let theta_y = py * inv_freq[i];
+                let (sy, cy) = (theta_y.sin(), theta_y.cos());
+                cos_vec[offset + spatial_dim + i] = cy;
+                cos_vec[offset + spatial_dim + i + num_freqs] = cy;
+                sin_vec[offset + spatial_dim + i] = sy;
+                sin_vec[offset + spatial_dim + i + num_freqs] = sy;
             }
         }
 
-        let cos = Tensor::from_vec(cos_vec, (1, 1, num_patches, head_dim), device)?.to_dtype(dtype)?;
-        let sin = Tensor::from_vec(sin_vec, (1, 1, num_patches, head_dim), device)?.to_dtype(dtype)?;
+        let cos = Tensor::from_vec(cos_vec, (1, 1, num_patches, self.head_dim), device)?.to_dtype(dtype)?;
+        let sin = Tensor::from_vec(sin_vec, (1, 1, num_patches, self.head_dim), device)?.to_dtype(dtype)?;
+        Ok((cos, sin))
+    }
 
-        // RoPE rotation across the two 32-dim halves:
-        // Half 0: (x[0..16], x[16..32]) -> rotate_half
+    /// Fast GPU/CPU rotation using precomputed (cos, sin) tensors
+    pub fn apply_precomputed(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
         let x_h0 = x.narrow(D::Minus1, 0, 16)?.contiguous()?;
         let x_h1 = x.narrow(D::Minus1, 16, 16)?.contiguous()?;
         let rot_h = Tensor::cat(&[&x_h1.neg()?, &x_h0], D::Minus1)?;
@@ -147,11 +142,22 @@ impl VisionRotaryEmbedding {
         let x_w0 = x.narrow(D::Minus1, 32, 16)?.contiguous()?;
         let x_w1 = x.narrow(D::Minus1, 48, 16)?.contiguous()?;
         let rot_w = Tensor::cat(&[&x_w1.neg()?, &x_w0], D::Minus1)?;
-
         let rot_x = Tensor::cat(&[&rot_h, &rot_w], D::Minus1)?;
 
-        let rotated = (x.broadcast_mul(&cos)? + rot_x.broadcast_mul(&sin)?)?;
-        Ok(rotated)
+        x.broadcast_mul(cos)? + rot_x.broadcast_mul(sin)?
+    }
+
+    /// Legacy on-the-fly RoPE calculation (kept for standalone compatibility)
+    pub fn apply_rope(
+        &self,
+        x: &Tensor,
+        position_ids: &Tensor,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Tensor> {
+        let (_batch, _heads, num_patches, _head_dim) = x.dims4()?;
+        let (cos, sin) = self.precompute(position_ids, num_patches, dtype, device)?;
+        self.apply_precomputed(x, &cos, &sin)
     }
 }
 
@@ -173,7 +179,8 @@ impl VisionAttention {
         &self,
         hidden_states: &Tensor,
         rope: &VisionRotaryEmbedding,
-        position_ids: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
     ) -> Result<Tensor> {
         let (batch, seq_len, _hidden_size) = hidden_states.dims3()?;
 
@@ -196,11 +203,9 @@ impl VisionAttention {
         let k = k.permute((0, 2, 1, 3))?.contiguous()?;
         let v = v.permute((0, 2, 1, 3))?.contiguous()?;
 
-        // Apply 2D Axial RoPE to Q and K
-        let dtype = hidden_states.dtype();
-        let device = hidden_states.device();
-        let q = rope.apply_rope(&q, position_ids, dtype, device)?;
-        let k = rope.apply_rope(&k, position_ids, dtype, device)?;
+        // Apply 2D Axial RoPE to Q and K with precomputed tensors
+        let q = rope.apply_precomputed(&q, cos, sin)?;
+        let k = rope.apply_precomputed(&k, cos, sin)?;
 
         // Non-causal Bidirectional Attention with scaling = 1.0
         let k_t = k.transpose(2, 3)?.contiguous()?;
@@ -209,6 +214,7 @@ impl VisionAttention {
         // Softmax in Float32
         let attn_weights_f32 = attn_weights.to_dtype(DType::F32)?;
         let attn_probs_f32 = candle_nn::ops::softmax(&attn_weights_f32, D::Minus1)?;
+        let dtype = hidden_states.dtype();
         let attn_probs = attn_probs_f32.to_dtype(dtype)?;
 
         // [batch, num_heads, seq_len, head_dim]
@@ -235,11 +241,12 @@ impl VisionEncoderLayer {
         &self,
         hidden_states: &Tensor,
         rope: &VisionRotaryEmbedding,
-        position_ids: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
     ) -> Result<Tensor> {
         // Pre-attention layernorm
         let normed = self.ln1.forward(hidden_states)?;
-        let attn_out = self.self_attn.forward(&normed, rope, position_ids)?;
+        let attn_out = self.self_attn.forward(&normed, rope, cos, sin)?;
         let attn_out = self.attn_post_norm.forward(&attn_out)?;
         let hidden_states = (hidden_states + attn_out)?;
 
@@ -364,9 +371,12 @@ impl VisionTower {
         // 1. Patch projection + 2D position embeddings
         let mut hidden_states = self.patch_embedder.forward(&pixel_tensor, &pos_tensor)?;
 
+        // Precompute 2D Axial RoPE (cos, sin) once across all 16 layers
+        let (cos, sin) = self.rotary_emb.precompute(&pos_tensor, num_patches, self.dtype, &self.device)?;
+
         // 2. 16 Transformer layers
         for layer in &self.layers {
-            hidden_states = layer.forward(&hidden_states, &self.rotary_emb, &pos_tensor)?;
+            hidden_states = layer.forward(&hidden_states, &self.rotary_emb, &cos, &sin)?;
         }
 
         // 3. 2D Spatial pooling
