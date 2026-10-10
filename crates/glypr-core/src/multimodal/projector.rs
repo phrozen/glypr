@@ -93,6 +93,64 @@ impl MultimodalProjector {
         Ok((soft_tokens, num_soft_tokens))
     }
 
+    /// Encode a batch of images with specified token budgets.
+    /// If all images share identical patch layouts (e.g. batch of cards), they execute in a single
+    /// batched ViT forward pass. Preprocessing is automatically parallelized with Rayon.
+    pub fn encode_images_batch(
+        &self,
+        images_and_budgets: &[(&DynamicImage, usize)],
+    ) -> Result<Vec<(Tensor, usize)>> {
+        if images_and_budgets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tower = self.vision_tower.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Vision Tower is not available in this multimodal projector")
+        })?;
+
+        // Parallel image preprocessing across CPU cores with Rayon
+        use rayon::prelude::*;
+        let patch_size = tower.config.patch_size;
+        let pooling_kernel_size = tower.config.pooling_kernel_size;
+
+        let processed: Vec<Result<ProcessedImage>> = images_and_budgets
+            .into_par_iter()
+            .map(|(img, b)| preprocess_image(img, *b, patch_size, pooling_kernel_size))
+            .collect();
+
+        let mut processed_images = Vec::with_capacity(processed.len());
+        for res in processed {
+            processed_images.push(res?);
+        }
+
+        // Check if all images have the same patch grid dimensions
+        let is_homogeneous = processed_images.len() > 1 && processed_images.windows(2).all(|w| {
+            w[0].num_patches == w[1].num_patches
+                && w[0].patch_width == w[1].patch_width
+                && w[0].patch_height == w[1].patch_height
+        });
+
+        if is_homogeneous {
+            let batched_tokens = tower.encode_batch(&processed_images)?; // [b, num_soft_tokens, 512]
+            let b = processed_images.len();
+            let mut result = Vec::with_capacity(b);
+            for i in 0..b {
+                let single = batched_tokens.get(i)?; // [num_soft_tokens, 512]
+                let count = processed_images[i].num_soft_tokens;
+                result.push((single, count));
+            }
+            Ok(result)
+        } else {
+            // Heterogeneous images or single image: encode individually
+            let mut result = Vec::with_capacity(processed_images.len());
+            for p in &processed_images {
+                let soft = tower.encode(p)?;
+                result.push((soft, p.num_soft_tokens));
+            }
+            Ok(result)
+        }
+    }
+
+
     /// Encode raw 16 kHz audio samples into soft tokens [num_soft_tokens, 512]
     pub fn encode_audio(&self, samples: &[f32]) -> Result<(Tensor, usize)> {
         let tower = self.audio_tower.as_ref().ok_or_else(|| {

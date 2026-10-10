@@ -273,10 +273,10 @@ impl VisionPooler {
         }
     }
 
-    /// Spatial 2D average pooling over 3x3 patch blocks
+    /// Spatial 2D average pooling over 3x3 patch blocks across batch
     pub fn pool(
         &self,
-        hidden_states: &Tensor, // [1, num_patches, 768]
+        hidden_states: &Tensor, // [b, num_patches, 768]
         patch_width: usize,
         patch_height: usize,
     ) -> Result<Tensor> {
@@ -284,25 +284,26 @@ impl VisionPooler {
         let out_w = patch_width / k;
         let out_h = patch_height / k;
         let hidden_size = hidden_states.dim(D::Minus1)?;
+        let b = hidden_states.dim(0)?;
 
         let orig_dtype = hidden_states.dtype();
-        // Stage 1: Height pooling (Rank 3: [out_h, k, patch_width * hidden_size] -> [out_h, patch_width * hidden_size])
+        // Stage 1: Height pooling (Rank 3: [b * out_h, k, patch_width * hidden_size] -> [b * out_h, patch_width * hidden_size])
         // Candle Metal kernels natively support rank <= 4 with exact hardware striding.
         let h_blocks = hidden_states
             .to_dtype(DType::F32)?
-            .reshape((out_h, k, patch_width * hidden_size))?;
+            .reshape((b * out_h, k, patch_width * hidden_size))?;
         let h_sum = h_blocks.sum(1)?;
 
-        // Stage 2: Width pooling (Rank 4: [out_h, out_w, k, hidden_size] -> [out_h, out_w, hidden_size])
-        let w_blocks = h_sum.reshape((out_h, out_w, k, hidden_size))?;
+        // Stage 2: Width pooling (Rank 4: [b * out_h, out_w, k, hidden_size] -> [b * out_h, out_w, hidden_size])
+        let w_blocks = h_sum.reshape((b * out_h, out_w, k, hidden_size))?;
         let hw_sum = w_blocks.sum(2)?;
 
-        // Scale by root_hidden_size / (k * k) and reshape to [1, out_tokens, hidden_size]
+        // Scale by root_hidden_size / (k * k) and reshape to [b, out_tokens, hidden_size]
         let scale = self.root_hidden_size / ((k * k) as f64);
         let scaled = (&hw_sum * scale)?;
 
         scaled
-            .reshape((1, out_h * out_w, hidden_size))?
+            .reshape((b, out_h * out_w, hidden_size))?
             .to_dtype(orig_dtype)
     }
 }
@@ -333,47 +334,72 @@ pub struct VisionTower {
 }
 
 impl VisionTower {
-    /// Encode a processed image into soft tokens [num_soft_tokens, 512]
+    /// Encode a single processed image into soft tokens [num_soft_tokens, 512]
     pub fn encode(&self, processed: &ProcessedImage) -> Result<Tensor> {
-        let num_patches = processed.num_patches;
+        let batched = self.encode_batch(std::slice::from_ref(processed))?;
+        batched.squeeze(0)
+    }
+
+    /// Encode a batch of homogeneous processed images in a single batched ViT pass.
+    /// Returns [b, num_soft_tokens, 512].
+    pub fn encode_batch(&self, batch: &[ProcessedImage]) -> Result<Tensor> {
+        if batch.is_empty() {
+            candle_core::bail!("Cannot encode empty vision batch");
+        }
+        let b = batch.len();
+
+        let num_patches = batch[0].num_patches;
         let patch_pixels = 768;
 
+        // Flatten all pixel values into a contiguous buffer
+        let mut all_pixels = Vec::with_capacity(b * num_patches * patch_pixels);
+        for img in batch {
+            if img.num_patches != num_patches {
+                candle_core::bail!(
+                    "Heterogeneous patch counts in encode_batch: expected {}, got {}",
+                    num_patches,
+                    img.num_patches
+                );
+            }
+            all_pixels.extend_from_slice(&img.pixel_values);
+        }
+
         let pixel_tensor = Tensor::from_vec(
-            processed.pixel_values.clone(),
-            (1, num_patches, patch_pixels),
+            all_pixels,
+            (b, num_patches, patch_pixels),
             &self.device,
         )?
         .to_dtype(self.dtype)?;
 
         let pos_tensor = Tensor::from_vec(
-            processed.position_ids.clone(),
+            batch[0].position_ids.clone(),
             (num_patches, 2),
             &self.device,
         )?
         .to_dtype(DType::U32)?;
 
-        // 1. Patch projection + 2D position embeddings
+        // 1. Batch patch projection: [b, num_patches, 768]
         let mut hidden_states = self.patch_embedder.forward(&pixel_tensor, &pos_tensor)?;
 
-        // Precompute 2D Axial RoPE (cos, sin) once across all 16 layers
+        // 2. Precompute 2D Axial RoPE
         let (cos, sin) = self.rotary_emb.precompute(&pos_tensor, num_patches, self.dtype, &self.device)?;
 
-        // 2. 16 Transformer layers
+        // 3. 16 Transformer layers (batched SDPA natively executes across [b, heads, patches, dim])
         for layer in &self.layers {
             hidden_states = layer.forward(&hidden_states, &self.rotary_emb, &cos, &sin)?;
         }
 
-        // 3. 2D Spatial pooling
+        // 4. Batched 2D Spatial pooling: [b, num_soft_tokens, 768]
         let pooled = self.pooler.pool(
             &hidden_states,
-            processed.patch_width,
-            processed.patch_height,
+            batch[0].patch_width,
+            batch[0].patch_height,
         )?;
 
-        // 4. Project into 512-dim embedding space
-        let soft_tokens = self.projector.forward(&pooled)?;
-        soft_tokens.squeeze(0) // [num_soft_tokens, 512]
+        // 5. Batched projection to 512 dimensions: [b, num_soft_tokens, 512]
+        self.projector.forward(&pooled)
     }
+
 
     /// Load Vision Tower directly from GGUF file
     pub fn from_gguf<R: std::io::Read + std::io::Seek>(

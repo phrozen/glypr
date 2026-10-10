@@ -194,7 +194,63 @@ pub fn int8_cosine_similarity(a: &[i8], b: &[i8]) -> f32 {
     ((dot as f32) / denom).clamp(-1.0, 1.0)
 }
 
+// =========================================================================
+// Memory Lifecycle & Objective-C Autorelease Pool Scoping
+// =========================================================================
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::duplicated_attributes)]
+extern "C" {
+    fn objc_autoreleasePoolPush() -> *mut std::ffi::c_void;
+    fn objc_autoreleasePoolPop(pool: *mut std::ffi::c_void);
+}
+
+/// RAII scope guard to ensure Apple Metal command buffers and transient objects
+/// are drained immediately after batch execution.
+#[derive(Debug, Default)]
+pub struct AutoreleaseScope {
+    #[cfg(target_os = "macos")]
+    pool: *mut std::ffi::c_void,
+}
+
+impl AutoreleaseScope {
+    #[inline(always)]
+    pub fn new() -> Self {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            Self {
+                pool: objc_autoreleasePoolPush(),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        Self {}
+    }
+}
+
+impl Drop for AutoreleaseScope {
+    #[inline(always)]
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            if !self.pool.is_null() {
+                objc_autoreleasePoolPop(self.pool);
+            }
+        }
+    }
+}
+
+/// Execute a closure within a scoped Objective-C autorelease pool on macOS (no-op on Linux/Windows).
+#[inline(always)]
+pub fn with_autorelease_pool<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _scope = AutoreleaseScope::new();
+    f()
+}
+
 #[cfg(test)]
+
 mod tests {
     use super::*;
 
