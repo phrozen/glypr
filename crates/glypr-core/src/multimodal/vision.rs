@@ -282,44 +282,27 @@ impl VisionPooler {
         let k = self.pooling_kernel_size;
         let out_w = patch_width / k;
         let out_h = patch_height / k;
-        let out_tokens = out_w * out_h;
         let hidden_size = hidden_states.dim(D::Minus1)?;
 
-        let hs_f32 = hidden_states.squeeze(0)?.to_dtype(DType::F32)?; // [num_patches, hidden_size]
-        let hs_vec: Vec<f32> = hs_f32.flatten_all()?.to_vec1()?;
+        let orig_dtype = hidden_states.dtype();
+        // Stage 1: Height pooling (Rank 3: [out_h, k, patch_width * hidden_size] -> [out_h, patch_width * hidden_size])
+        // Candle Metal kernels natively support rank <= 4 with exact hardware striding.
+        let h_blocks = hidden_states
+            .to_dtype(DType::F32)?
+            .reshape((out_h, k, patch_width * hidden_size))?;
+        let h_sum = h_blocks.sum(1)?;
 
-        let mut pooled_vec = vec![0.0f32; out_tokens * hidden_size];
-        let k_squared = (k * k) as f32;
+        // Stage 2: Width pooling (Rank 4: [out_h, out_w, k, hidden_size] -> [out_h, out_w, hidden_size])
+        let w_blocks = h_sum.reshape((out_h, out_w, k, hidden_size))?;
+        let hw_sum = w_blocks.sum(2)?;
 
-        for oy in 0..out_h {
-            for ox in 0..out_w {
-                let out_idx = oy * out_w + ox;
-                let out_offset = out_idx * hidden_size;
+        // Scale by root_hidden_size / (k * k) and reshape to [1, out_tokens, hidden_size]
+        let scale = self.root_hidden_size / ((k * k) as f64);
+        let scaled = (&hw_sum * scale)?;
 
-                for ky in 0..k {
-                    let py = oy * k + ky;
-                    for kx in 0..k {
-                        let px = ox * k + kx;
-                        let patch_idx = py * patch_width + px;
-                        let in_offset = patch_idx * hidden_size;
-
-                        for d in 0..hidden_size {
-                            pooled_vec[out_offset + d] += hs_vec[in_offset + d];
-                        }
-                    }
-                }
-
-                // Average and scale by root_hidden_size (sqrt(768))
-                let scale = (self.root_hidden_size as f32) / k_squared;
-                for d in 0..hidden_size {
-                    pooled_vec[out_offset + d] *= scale;
-                }
-            }
-        }
-
-        let pooled = Tensor::from_vec(pooled_vec, (1, out_tokens, hidden_size), hidden_states.device())?
-            .to_dtype(hidden_states.dtype())?;
-        Ok(pooled)
+        scaled
+            .reshape((1, out_h * out_w, hidden_size))?
+            .to_dtype(orig_dtype)
     }
 }
 
@@ -491,5 +474,66 @@ impl VisionTower {
             device: device.clone(),
             dtype,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pooler_shapes() -> Result<()> {
+        let pooler = VisionPooler::new(3, 768);
+        let patch_width = 18;
+        let patch_height = 27;
+        let num_patches = patch_width * patch_height;
+        let device = if candle_core::utils::metal_is_available() {
+            Device::new_metal(0).unwrap_or(Device::Cpu)
+        } else {
+            Device::Cpu
+        };
+        let t = Tensor::randn(0.0f32, 1.0f32, (1, num_patches, 768), &device)?;
+        let k = 3;
+        let out_w = patch_width / k;
+        let out_h = patch_height / k;
+        let out_tokens = out_w * out_h;
+        let hidden_size = 768;
+        let hs_f32 = t.squeeze(0)?.to_dtype(DType::F32)?;
+        let hs_vec: Vec<f32> = hs_f32.flatten_all()?.to_vec1()?;
+        let mut old_pooled = vec![0.0f32; out_tokens * hidden_size];
+        let k_squared = (k * k) as f32;
+        for oy in 0..out_h {
+            for ox in 0..out_w {
+                let out_idx = oy * out_w + ox;
+                let out_offset = out_idx * hidden_size;
+                for ky in 0..k {
+                    let py = oy * k + ky;
+                    for kx in 0..k {
+                        let px = ox * k + kx;
+                        let patch_idx = py * patch_width + px;
+                        let in_offset = patch_idx * hidden_size;
+                        for d in 0..hidden_size {
+                            old_pooled[out_offset + d] += hs_vec[in_offset + d];
+                        }
+                    }
+                }
+                let scale = (pooler.root_hidden_size as f32) / k_squared;
+                for d in 0..hidden_size {
+                    old_pooled[out_offset + d] *= scale;
+                }
+            }
+        }
+
+        let new_t = pooler.pool(&t, patch_width, patch_height)?;
+        let new_vec: Vec<f32> = new_t.squeeze(0)?.flatten_all()?.to_vec1()?;
+
+        for i in 0..old_pooled.len() {
+            let diff = (old_pooled[i] - new_vec[i]).abs();
+            if diff > 1e-4 {
+                panic!("Mismatch at idx {}: old={}, new={}, diff={}", i, old_pooled[i], new_vec[i], diff);
+            }
+        }
+        println!("Test passed successfully!");
+        Ok(())
     }
 }
