@@ -57,6 +57,12 @@ fn main() -> Result<()> {
     println!("  Peak RSS:   {:.2} MB", get_peak_rss_mb());
 
     let cards_dir = PathBuf::from("tests/cards");
+    if !cards_dir.exists() {
+        println!("\nDirectory {:?} does not exist. Skipping card profiling.", cards_dir);
+        println!("To profile real cards, place JPG card images in {:?}.", cards_dir);
+        return Ok(());
+    }
+
     let mut card_paths = Vec::new();
     for entry in std::fs::read_dir(&cards_dir)? {
         let path = entry?.path();
@@ -65,6 +71,12 @@ fn main() -> Result<()> {
         }
     }
     card_paths.sort();
+
+    if card_paths.is_empty() {
+        println!("\nNo .jpg card images found in {:?}. Skipping card profiling.", cards_dir);
+        return Ok(());
+    }
+
     println!("\nFound {} MTG cards in {:?}", card_paths.len(), cards_dir);
 
     // Warm up with first card
