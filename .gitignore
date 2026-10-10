@@ -14,3 +14,7 @@ target/
 
 # OS metadata
 .DS_Store
+
+# Test fixture data (copyrighted/local assets)
+tests/cards/
+
