@@ -230,7 +230,13 @@ fn process_media_item(
         );
     }
 
-    let prompt = media.text.as_deref();
+    let formatted_prompt = match (media.text.as_deref(), task.as_task().prompt_prefix()) {
+        (Some(txt), Some(prefix)) => Some(format!("{}{}", prefix, txt)),
+        (Some(txt), None) => Some(txt.to_string()),
+        (None, Some(prefix)) => Some(prefix),
+        (None, None) => None,
+    };
+    let prompt = formatted_prompt.as_deref();
 
     let vec = if let Some(ref img_src) = media.image {
         let img = decode_image(img_src).context("Failed to decode image input")?;
@@ -243,8 +249,7 @@ fn process_media_item(
         embedder.embed_audio(&samples, prompt)?
     } else if let Some(ref txt) = media.text {
         // Text-only media item
-        let formatted = task.as_task().format_text(txt);
-        embedder.embed_text(&formatted, task.as_task())?
+        embedder.embed_text(txt, task.as_task())?
     } else {
         anyhow::bail!("Media input item has no text, image, or audio specified");
     };

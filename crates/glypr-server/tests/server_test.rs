@@ -378,6 +378,76 @@ async fn test_server_embeddings_multimodal_request() -> Result<()> {
     let emb = body["data"][0]["embedding"].as_array().unwrap();
     assert_eq!(emb.len(), 768);
 
+    // Verify task conditioning differentiation for multimodal inputs
+    // 1. Raw / unprompted image
+    let raw_payload = json!({
+        "task": "Raw",
+        "input": [{ "image": &img_b64, "budget": 70 }]
+    });
+    let raw_resp: serde_json::Value = client
+        .post(format!("{}/v1/embeddings", base_url))
+        .json(&raw_payload)
+        .send()
+        .await?
+        .json()
+        .await?;
+    let emb_raw: Vec<f64> = raw_resp["data"][0]["embedding"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+
+    // 2. Query task alias
+    let query_payload = json!({
+        "task": "Query",
+        "input": [{ "image": &img_b64, "budget": 70 }]
+    });
+    let query_resp: serde_json::Value = client
+        .post(format!("{}/v1/embeddings", base_url))
+        .json(&query_payload)
+        .send()
+        .await?
+        .json()
+        .await?;
+    let emb_query: Vec<f64> = query_resp["data"][0]["embedding"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+
+    // 3. Document task with title
+    let doc_payload = json!({
+        "task": "Document",
+        "title": "Black Lotus",
+        "input": [{ "image": &img_b64, "budget": 70 }]
+    });
+    let doc_resp: serde_json::Value = client
+        .post(format!("{}/v1/embeddings", base_url))
+        .json(&doc_payload)
+        .send()
+        .await?
+        .json()
+        .await?;
+    let emb_doc: Vec<f64> = doc_resp["data"][0]["embedding"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+
+    let dot = |a: &[f64], b: &[f64]| -> f64 { a.iter().zip(b.iter()).map(|(x, y)| x * y).sum() };
+
+    let sim_raw_query = dot(&emb_raw, &emb_query);
+    let sim_raw_doc = dot(&emb_raw, &emb_doc);
+    let sim_query_doc = dot(&emb_query, &emb_doc);
+
+    // Verify task conditioning produces distinct embeddings (not identical vectors)
+    assert!(sim_raw_query < 0.99, "Raw vs Query similarity too high: {}", sim_raw_query);
+    assert!(sim_raw_doc < 0.99, "Raw vs Document similarity too high: {}", sim_raw_doc);
+    assert!(sim_query_doc < 0.99, "Query vs Document similarity too high: {}", sim_query_doc);
+
     Ok(())
 }
 
