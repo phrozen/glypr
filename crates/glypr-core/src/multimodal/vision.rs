@@ -207,18 +207,19 @@ impl VisionAttention {
         let q = rope.apply_precomputed(&q, cos, sin)?;
         let k = rope.apply_precomputed(&k, cos, sin)?;
 
-        // Non-causal Bidirectional Attention with scaling = 1.0
-        let k_t = k.transpose(2, 3)?.contiguous()?;
-        let attn_weights = q.matmul(&k_t)?; // [batch, num_heads, seq_len, seq_len]
-
-        // Softmax in Float32
-        let attn_weights_f32 = attn_weights.to_dtype(DType::F32)?;
-        let attn_probs_f32 = candle_nn::ops::softmax(&attn_weights_f32, D::Minus1)?;
-        let dtype = hidden_states.dtype();
-        let attn_probs = attn_probs_f32.to_dtype(dtype)?;
-
-        // [batch, num_heads, seq_len, head_dim]
-        let attn_output = attn_probs.matmul(&v)?;
+        // Non-causal Bidirectional Attention (scaling = 1.0, softcapping = 1.0 / disabled)
+        // On Metal GPU: dispatch to fused hardware SDPA kernel (zero matrix materialization)
+        // On CPU: standard high-precision float32 softmax attention
+        let attn_output = if q.device().is_metal() {
+            candle_nn::ops::sdpa(&q, &k, &v, None, false, 1.0, 1.0)?
+        } else {
+            let k_t = k.transpose(2, 3)?.contiguous()?;
+            let attn_weights = q.matmul(&k_t)?;
+            let attn_weights_f32 = attn_weights.to_dtype(DType::F32)?;
+            let attn_probs_f32 = candle_nn::ops::softmax(&attn_weights_f32, D::Minus1)?;
+            let attn_probs = attn_probs_f32.to_dtype(hidden_states.dtype())?;
+            attn_probs.matmul(&v)?
+        };
 
         // Reshape back to [batch, seq_len, hidden_size]
         let attn_output = attn_output.permute((0, 2, 1, 3))?.reshape((batch, seq_len, self.num_heads * self.head_dim))?;
