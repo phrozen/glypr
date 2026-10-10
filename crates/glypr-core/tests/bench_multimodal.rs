@@ -38,18 +38,43 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
         println!("\n--- Benchmarking 480x680 Card (Budget: {}) ---", budget);
         let iterations = 5;
         let mut total_duration = std::time::Duration::ZERO;
+        let mut total_vision = std::time::Duration::ZERO;
+        let mut total_backbone = std::time::Duration::ZERO;
+
+        let proj = embedder.multimodal.as_ref().unwrap();
 
         for i in 1..=iterations {
-            let start = Instant::now();
-            let vec = embedder.embed_image_with_budget(&card_img, Some("Card art query"), budget)?;
-            let elapsed = start.elapsed();
-            total_duration += elapsed;
-            println!("  Iteration {}: {:.2} ms (norm: {:.4})", i, elapsed.as_secs_f64() * 1000.0, vec.iter().map(|x| x*x).sum::<f32>().sqrt());
+            let t0 = Instant::now();
+            let _ = proj.encode_image_with_budget(&card_img, budget)?;
+            let vision_dur = t0.elapsed();
+
+            let t1 = Instant::now();
+            let _ = embedder.embed_image_with_budget(&card_img, Some("Card art query"), budget)?;
+            let total_dur = t1.elapsed();
+
+            let backbone_dur = total_dur.saturating_sub(vision_dur);
+
+            total_duration += total_dur;
+            total_vision += vision_dur;
+            total_backbone += backbone_dur;
+
+            println!(
+                "  Iteration {}: End-to-End: {:.2} ms (Vision Tower: {:.2} ms | Splicing & Backbone: {:.2} ms)",
+                i,
+                total_dur.as_secs_f64() * 1000.0,
+                vision_dur.as_secs_f64() * 1000.0,
+                backbone_dur.as_secs_f64() * 1000.0
+            );
         }
 
         let avg_ms = (total_duration.as_secs_f64() * 1000.0) / (iterations as f64);
+        let avg_vis = (total_vision.as_secs_f64() * 1000.0) / (iterations as f64);
+        let avg_bb = (total_backbone.as_secs_f64() * 1000.0) / (iterations as f64);
         let throughput = 1000.0 / avg_ms;
-        println!("  -> Average Latency: {:.2} ms | Throughput: {:.2} cards/sec", avg_ms, throughput);
+        println!(
+            "  -> Avg Total: {:.2} ms (Vision: {:.2} ms, Backbone: {:.2} ms) | Throughput: {:.2} cards/sec",
+            avg_ms, avg_vis, avg_bb, throughput
+        );
     }
 
     Ok(())
