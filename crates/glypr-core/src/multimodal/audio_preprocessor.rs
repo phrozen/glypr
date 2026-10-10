@@ -1,4 +1,6 @@
 use anyhow::{bail, Result};
+use rayon::prelude::*;
+use std::sync::OnceLock;
 
 pub const AUDIO_SAMPLE_RATE: usize = 16000;
 pub const AUDIO_FRAME_LEN: usize = 320;
@@ -27,6 +29,80 @@ pub fn hz_to_mel_htk(hz: f64) -> f64 {
 /// Convert HTK Mel scale to frequency in Hz
 pub fn mel_to_hz_htk(mel: f64) -> f64 {
     700.0 * (10.0f64.powf(mel / 2595.0) - 1.0)
+}
+
+static HTK_MEL_FILTERBANK: OnceLock<Vec<f32>> = OnceLock::new();
+
+/// Cached HTK triangular Mel filterbank matrix: [257, 128]
+pub fn get_htk_mel_filterbank() -> &'static [f32] {
+    HTK_MEL_FILTERBANK.get_or_init(|| {
+        create_htk_mel_filterbank(
+            AUDIO_NUM_BINS,
+            AUDIO_NUM_MELS,
+            AUDIO_SAMPLE_RATE,
+            0.0,
+            8000.0,
+        )
+    })
+}
+
+static HANN_WINDOW: OnceLock<[f32; AUDIO_FRAME_LEN]> = OnceLock::new();
+
+/// Cached periodic Hann window of length 320
+pub fn get_hann_window() -> &'static [f32; AUDIO_FRAME_LEN] {
+    HANN_WINDOW.get_or_init(|| {
+        let mut window = [0.0f32; AUDIO_FRAME_LEN];
+        for n in 0..AUDIO_FRAME_LEN {
+            window[n] = 0.5 - 0.5 * ((2.0 * std::f32::consts::PI * (n as f32) / (AUDIO_FRAME_LEN as f32))).cos();
+        }
+        window
+    })
+}
+
+static BIT_REVERSAL_PAIRS: OnceLock<[(usize, usize); 240]> = OnceLock::new();
+
+fn get_bit_reversal_pairs() -> &'static [(usize, usize); 240] {
+    BIT_REVERSAL_PAIRS.get_or_init(|| {
+        let mut pairs = [(0, 0); 240];
+        let mut idx = 0;
+        for i in 0..512 {
+            let j = ((i as u32).reverse_bits() >> 23) as usize;
+            if i < j {
+                pairs[idx] = (i, j);
+                idx += 1;
+            }
+        }
+        pairs
+    })
+}
+
+static FFT_512_TWIDDLES: OnceLock<[(f32, f32); 511]> = OnceLock::new();
+
+fn get_fft_512_twiddles() -> &'static [(f32, f32); 511] {
+    FFT_512_TWIDDLES.get_or_init(|| {
+        let mut table = [(0.0f32, 0.0f32); 511];
+        let mut len = 2;
+        let mut offset = 0;
+        while len <= 512 {
+            let half = len / 2;
+            let angle = -std::f32::consts::PI / (half as f32);
+            let w_step_re = angle.cos();
+            let w_step_im = angle.sin();
+
+            let mut w_re = 1.0f32;
+            let mut w_im = 0.0f32;
+            for k in 0..half {
+                table[offset + k] = (w_re, w_im);
+                let next_w_re = w_re * w_step_re - w_im * w_step_im;
+                let next_w_im = w_re * w_step_im + w_im * w_step_re;
+                w_re = next_w_re;
+                w_im = next_w_im;
+            }
+            offset += half;
+            len <<= 1;
+        }
+        table
+    })
 }
 
 /// Generate HTK triangular Mel filterbank matrix: [257, 128]
@@ -84,31 +160,26 @@ pub fn create_htk_mel_filterbank(
     filterbank
 }
 
-/// In-place Radix-2 Cooley-Tukey FFT for 512 points
+/// In-place Radix-2 Cooley-Tukey FFT for 512 points using precomputed bit-reversals and twiddles
 pub fn fft_512_in_place(real: &mut [f32; 512], imag: &mut [f32; 512]) {
-    // 1. Bit-reversal permutation (9 bits for 512 points)
-    for i in 0..512 {
-        let j = ((i as u32).reverse_bits() >> 23) as usize;
-        if i < j {
-            real.swap(i, j);
-            imag.swap(i, j);
-        }
+    // 1. Bit-reversal permutation
+    for &(i, j) in get_bit_reversal_pairs() {
+        real.swap(i, j);
+        imag.swap(i, j);
     }
 
-    // 2. Cooley-Tukey butterflies
+    // 2. Cooley-Tukey butterflies with precomputed twiddles
+    let twiddles = get_fft_512_twiddles();
     let mut len = 2;
+    let mut offset = 0;
     while len <= 512 {
         let half = len / 2;
-        let angle = -std::f32::consts::PI / (half as f32);
-        let w_step_re = angle.cos();
-        let w_step_im = angle.sin();
+        let stage_twiddles = &twiddles[offset..offset + half];
 
         let mut i = 0;
         while i < 512 {
-            let mut w_re = 1.0f32;
-            let mut w_im = 0.0f32;
-
             for k in 0..half {
+                let (w_re, w_im) = stage_twiddles[k];
                 let u_re = real[i + k];
                 let u_im = imag[i + k];
 
@@ -120,19 +191,15 @@ pub fn fft_512_in_place(real: &mut [f32; 512], imag: &mut [f32; 512]) {
 
                 real[i + k + half] = u_re - v_re;
                 imag[i + k + half] = u_im - v_im;
-
-                let next_w_re = w_re * w_step_re - w_im * w_step_im;
-                let next_w_im = w_re * w_step_im + w_im * w_step_re;
-                w_re = next_w_re;
-                w_im = next_w_im;
             }
             i += len;
         }
+        offset += half;
         len <<= 1;
     }
 }
 
-/// Preprocess raw 16 kHz audio samples into log-mel spectrogram features
+/// Preprocess raw 16 kHz audio samples into log-mel spectrogram features using parallel Rayon streaming
 pub fn preprocess_audio(samples: &[f32]) -> Result<ProcessedAudio> {
     if samples.is_empty() {
         bail!("Input audio cannot be empty");
@@ -150,56 +217,42 @@ pub fn preprocess_audio(samples: &[f32]) -> Result<ProcessedAudio> {
 
     let num_frames = (padded.len() - frame_size_for_unfold) / AUDIO_HOP_LEN + 1;
 
-    // Periodic Hann window of length 320
-    let mut window = [0.0f32; AUDIO_FRAME_LEN];
-    for n in 0..AUDIO_FRAME_LEN {
-        window[n] = 0.5 - 0.5 * ((2.0 * std::f32::consts::PI * (n as f32) / (AUDIO_FRAME_LEN as f32))).cos();
-    }
+    let window = get_hann_window();
+    let mel_filters = get_htk_mel_filterbank();
 
-    let mel_filters = create_htk_mel_filterbank(
-        AUDIO_NUM_BINS,
-        AUDIO_NUM_MELS,
-        AUDIO_SAMPLE_RATE,
-        0.0,
-        8000.0,
-    );
+    let mut features = vec![0.0f32; num_frames * AUDIO_NUM_MELS];
 
-    let mut features = Vec::with_capacity(num_frames * AUDIO_NUM_MELS);
-    let mut real_buf = [0.0f32; AUDIO_FFT_LEN];
-    let mut imag_buf = [0.0f32; AUDIO_FFT_LEN];
-    let mut mag_spec = [0.0f32; AUDIO_NUM_BINS];
+    features
+        .par_chunks_exact_mut(AUDIO_NUM_MELS)
+        .enumerate()
+        .for_each(|(frame_idx, frame_features)| {
+            let start = frame_idx * AUDIO_HOP_LEN;
+            let mut real_buf = [0.0f32; AUDIO_FFT_LEN];
+            let mut imag_buf = [0.0f32; AUDIO_FFT_LEN];
 
-    for frame_idx in 0..num_frames {
-        let start = frame_idx * AUDIO_HOP_LEN;
-
-        // Window chunk and zero-pad to 512
-        for i in 0..AUDIO_FRAME_LEN {
-            real_buf[i] = padded[start + i] * window[i];
-            imag_buf[i] = 0.0;
-        }
-        for i in AUDIO_FRAME_LEN..AUDIO_FFT_LEN {
-            real_buf[i] = 0.0;
-            imag_buf[i] = 0.0;
-        }
-
-        // FFT
-        fft_512_in_place(&mut real_buf, &mut imag_buf);
-
-        // Magnitude spectrum for first 257 bins
-        for b in 0..AUDIO_NUM_BINS {
-            mag_spec[b] = (real_buf[b] * real_buf[b] + imag_buf[b] * imag_buf[b]).sqrt();
-        }
-
-        // Mel filterbank projection + log(mel + 0.001)
-        for m in 0..AUDIO_NUM_MELS {
-            let mut mel_val = 0.0f32;
-            for b in 0..AUDIO_NUM_BINS {
-                mel_val += mag_spec[b] * mel_filters[b * AUDIO_NUM_MELS + m];
+            // Window chunk and zero-pad to 512
+            for i in 0..AUDIO_FRAME_LEN {
+                real_buf[i] = padded[start + i] * window[i];
             }
-            let log_mel = (mel_val + AUDIO_MEL_FLOOR).ln();
-            features.push(log_mel);
-        }
-    }
+
+            // In-place FFT
+            fft_512_in_place(&mut real_buf, &mut imag_buf);
+
+            // Magnitude spectrum for first 257 bins
+            let mut mag_spec = [0.0f32; AUDIO_NUM_BINS];
+            for b in 0..AUDIO_NUM_BINS {
+                mag_spec[b] = (real_buf[b] * real_buf[b] + imag_buf[b] * imag_buf[b]).sqrt();
+            }
+
+            // Mel filterbank projection + log(mel + 0.001)
+            for m in 0..AUDIO_NUM_MELS {
+                let mut mel_val = 0.0f32;
+                for b in 0..AUDIO_NUM_BINS {
+                    mel_val += mag_spec[b] * mel_filters[b * AUDIO_NUM_MELS + m];
+                }
+                frame_features[m] = (mel_val + AUDIO_MEL_FLOOR).ln();
+            }
+        });
 
     Ok(ProcessedAudio {
         features,
