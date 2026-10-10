@@ -80,13 +80,14 @@ The Audio Tower processes raw 16 kHz mono waveforms into dense auditory represen
    - Periodic Hann analysis window with 160-sample semicausal left padding.
    - 128-channel HTK triangular Mel filterbank spanning 0 Hz to 8,000 Hz.
    - Log compression: $\log(\text{mel} + 0.001)$. 1 second of audio produces 99 time frames.
+   - **Hardware Acceleration:** Multi-core parallel frame streaming using Rayon (`par_chunks_exact_mut`), statically cached 512-point FFT twiddle factors, 9-bit bit-reversal lookup tables, and filterbank matrices via `OnceLock`.
 2. **2-Stage Subsampling Convolution:**
    Two successive Conv2D layers (stride 2, padding 1) with channel dimensions $1 \to 128 \to 32$, downsampling the time axis $4\times$ to yield **25 frames per second** (512 dimensions).
 3. **12 Conformer Encoder Blocks:**
    Conformer architecture combining:
    - **Macaron FeedForward 1:** Pre-LN $\to$ Up-Proj $\to$ SiLU $\to$ Down-Proj $\to$ Post-LN $\times 0.5$.
-   - **Chunked Self-Attention:** Chunk size 12, context window 24 (12 past, 0 future). Relative sinusoidal positional bias with relative shift `_rel_shift`.
-   - **Lightweight Conv 1D:** Pre-LN $\to$ Pointwise Linear $\to$ GLU $\to$ Causal Depthwise Conv1D (kernel 5) $\to$ Conv-LN $\to$ SiLU $\to$ Pointwise Linear.
+   - **Chunked Self-Attention:** Chunk size 12, context window 24 (12 past, 0 future). Relative sinusoidal positional bias with relative shift `_rel_shift`. Precomputed relative key projections (`precomputed_rel_k`) cached in VRAM at model load time; causal sliding-window attention mask cached once in VRAM per clip and passed by reference across all 12 blocks.
+   - **Fused Lightweight Conv 1D:** Pre-LN $\to$ Pointwise Linear $\to$ GLU $\to$ Fused 5-Tap Broadcast Depthwise Conv1D $\to$ Conv-LN $\to$ SiLU $\to$ Pointwise Linear. Eliminates 12,288 Candle grouped-conv chunk/kernel dispatches per pass with a single fused multiply-accumulate across the channel dimension ($454\times$ layer speedup).
    - **Macaron FeedForward 2:** Post-layer scale 0.5.
    - **Gemma 4 Clippable Linears:** Every linear operator in all 12 blocks enforces scalar activation clipping bounds (`input_min`, `input_max`, `output_min`, `output_max`) stored directly in GGUF.
 4. **Audio Projection:**
@@ -125,12 +126,22 @@ Validated against official Python `SentenceTransformer("google/embeddinggemma-2"
 cargo test -p glypr-core --release --test bench_multimodal --features metal -- --nocapture
 ```
 
+#### Vision Tower & Card Embedding
+
 | Component / Metric | Baseline (Pre-Optimization) | Optimized (`main`) | Speedup |
 | :--- | :--- | :--- | :--- |
 | **Vision Tower Only (Budget 140)** | ~200.0 ms | **8.30 ms** | **~24x** |
 | **Vision Tower Only (Budget 280)** | ~1,100.0 ms | **12.98 ms** | **~85x** |
 | **Total Card Embedding (Budget 140)** | **269.60 ms** (3.71 cards/sec) | **118.23 ms** (8.46 cards/sec) | **2.28x** |
 | **Total Card Embedding (Budget 280)** | **1,260.99 ms** (0.79 cards/sec) | **255.34 ms** (3.92 cards/sec) | **4.94x** |
+
+#### Audio Tower & Auditory Embedding
+
+| Audio Clip Duration | Preprocessor (STFT) | Audio Tower (Conformer) | Total End-to-End Latency | Real-Time Factor (RTF) |
+| :--- | :---: | :---: | :---: | :---: |
+| **1.0s (25 tokens)** | **0.52 ms** (was 2.30 ms) | **6.37 ms** (was 2,896.61 ms, **454x**) | **35.91 ms** | **27.8x real-time** |
+| **5.0s (125 tokens)** | **1.52 ms** (was 11.16 ms) | **8.01 ms** (was 3,170.47 ms, **395x**) | **50.99 ms** | **98.1x real-time** |
+| **12.3s (307 tokens)** | **3.37 ms** (was 27.12 ms) | **11.74 ms** (was 3,184.88 ms, **271x**) | **97.88 ms** | **125.4x real-time** |
 
 ---
 

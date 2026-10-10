@@ -251,3 +251,37 @@ In addition to text backbone acceleration, `glypr-core` optimizes the multimodal
 | **Vision Tower Only (Budget 280)** | ~1,100.0 ms | **12.98 ms** | **~85x** |
 | **Total Card Embedding (Budget 140)** | **269.60 ms** (3.71 cards/sec) | **118.23 ms** (8.46 cards/sec) | **2.28x** |
 | **Total Card Embedding (Budget 280)** | **1,260.99 ms** (0.79 cards/sec) | **255.34 ms** (3.92 cards/sec) | **4.94x** |
+
+---
+
+## 6. Multimodal Audio Tower Acceleration (Dual-Track)
+
+Building upon the multimodal projector architecture, `glypr-core` accelerates the Conformer Audio Tower and STFT Preprocessor across **Apple Silicon Metal GPU** and **Universal Multi-Core CPU**:
+
+### Architectural Optimizations:
+1. **Rayon Multi-Core STFT Streaming & OnceLock Filterbank Caching:**
+   - 128-channel HTK Mel filterbank matrix ($257 \times 128$) and 320-point periodic Hann window are allocated and initialized once via `std::sync::OnceLock`.
+   - Radix-2 512-point FFT twiddle factors and 9-bit reversal permutation pairs are precomputed into static lookup tables, eliminating runtime trigonometric calls.
+   - Independent time frames (up to 1,200+ for speech clips) are processed in parallel across CPU cores using Rayon's `par_chunks_exact_mut`, writing directly into the pre-allocated log-mel spectrogram buffer.
+2. **Precomputed Relative Position Bias (`precomputed_rel_k`):**
+   - Relative sinusoidal positional embeddings ($13 \times 1024$) and per-layer relative key projections (`relative_k_proj`) are static across all audio inputs.
+   - `precomputed_rel_k` (`[1, num_heads, head_dim, 13]` in F32) is precomputed once at model load time, eliminating dynamic projection forwards and tensor reshaping across all 12 Conformer layers.
+3. **Single-Pass Conformer Attention Mask Caching:**
+   - Sliding-window causal attention masks depend exclusively on sequence length ($N$) and block count.
+   - The mask tensor is constructed **once** in VRAM prior to layer 0 and passed by reference to all 12 Conformer layers, eliminating 11 GPU pipeline sync stalls and transient host memory uploads per clip.
+4. **Fused 5-Tap Depthwise 1D Convolution:**
+   - Replaced Candle's default `conv1d` behavior for `groups = 1024` (which dynamically partitioned the sequence into 1,024 chunk views, launched 1,024 single-channel conv kernels, and performed a 1,024-tensor concatenation per layer).
+   - Evaluated as a direct fused 5-tap broadcast multiply-accumulate across the channel dimension directly on GPU ($Y = \sum_{k=0}^4 X_k \cdot W_k$), reducing 12,288 tensor allocations and dispatches down to 60 hardware operations per audio pass.
+
+### Empirical Audio Benchmarks (Apple Silicon Metal GPU, BF16):
+
+| Audio Clip Duration | Metric | Baseline | Optimized | Speedup / Throughput |
+| :--- | :--- | :---: | :---: | :---: |
+| **Short (1.0s Synthetic)**<br>*(16,000 samples $\to 25$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 2.30 ms<br>2,896.61 ms<br>**2,946.68 ms** | **0.52 ms**<br>**6.37 ms**<br>**35.91 ms** | **4.4x**<br>**454x 🚀**<br>**27.8x real-time** |
+| **Medium (5.0s Music)**<br>*(80,000 samples $\to 125$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 11.16 ms<br>3,170.47 ms<br>**3,219.75 ms** | **1.52 ms**<br>**8.01 ms**<br>**50.99 ms** | **7.3x**<br>**395x 🚀**<br>**98.1x real-time** |
+| **Long (12.3s Speech)**<br>*(196,348 samples $\to 307$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 27.12 ms<br>3,184.88 ms<br>**3,222.78 ms** | **3.37 ms**<br>**11.74 ms**<br>**97.88 ms** | **8.8x**<br>**271x 🚀**<br>**125.4x real-time 🏆** |
+
+> [!TIP]
+> **Real-Time Factor (RTF):**
+> Embedding a 12.3-second spoken sentence takes **$< 100\text{ ms}$** end-to-end ($\text{RTF} = 0.008\text{x}$), processing auditory inputs over **$125\times$ faster than real-time speech**.
+
