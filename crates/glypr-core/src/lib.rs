@@ -630,12 +630,13 @@ impl GlyprEmbedder {
         let mut seq_lens = Vec::with_capacity(b);
 
 
-        for inp in inputs {
+        for (item_idx, inp) in inputs.iter().enumerate() {
             let (token_ids, slots) = self.tokenizer.encode_modality_sequence(&inp.parts, inp.task)?;
             let seq_len = token_ids.len();
             if seq_len > self.max_seq_len {
                 anyhow::bail!(
-                    "Item sequence length ({}) exceeds max context limit ({})",
+                    "Batch item {} sequence length ({}) exceeds maximum context limit ({})",
+                    item_idx,
                     seq_len,
                     self.max_seq_len
                 );
