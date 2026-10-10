@@ -143,19 +143,19 @@ cargo test -p glypr-core --release --test bench_multimodal --features metal -- -
 | **5.0s (125 tokens)** | **1.52 ms** (was 11.16 ms) | **8.01 ms** (was 3,170.47 ms, **395x**) | **50.99 ms** | **98.1x real-time** |
 | **12.3s (307 tokens)** | **3.37 ms** (was 27.12 ms) | **11.74 ms** (was 3,184.88 ms, **271x**) | **97.88 ms** | **125.4x real-time** |
 
-#### Unified Multimodal Batching & Card Profiling (32 Real MTG Cards, Budget 140)
+#### Unified Multimodal Image Batching (Budget 140)
 
 Glypr supports unified multimodal batching across arbitrary modalities (pure text, images, audio, interleaved sequences) through `GlyprEmbedder::embed_batch`. Batching leverages multi-core Rayon image preprocessing, batched rank-3/4 ViT encoders, and Objective-C autorelease pool scoping (`AutoreleaseScope`) to completely eliminate transient VRAM leaks:
 
-| Execution Mode | Batch Size | Total Latency | Latency / Card | Throughput | Parity vs Sequential | Peak RSS |
+| Execution Mode | Batch Size | Total Latency | Latency / Image | Throughput | Parity vs Sequential | Peak RSS |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Sequential Baseline** | 1 | 2,413.57 ms (32 cards) | 75.40 ms / card | 13.26 cards/sec | 1.000000 | 2,037.9 MB |
-| **Batched (ChunkedSliding)** | 4 | 259.80 ms | **64.95 ms / card** | **15.40 cards/sec** | **1.000000** | 2,037.9 MB |
-| **Batched (ChunkedSliding)** | 8 | 523.38 ms | **65.42 ms / card** | **15.29 cards/sec** | **1.000000** | 2,037.9 MB |
-| **Batched (ChunkedSliding)** | 16 | 1,068.99 ms | **66.81 ms / card** | **14.97 cards/sec** | **1.000000** | 2,037.9 MB |
-| **Batched (ChunkedSliding)** | 32 | 2,215.20 ms | **69.23 ms / card** | **14.45 cards/sec** | **1.000000** | 2,037.9 MB |
-| **Batched (MetalFlash)** | 8 | 509.55 ms | **63.69 ms / card** | **15.70 cards/sec** | **0.999931** | 2,037.9 MB |
-| **Batched (MetalFlash)** | 32 | 2,147.53 ms | **67.11 ms / card** | **14.90 cards/sec** | **0.999931** | 2,037.9 MB |
+| **Sequential Baseline** | 1 | 2,413.57 ms (32 items) | 75.40 ms / item | 13.26 images/sec | 1.000000 | 2,037.9 MB |
+| **Batched (ChunkedSliding)** | 4 | 259.80 ms | **64.95 ms / item** | **15.40 images/sec** | **1.000000** | 2,037.9 MB |
+| **Batched (ChunkedSliding)** | 8 | 523.38 ms | **65.42 ms / item** | **15.29 images/sec** | **1.000000** | 2,037.9 MB |
+| **Batched (ChunkedSliding)** | 16 | 1,068.99 ms | **66.81 ms / item** | **14.97 images/sec** | **1.000000** | 2,037.9 MB |
+| **Batched (ChunkedSliding)** | 32 | 2,215.20 ms | **69.23 ms / item** | **14.45 images/sec** | **1.000000** | 2,037.9 MB |
+| **Batched (MetalFlash)** | 8 | 509.55 ms | **63.69 ms / item** | **15.70 images/sec** | **0.999931** | 2,037.9 MB |
+| **Batched (MetalFlash)** | 32 | 2,147.53 ms | **67.11 ms / item** | **14.90 images/sec** | **0.999931** | 2,037.9 MB |
 
 ---
 

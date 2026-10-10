@@ -57,7 +57,3 @@ required-features = ["metal"]
 name = "probe_candle_metal"
 required-features = ["metal"]
 
-[[example]]
-name = "bench_cards"
-required-features = ["metal"]
-

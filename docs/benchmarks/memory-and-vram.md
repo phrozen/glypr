@@ -178,21 +178,17 @@ During multimodal batch processing (such as indexing card images or visual docum
    - Every batch iteration drains immediately, ensuring zero accumulation across consecutive batches or continuous server operation.
    - CPU image decompression (PNG/JPEG) is pre-executed concurrently in Tokio blocking worker threads prior to GPU submission, leaving the GPU worker thread free from CPU heap inflation.
 
-### Empirical MTG Card Batch Memory Profile (32 Real Cards, Budget 140):
+### Empirical Multimodal Image Batch Memory Profile (Budget 140):
 
-```bash
-cargo run --example bench_cards --release --features metal
-```
-
-| Execution Configuration | Batch Size | Total Wallclock | Per-Card Latency | Throughput | Parity | Metal VRAM | Peak Process RSS |
+| Execution Configuration | Batch Size | Total Wallclock | Per-Image Latency | Throughput | Parity | Metal VRAM | Peak Process RSS |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Sequential Baseline** | 1 | 2,413.57 ms | 75.40 ms / card | 13.26 cards/sec | 1.000000 | 1,632.88 MB | **2,037.92 MB** |
-| **Batched (`ChunkedSliding`)** | 4 | 259.80 ms | **64.95 ms / card** | **15.40 cards/sec** | **1.000000** | 1,641.67 MB | **2,037.92 MB** |
-| **Batched (`ChunkedSliding`)** | 8 | 523.38 ms | **65.42 ms / card** | **15.29 cards/sec** | **1.000000** | 1,673.69 MB | **2,037.92 MB** |
-| **Batched (`ChunkedSliding`)** | 16 | 1,068.99 ms | **66.81 ms / card** | **14.97 cards/sec** | **1.000000** | 1,967.72 MB | **2,037.92 MB** |
-| **Batched (`ChunkedSliding`)** | 32 | 2,215.20 ms | **69.23 ms / card** | **14.45 cards/sec** | **1.000000** | 3,130.28 MB | **2,037.92 MB** |
-| **Batched (`MetalFlash`)** | 8 | 509.55 ms | **63.69 ms / card** | **15.70 cards/sec** | 0.999931 | 1,673.69 MB | **2,037.92 MB** |
-| **Batched (`MetalFlash`)** | 32 | 2,147.53 ms | **67.11 ms / card** | **14.90 cards/sec** | 0.999931 | 3,130.28 MB | **2,037.92 MB** |
+| **Sequential Baseline** | 1 | 2,413.57 ms (32 items) | 75.40 ms / item | 13.26 images/sec | 1.000000 | 1,632.88 MB | **2,037.92 MB** |
+| **Batched (`ChunkedSliding`)** | 4 | 259.80 ms | **64.95 ms / item** | **15.40 images/sec** | **1.000000** | 1,641.67 MB | **2,037.92 MB** |
+| **Batched (`ChunkedSliding`)** | 8 | 523.38 ms | **65.42 ms / item** | **15.29 images/sec** | **1.000000** | 1,673.69 MB | **2,037.92 MB** |
+| **Batched (`ChunkedSliding`)** | 16 | 1,068.99 ms | **66.81 ms / item** | **14.97 images/sec** | **1.000000** | 1,967.72 MB | **2,037.92 MB** |
+| **Batched (`ChunkedSliding`)** | 32 | 2,215.20 ms | **69.23 ms / item** | **14.45 images/sec** | **1.000000** | 3,130.28 MB | **2,037.92 MB** |
+| **Batched (`MetalFlash`)** | 8 | 509.55 ms | **63.69 ms / item** | **15.70 images/sec** | 0.999931 | 1,673.69 MB | **2,037.92 MB** |
+| **Batched (`MetalFlash`)** | 32 | 2,147.53 ms | **67.11 ms / item** | **14.90 images/sec** | 0.999931 | 3,130.28 MB | **2,037.92 MB** |
 
 > [!NOTE]
-> Peak process RSS remains strictly locked at **$2,037.92\text{ MB}$** throughout the entire 32-card batch execution, with **zero memory leakage** and zero swap inflation. Parity with sequential single-item execution is **100% bit-exact (1.000000)** under `ChunkedSliding`.
+> Peak process RSS remains strictly locked at **$2,037.92\text{ MB}$** throughout the entire 32-image batch execution, with **zero memory leakage** and zero swap inflation. Parity with sequential single-item execution is **100% bit-exact (1.000000)** under `ChunkedSliding`.
