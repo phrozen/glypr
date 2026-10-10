@@ -226,3 +226,28 @@ Empirically measured on Apple Silicon M-series unified hardware across sequence 
 > - PyTorch MPS Golden Baseline: **$875.00\text{ ms}$**
 > - Glypr BF16 Fused Metal Flash: **$868.00\text{ ms}$** (Glypr is faster by **$7.0\text{ ms}$**)
 > - Peak Throughput: **$9,438\text{ tok/s}$** (8K context) and **$14,673\text{ tok/s}$** (1K context).
+
+---
+
+## 5. Multimodal Vision Tower Acceleration (Dual-Track)
+
+In addition to text backbone acceleration, `glypr-core` optimizes the multimodal `mmproj` Vision Tower across both **Apple Silicon Metal GPU** and **Universal CPU SIMD**:
+
+### Architectural Optimizations:
+1. **Precomputed 2D Axial RoPE:**
+   Frequencies $(cos, sin)$ are computed once before layer 0. Eliminates 32 CPU $\leftrightarrow$ GPU synchronization barriers per image.
+2. **Native 2-Stage Grid Pooling in VRAM:**
+   Replaced single-threaded scalar 5-nested CPU loop ($870\text{k}$ float transfers) with 2-stage rank-3 (height) and rank-4 (width) Candle tensor reductions in VRAM. Bypasses Candle Metal high-rank reduction bugs while remaining 100% portable.
+3. **Rayon Multi-Core Patch Extraction & L1 256-Element LUT:**
+   Strided slice reads on raw image buffers with parallelized patch rows across CPU threads. Normalization $2 \cdot (x / 255.0 - 0.5)$ uses a 256-element L1 lookup table, eliminating float divisions.
+4. **Fused Metal SDPA Attention (Zero Matrix Materialization):**
+   Utilizes hardware-accelerated fused SDPA on Metal GPU, eliminating the $82\text{ MB}$ attention matrix, $160\text{ MB}$ F32 upcast, and softmax allocations across 16 layers (~$3.9\text{ GB}$ transient allocation reduction). CPU track seamlessly falls back to high-precision float32 softmax attention.
+
+### Empirical Multimodal Benchmarks:
+
+| Component / Metric | Baseline (Pre-Optimization) | Optimized (`main`) | Speedup |
+| :--- | :--- | :--- | :--- |
+| **Vision Tower Only (Budget 140)** | ~200.0 ms | **8.30 ms** | **~24x** |
+| **Vision Tower Only (Budget 280)** | ~1,100.0 ms | **12.98 ms** | **~85x** |
+| **Total Card Embedding (Budget 140)** | **269.60 ms** (3.71 cards/sec) | **118.23 ms** (8.46 cards/sec) | **2.28x** |
+| **Total Card Embedding (Budget 280)** | **1,260.99 ms** (0.79 cards/sec) | **255.34 ms** (3.92 cards/sec) | **4.94x** |

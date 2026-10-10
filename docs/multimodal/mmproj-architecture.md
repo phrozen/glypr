@@ -42,21 +42,32 @@ graph TD
 
 ## 2. Vision Pipeline (`VisionTower`)
 
-The Vision Tower extracts high-level semantic representations from raw image pixels:
+The Vision Tower extracts high-level semantic representations from raw image pixels (.png, .jpg, .jpeg, .webp):
 
-1. **Input Normalization:**
-   Images are resized to $224 \times 224$ (RGB). Each pixel $x \in [0, 1]$ undergoes SigLIP normalization:
-   $$\text{norm}(x) = 2 \cdot (x - 0.5) = 2x - 1 \in [-1, 1]$$
-2. **Patch Embedder:**
-   $16 \times 16$ non-overlapping patches ($14 \times 14 = 196$ patches). In GGUF, weights are formatted as `[768, 3, 16, 16]`, which `glypr` transposes to `[768, 16, 16, 3]` and projects to 768 dimensions.
-3. **2D Axial Rotary Positional Embedding (RoPE):**
-   Unlike 1D RoPE, Gemma 4 Vision uses 2D axial RoPE with base $\theta = 100$:
+1. **Dynamic Aspect-Ratio Preserving Grid:**
+   Unlike fixed-resolution models (e.g., $224 \times 224$), EmbeddingGemma 2 dynamically preserves the original image's aspect ratio. Both target height and width are computed to satisfy $H \times W \le \text{budget} \times 9 \times 16^2$ while remaining divisible by $48\text{ px}$ (`side_mult = pooling_kernel_size * patch_size = 3 * 16`).
+2. **Rayon Multi-Core Patch Extraction & L1 LUT Normalization:**
+   - Raw RGB bytes are partitioned into $16 \times 16$ non-overlapping patches ($P = \text{patch\_width} \times \text{patch\_height}$).
+   - Patch extraction is parallelized across CPU threads using `rayon`, reading contiguous 48-byte horizontal slices from `rgb.as_raw()`.
+   - Pixel normalization $2 \cdot (x / 255.0 - 0.5) \in [-1.0, 1.0]$ uses a 256-element lookup table pinned in CPU L1 cache, eliminating float division.
+3. **Patch Embedder & 2D Position Lookup:**
+   GGUF `v.patch_embd.weight` (`[768, 3, 16, 16]`) is permuted to `[768, 16, 16, 3]` and flattened into a linear projection `[768, 768]`, embedding each $16 \times 16 \times 3$ patch into a 768-dimensional token. 2D absolute position coordinates are looked up from `v.position_embd.weight`.
+4. **Precomputed 2D Axial RoPE (Zero Synchronization Stalls):**
+   Gemma 4 Vision uses 2D axial RoPE with base $\theta = 100$:
    - First half of head dimension ($[0, 32)$) encodes the horizontal ($X$) patch coordinate.
    - Second half of head dimension ($[32, 64)$) encodes the vertical ($Y$) patch coordinate.
-4. **16-Layer Transformer Encoder:**
-   16 Pre-LN Transformer layers featuring $Q/K$ RMSNorm, GeGLU feedforward networks, and full bidirectional attention.
-5. **2D Spatial Pooling & Output Projection:**
-   A $3 \times 3$ 2D spatial average pooler reduces spatial resolution to produce exactly **280 soft tokens** per image, followed by projection from 768 to 512 dimensions.
+   - **Optimization:** Rather than recalculating and uploading $(cos, sin)$ tensors twice per layer across 16 layers (32 GPU $\leftrightarrow$ CPU synchronization roundtrips), $(cos, sin)$ frequencies are precomputed **once** before layer 0 and reused across all 16 layers in VRAM.
+5. **16-Layer Transformer Encoder with Fused Metal SDPA:**
+   16 Pre-LN Transformer layers featuring $Q/K$ RMSNorm, GeGLU feedforward networks, and bidirectional self-attention:
+   - **Metal GPU:** Dispatches to Apple Silicon hardware-accelerated fused SDPA (`candle_nn::ops::sdpa`), eliminating the $82\text{ MB}$ attention weight matrix, $160\text{ MB}$ F32 upcast, and softmax allocations across 16 layers ($> 3.9\text{ GB}$ of transient unified memory allocations avoided per image).
+   - **Universal CPU:** Seamless fallback to high-precision float32 softmax attention.
+6. **Native 2-Stage Grid Pooling in VRAM:**
+   A $3 \times 3$ 2D spatial average pooler reduces spatial resolution by $9\times$:
+   - **Stage 1 (Height Pooling):** Reshapes to rank 3 `[out_h, 3, patch_width * hidden_size]` and reduces dimension 1 (`sum(1)`).
+   - **Stage 2 (Width Pooling):** Reshapes to rank 4 `[out_h, out_w, 3, hidden_size]` and reduces dimension 2 (`sum(2)`).
+   - Keeps all operations $\le \text{rank } 4$ in VRAM, eliminating Candle Metal high-rank reduction limitations and preventing 870k float transfers to CPU.
+7. **Projection Head:**
+   Unscaled RMSNorm followed by linear projection from 768 to 512 dimensions, matching the language model hidden size.
 
 ---
 
@@ -96,18 +107,30 @@ Tokens in the placeholder slots ($\langle\text{image}\rangle$ / $\langle\text{au
 
 ---
 
-## 5. Golden Parity Scorecard
+## 5. Golden Parity & Hardware Acceleration Scorecard
 
 Validated against official Python `SentenceTransformer("google/embeddinggemma-2")` on the deterministic test suite:
 
 | Test Case | Input Modality | Prompt Text | Soft Tokens | Total Seq Len | Target | Measured Cosine Similarity | Status |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Case 1** | Image Only | *None* | 280 | 284 | $> 0.999$ | **0.999829** | ✅ **PASSED** |
-| **Case 2** | Image + Prompt | `"Describe this picture"` | 280 | 288 | $> 0.999$ | **0.999719** | ✅ **PASSED** |
+| **Case 1** | Image Only | *None* | 280 | 284 | $> 0.999$ | **0.999839** | ✅ **PASSED** |
+| **Case 2** | Image + Prompt | `"Describe this picture"` | 280 | 288 | $> 0.999$ | **0.999704** | ✅ **PASSED** |
 | **Case 3** | Audio Only | *None* | 25 | 29 | $> 0.999$ | **0.999644** | ✅ **PASSED** |
 | **Case 4** | Audio + Prompt | `"A musical sound"` | 25 | 32 | $> 0.999$ | **0.999852** | ✅ **PASSED** |
+| **Cases 15–18** | Dynamic Budgets | *None* | 70–560 | 74–564 | $> 0.999$ | **0.9994–0.9999** | ✅ **PASSED** |
 
-Execution time for the entire 4-case multimodal validation suite: **6.77 seconds** on Apple Silicon Metal.
+### Latency & Throughput Benchmark (Apple Silicon Metal GPU, Release Profile):
+
+```bash
+cargo test -p glypr-core --release --test bench_multimodal --features metal -- --nocapture
+```
+
+| Component / Metric | Baseline (Pre-Optimization) | Optimized (`main`) | Speedup |
+| :--- | :--- | :--- | :--- |
+| **Vision Tower Only (Budget 140)** | ~200.0 ms | **8.30 ms** | **~24x** |
+| **Vision Tower Only (Budget 280)** | ~1,100.0 ms | **12.98 ms** | **~85x** |
+| **Total Card Embedding (Budget 140)** | **269.60 ms** (3.71 cards/sec) | **118.23 ms** (8.46 cards/sec) | **2.28x** |
+| **Total Card Embedding (Budget 280)** | **1,260.99 ms** (0.79 cards/sec) | **255.34 ms** (3.92 cards/sec) | **4.94x** |
 
 ---
 

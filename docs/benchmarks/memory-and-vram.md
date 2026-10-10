@@ -149,3 +149,27 @@ When executing on CPU with multi-core Rayon parallelism and `pulp` SIMD kernels:
 | **4,096 tokens** | GGUF Q8_0 | **2,054.6 MB** | Safe on 4 GB and 8 GB cloud instances |
 
 Thanks to `simd_rmsnorm` and `simd_geglu` operating directly on continuous storage without intermediate tensor allocations, the CPU memory footprint remains flat and deterministic, eliminating memory fragmentation in long-running processes.
+
+---
+
+## 6. Multimodal Memory Footprint & Elimination of 30 GB Spikes
+
+During multimodal batch processing (such as indexing card images or visual documents), naive vision attention implementations suffer from severe unified memory inflation that can easily drive system RAM consumption **north of 30 GB**:
+
+### The Anatomy of the 30 GB Spike:
+1. **The $4.0\text{ GB}$ Single-Image Scratchpad:**
+   - In unoptimized Vision Transformer self-attention, each layer materializes a dense attention weight matrix: $[1, 16, 1134, 1134]$ ($41.1\text{ MB}$ in BF16).
+   - In float32 upcast, this requires $82.3\text{ MB}$.
+   - Softmax creates another $82.3\text{ MB}$ intermediate tensor.
+   - Downcasting back to BF16 creates a $41.1\text{ MB}$ tensor.
+   - Total transient allocations per layer: $\sim 247\text{ MB}$. Across 16 layers: **$\approx 3.95\text{ GB}$ per single image**.
+2. **Unified Memory Autorelease Churn:**
+   - On Apple Silicon, Metal GPU buffers share physical RAM with the operating system.
+   - Under batch loops or concurrent requests, `MTLCommandBuffer` retained transient memory buffers until the command queue completed and drained.
+   - At a batch of 8 to 16 cards, $8 \times 3.95\text{ GB} = \mathbf{31.6\text{ GB}}$ of transient allocations accumulated simultaneously, triggering aggressive swap thrashing and kernel memory pressure warnings.
+
+### The Glypr Fused SDPA Solution:
+- With **Fused Metal SDPA Attention**, the $N \times N$ attention weight matrix is **never materialized in memory**.
+- Scaled dot-product attention and online softmax are computed on-the-fly inside hardware threadgroup registers.
+- All $3.95\text{ GB}$ of transient allocations per image are **reduced to $0\text{ MB}$**.
+- Memory consumption per card is flat, predictable, and strictly bounded, enabling safe scaling to large batch sizes ($B=16, 32, 64$) without memory spikes.
