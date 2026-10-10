@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use rayon::prelude::*;
 
 /// Standard discrete vision token budget operating points:
 pub const VISION_BUDGET_LOW: usize = 70;
@@ -169,30 +170,47 @@ pub fn preprocess_image(
     let num_soft_tokens = num_patches / k_squared;
 
     // 3. Extract patches and normalize pixels: 2 * (px / 255.0 - 0.5)
-    // Layout within each patch: (y * 16 + x) * 3 + c (row-major RGB)
-    let mut pixel_values = Vec::with_capacity(num_patches * patch_size * patch_size * 3);
-    let mut position_ids = Vec::with_capacity(num_patches * 2);
+    // Precompute 256-entry lookup table for bit-exact pixel normalization in L1 cache
+    let mut lut = [0.0f32; 256];
+    for i in 0..256 {
+        lut[i] = 2.0 * ((i as f32) / 255.0 - 0.5);
+    }
 
+    let row_stride = target_width * 3;
+    let raw = rgb.as_raw();
+
+    // Extract patch rows in parallel across CPU threads using Rayon
+    let patch_rows_data: Vec<Vec<f32>> = (0..patch_height)
+        .into_par_iter()
+        .map(|py| {
+            let mut row_pixels = Vec::with_capacity(patch_width * patch_size * patch_size * 3);
+            let start_y = py * patch_size;
+
+            for px in 0..patch_width {
+                let start_x_bytes = px * patch_size * 3;
+                for y in 0..patch_size {
+                    let img_y = start_y + y;
+                    let row_offset = img_y * row_stride + start_x_bytes;
+                    let slice = &raw[row_offset..row_offset + patch_size * 3];
+                    for &b in slice {
+                        row_pixels.push(lut[b as usize]);
+                    }
+                }
+            }
+            row_pixels
+        })
+        .collect();
+
+    let mut pixel_values = Vec::with_capacity(num_patches * patch_size * patch_size * 3);
+    for mut row in patch_rows_data {
+        pixel_values.append(&mut row);
+    }
+
+    let mut position_ids = Vec::with_capacity(num_patches * 2);
     for py in 0..patch_height {
         for px in 0..patch_width {
             position_ids.push(px as u32);
             position_ids.push(py as u32);
-
-            let start_x = px * patch_size;
-            let start_y = py * patch_size;
-
-            for y in 0..patch_size {
-                for x in 0..patch_size {
-                    let pixel = rgb.get_pixel((start_x + x) as u32, (start_y + y) as u32);
-                    // Rescale to [-1.0, 1.0]: Gemma4 scales pixels in patch embedder with 2 * (x - 0.5)
-                    let r = 2.0 * ((pixel[0] as f32) / 255.0 - 0.5);
-                    let g = 2.0 * ((pixel[1] as f32) / 255.0 - 0.5);
-                    let b = 2.0 * ((pixel[2] as f32) / 255.0 - 0.5);
-                    pixel_values.push(r);
-                    pixel_values.push(g);
-                    pixel_values.push(b);
-                }
-            }
         }
     }
 
@@ -206,4 +224,39 @@ pub fn preprocess_image(
         target_width,
         target_height,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::RgbImage;
+
+    #[test]
+    fn test_image_preprocessing_consistency() -> Result<()> {
+        let width = 64;
+        let height = 64;
+        let mut img_buf = RgbImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let r = ((x * 3 + y * 7) % 256) as u8;
+                let g = ((x * 11 + y * 13) % 256) as u8;
+                let b = ((x * 17 + y * 19) % 256) as u8;
+                img_buf.put_pixel(x, y, image::Rgb([r, g, b]));
+            }
+        }
+        let dynamic_img = DynamicImage::ImageRgb8(img_buf);
+        let processed = preprocess_image(&dynamic_img, 16, 16, 3)?;
+
+        assert_eq!(processed.num_patches, 144);
+        assert_eq!(processed.num_soft_tokens, 16);
+        assert_eq!(processed.pixel_values.len(), 144 * 16 * 16 * 3);
+        assert_eq!(processed.position_ids.len(), 144 * 2);
+
+        // Verify bounds [-1.0, 1.0]
+        for &v in &processed.pixel_values {
+            assert!(v >= -1.0 && v <= 1.0);
+        }
+
+        Ok(())
+    }
 }
