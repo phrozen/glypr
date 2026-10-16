@@ -42,12 +42,11 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
         let mut total_backbone = std::time::Duration::ZERO;
 
         let proj = embedder.multimodal.as_ref().unwrap();
+        let t_vis = Instant::now();
+        let _ = proj.encode_image_with_budget(&card_img, budget)?;
+        let vision_dur = t_vis.elapsed();
 
         for i in 1..=iterations {
-            let t0 = Instant::now();
-            let _ = proj.encode_image_with_budget(&card_img, budget)?;
-            let vision_dur = t0.elapsed();
-
             let t1 = Instant::now();
             let _ = embedder.embed_image_with_budget(&card_img, Some("Card art query"), budget)?;
             let total_dur = t1.elapsed();
@@ -99,11 +98,7 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
             continue;
         }
 
-        let mut reader = hound::WavReader::open(wav_path)?;
-        let samples: Vec<f32> = reader
-            .samples::<i16>()
-            .map(|s| s.unwrap() as f32 / 32767.0)
-            .collect();
+        let samples = glypr_core::multimodal::decode_wav_file(wav_path)?;
         let audio_dur_secs = samples.len() as f64 / 16000.0;
         let num_soft_tokens = glypr_core::multimodal::compute_audio_soft_token_count(samples.len());
 
@@ -117,6 +112,14 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
         // Warmup
         let _ = embedder.embed_audio(&samples, Some("Audio query"))?;
 
+        let t_prep_0 = Instant::now();
+        let _ = glypr_core::multimodal::preprocess_audio(&samples)?;
+        let prep_dur = t_prep_0.elapsed();
+
+        let t_tower_0 = Instant::now();
+        let _ = proj.encode_audio(&samples)?;
+        let tower_dur = t_tower_0.elapsed();
+
         let iterations = 5;
         let mut total_duration = std::time::Duration::ZERO;
         let mut total_preprocessor = std::time::Duration::ZERO;
@@ -124,14 +127,6 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
         let mut total_backbone = std::time::Duration::ZERO;
 
         for i in 1..=iterations {
-            let t_prep_0 = Instant::now();
-            let _ = glypr_core::multimodal::preprocess_audio(&samples)?;
-            let prep_dur = t_prep_0.elapsed();
-
-            let t_tower_0 = Instant::now();
-            let _ = proj.encode_audio(&samples)?;
-            let tower_dur = t_tower_0.elapsed();
-
             let t_e2e_0 = Instant::now();
             let _ = embedder.embed_audio(&samples, Some("Audio query"))?;
             let total_dur = t_e2e_0.elapsed();

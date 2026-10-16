@@ -31,19 +31,44 @@ struct CorpusEntry {
     task: Option<String>,
 }
 
-fn get_snapshot_dir() -> Option<PathBuf> {
-    glypr_core::hub::resolve_google_weights()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+fn allow_missing_weights() -> bool {
+    std::env::var("GLYPR_ALLOW_MISSING_WEIGHTS").as_deref() == Ok("1")
+}
+
+fn get_snapshot_dir() -> Result<Option<PathBuf>> {
+    match glypr_core::hub::resolve_google_weights() {
+        Ok(p) => Ok(p.parent().map(|d| d.to_path_buf())),
+        Err(e) if allow_missing_weights() => {
+            eprintln!("Skipping test (GLYPR_ALLOW_MISSING_WEIGHTS=1): {e}");
+            Ok(None)
+        }
+        Err(e) => Err(anyhow::anyhow!(
+            "Failed to resolve official Google Safetensors weights: {e}"
+        )),
+    }
 }
 
 #[allow(dead_code)]
-fn get_gguf_bf16_path() -> Option<PathBuf> {
-    glypr_core::hub::resolve_default_gguf().ok()
+fn get_gguf_bf16_path() -> Result<Option<PathBuf>> {
+    match glypr_core::hub::resolve_default_gguf() {
+        Ok(p) => Ok(Some(p)),
+        Err(e) if allow_missing_weights() => {
+            eprintln!("Skipping test (GLYPR_ALLOW_MISSING_WEIGHTS=1): {e}");
+            Ok(None)
+        }
+        Err(e) => Err(anyhow::anyhow!("Failed to resolve BF16 GGUF: {e}")),
+    }
 }
 
-fn get_gguf_q8_path() -> Option<PathBuf> {
-    glypr_core::hub::resolve_file("ggml-org/embeddinggemma-2-GGUF", "embeddinggemma-2-Q8_0.gguf").ok()
+fn get_gguf_q8_path() -> Result<Option<PathBuf>> {
+    match glypr_core::hub::resolve_file("ggml-org/embeddinggemma-2-GGUF", "embeddinggemma-2-Q8_0.gguf") {
+        Ok(p) => Ok(Some(p)),
+        Err(e) if allow_missing_weights() => {
+            eprintln!("Skipping test (GLYPR_ALLOW_MISSING_WEIGHTS=1): {e}");
+            Ok(None)
+        }
+        Err(e) => Err(anyhow::anyhow!("Failed to resolve Q8_0 GGUF: {e}")),
+    }
 }
 
 fn get_golden_dir() -> PathBuf {
@@ -59,16 +84,18 @@ fn run_corpus_validation(
     embedder: &GlyprEmbedder,
     model_name: &str,
     min_threshold: f32,
+    avg_threshold: f32,
     max_bucket: Option<usize>,
 ) -> Result<()> {
     let golden_dir = get_golden_dir();
     let corpus_json_path = golden_dir.join("corpus_8k.json");
     let golden_weights_path = golden_dir.join("corpus_8k_vectors.safetensors");
 
-    if !corpus_json_path.exists() || !golden_weights_path.exists() {
-        eprintln!("Skipping corpus parity test: golden files not found");
-        return Ok(());
-    }
+    assert!(
+        corpus_json_path.exists() && golden_weights_path.exists(),
+        "Golden corpus files missing in {:?}",
+        golden_dir
+    );
 
     let corpus_bytes = fs::read(&corpus_json_path)?;
     let corpus: CorpusFile = serde_json::from_slice(&corpus_bytes)?;
@@ -85,11 +112,15 @@ fn run_corpus_validation(
     };
 
     println!("\n============================================================");
-    println!("  Validating Parity: {} (Min Threshold: {:.4})", model_name, min_threshold);
+    println!(
+        "  Validating Parity: {} (Min >= {:.4}, Avg >= {:.5})",
+        model_name, min_threshold, avg_threshold
+    );
     println!("============================================================");
 
     let dimensions = [768, 512, 256, 128];
-    let mut total_evaluated = 0;
+    let mut total_evaluated = 0usize;
+    let mut sum_sim = 0.0f64;
     let mut category_min_sim: HashMap<String, f32> = HashMap::new();
     let mut bucket_min_sim: HashMap<usize, f32> = HashMap::new();
     let mut evaluated_vectors: HashMap<String, Vec<f32>> = HashMap::new();
@@ -97,7 +128,8 @@ fn run_corpus_validation(
     for entry in &corpus.entries {
         let bucket = entry.bucket_tokens;
         if let Some(max) = max_bucket {
-            if bucket > max {
+            // Always include at least one 1024-token entry so sliding window (> 512) is exercised!
+            if bucket > max && entry.id != "query_physics_1024t" {
                 continue;
             }
         }
@@ -117,15 +149,14 @@ fn run_corpus_validation(
             let rust_vec = if dim == 768 {
                 rust_vec_768.clone()
             } else {
-                let slice = &rust_vec_768[..dim];
-                let norm: f32 = slice.iter().map(|x| x * x).sum::<f32>().sqrt();
-                slice.iter().map(|x| x / norm).collect::<Vec<f32>>()
+                glypr_core::truncate_mrl(&rust_vec_768, dim)?
             };
 
             let golden_key = format!("{}_{}d", eid, dim);
             let golden_vec = load_golden(&golden_key)?;
 
             let sim = cosine_similarity(&rust_vec, &golden_vec);
+            sum_sim += sim as f64;
 
             let min_c = category_min_sim.entry(cat.clone()).or_insert(1.0);
             if sim < *min_c {
@@ -154,10 +185,22 @@ fn run_corpus_validation(
         }
     }
 
-    println!("  Evaluated {} vectors across categories:", total_evaluated);
+    let avg_sim = (sum_sim / (total_evaluated as f64)) as f32;
+    println!(
+        "  Evaluated {} vectors (Avg Parity = {:.6}) across categories:",
+        total_evaluated, avg_sim
+    );
     for (cat, min_s) in &category_min_sim {
         println!("    Category {:<16}: Min Parity = {:.6}", cat, min_s);
     }
+
+    assert!(
+        avg_sim >= avg_threshold,
+        "Average parity failure on {}: avg_sim = {:.6} (expected >= {:.5})",
+        model_name,
+        avg_sim,
+        avg_threshold
+    );
 
     // Pairwise Ranking Separation 1: Length scaling buckets
     if max_bucket.is_none() {
@@ -220,29 +263,37 @@ fn run_corpus_validation(
 
 #[test]
 fn test_corpus_parity_cpu() -> Result<()> {
-    let snapshot_dir = match get_snapshot_dir() {
+    let snapshot_dir = match get_snapshot_dir()? {
         Some(d) => d,
         None => return Ok(()),
     };
     let embedder = GlyprEmbedder::load(&snapshot_dir, &Device::Cpu, DType::F32)?;
-    run_corpus_validation(&embedder, "Safetensors FP32 (CPU)", 0.995, Some(64))
+    run_corpus_validation(&embedder, "Safetensors FP32 (CPU)", 0.9999, 0.99995, Some(64))
 }
 
 #[cfg(feature = "metal")]
 #[test]
 fn test_corpus_parity_safetensors_metal() -> Result<()> {
-    let snapshot_dir = match get_snapshot_dir() {
+    let snapshot_dir = match get_snapshot_dir()? {
         Some(d) => d,
         None => return Ok(()),
     };
     let device = Device::new_metal(0)?;
-    let embedder = GlyprEmbedder::load(&snapshot_dir, &device, DType::BF16)?;
-    run_corpus_validation(&embedder, "Safetensors BF16 (Apple Metal)", 0.9995, None)
+    let mut embedder = GlyprEmbedder::load(&snapshot_dir, &device, DType::BF16)?;
+    embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
+    run_corpus_validation(&embedder, "Safetensors BF16 (Metal ChunkedSliding)", 0.9998, 0.9999, None)?;
+
+    #[cfg(feature = "metal-flash-attn")]
+    {
+        embedder.set_attention_mode(glypr_core::AttentionMode::MetalFlash);
+        run_corpus_validation(&embedder, "Safetensors BF16 (Metal FlashAttention)", 0.9998, 0.9999, None)?;
+    }
+    Ok(())
 }
 
 #[test]
 fn test_corpus_parity_gguf_q8_cpu() -> Result<()> {
-    let gguf_path = match get_gguf_q8_path() {
+    let gguf_path = match get_gguf_q8_path()? {
         Some(p) => p,
         None => return Ok(()),
     };
@@ -250,30 +301,45 @@ fn test_corpus_parity_gguf_q8_cpu() -> Result<()> {
     let mut embedder = GlyprEmbedder::load_gguf_q8(&gguf_path, &device)?;
     embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
     // Full 292 vectors across all buckets up to 8192 tokens
-    run_corpus_validation(&embedder, "GGUF Q8_0 (CPU Chunked)", 0.990, None)
+    run_corpus_validation(&embedder, "GGUF Q8_0 (CPU Chunked)", 0.9994, 0.9998, None)
 }
 
 #[cfg(feature = "metal")]
 #[test]
 fn test_corpus_parity_gguf_bf16_metal() -> Result<()> {
-    let gguf_path = match get_gguf_bf16_path() {
+    let gguf_path = match get_gguf_bf16_path()? {
         Some(p) => p,
         None => return Ok(()),
     };
     let device = Device::new_metal(0)?;
-    let embedder = GlyprEmbedder::load_gguf_bf16(&gguf_path, &device)?;
-    run_corpus_validation(&embedder, "GGUF BF16 (Apple Metal)", 0.9995, None)
+    let mut embedder = GlyprEmbedder::load_gguf_bf16(&gguf_path, &device)?;
+    embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
+    run_corpus_validation(&embedder, "GGUF BF16 (Metal ChunkedSliding)", 0.9998, 0.9999, None)?;
+
+    #[cfg(feature = "metal-flash-attn")]
+    {
+        embedder.set_attention_mode(glypr_core::AttentionMode::MetalFlash);
+        run_corpus_validation(&embedder, "GGUF BF16 (Metal FlashAttention)", 0.9998, 0.9999, None)?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "metal")]
 #[test]
 fn test_corpus_parity_gguf_q8_metal() -> Result<()> {
-    let gguf_path = match get_gguf_q8_path() {
+    let gguf_path = match get_gguf_q8_path()? {
         Some(p) => p,
         None => return Ok(()),
     };
     let device = Device::new_metal(0)?;
-    let embedder = GlyprEmbedder::load_gguf_q8(&gguf_path, &device)?;
-    // Q8 quantization standard: min parity >= 0.990, ranking separation preserved
-    run_corpus_validation(&embedder, "GGUF Q8_0 (Apple Metal)", 0.990, None)
+    let mut embedder = GlyprEmbedder::load_gguf_q8(&gguf_path, &device)?;
+    embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
+    run_corpus_validation(&embedder, "GGUF Q8_0 (Metal ChunkedSliding)", 0.9996, 0.9998, None)?;
+
+    #[cfg(feature = "metal-flash-attn")]
+    {
+        embedder.set_attention_mode(glypr_core::AttentionMode::MetalFlash);
+        run_corpus_validation(&embedder, "GGUF Q8_0 (Metal FlashAttention)", 0.9996, 0.9998, None)?;
+    }
+    Ok(())
 }
