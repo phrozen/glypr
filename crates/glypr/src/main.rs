@@ -279,12 +279,8 @@ fn parse_interleaved_inputs(inputs: Vec<String>) -> Result<(Vec<OwnedInputItem>,
                     has_media = true;
                 }
                 "wav" => {
-                    let mut reader = hound::WavReader::open(p)
-                        .with_context(|| format!("Failed to open WAV audio {:?}", p))?;
-                    let samples: Vec<f32> = reader
-                        .samples::<i16>()
-                        .map(|s| s.unwrap_or(0) as f32 / 32767.0)
-                        .collect();
+                    let samples = glypr_core::multimodal::decode_wav_file(p)
+                        .with_context(|| format!("Failed to decode WAV audio {:?}", p))?;
                     parts.push(OwnedInputItem::Audio(samples));
                     has_media = true;
                 }

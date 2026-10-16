@@ -105,7 +105,7 @@ pub struct InferenceRequest {
     pub item: PreparedItem,
     pub task: OwnedTask,
     pub truncate_dim: Option<usize>,
-    pub sender: oneshot::Sender<Result<Vec<f32>>>,
+    pub sender: oneshot::Sender<Result<(Vec<f32>, usize)>>,
 }
 
 /// Metadata describing the loaded model.
@@ -125,13 +125,13 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
-    /// Submit a single request and await its embedding result.
+    /// Submit a single request and await its embedding result and prompt token count.
     pub async fn infer(
         &self,
         item: PreparedItem,
         task: OwnedTask,
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<f32>> {
+    ) -> Result<(Vec<f32>, usize)> {
         let (tx, rx) = oneshot::channel();
         let req = InferenceRequest {
             item,
@@ -247,14 +247,25 @@ fn process_batch(embedder: &GlyprEmbedder, batch: Vec<InferenceRequest>) {
         })
         .collect();
 
+    let token_counts: Vec<usize> = inputs
+        .iter()
+        .map(|inp| {
+            embedder
+                .tokenizer
+                .encode_modality_sequence(&inp.parts, inp.task)
+                .map(|(ids, _)| ids.len())
+                .unwrap_or(1)
+        })
+        .collect();
+
     match embedder.embed_batch(&inputs, None) {
         Ok(embeddings) => {
-            for (req, vec) in batch.into_iter().zip(embeddings) {
+            for ((req, vec), tok_count) in batch.into_iter().zip(embeddings).zip(token_counts) {
                 let final_vec = match req.truncate_dim {
                     Some(dim) if dim < 768 => truncate_mrl(&vec, dim),
                     _ => Ok(vec),
                 };
-                let _ = req.sender.send(final_vec);
+                let _ = req.sender.send(final_vec.map(|v| (v, tok_count)));
             }
         }
         Err(e) => {
@@ -289,33 +300,21 @@ fn decode_image(input: &str) -> Result<image::DynamicImage> {
 
 /// Helper to decode audio samples from base64 data URI, raw base64 WAV, or local path.
 fn decode_audio(input: &str) -> Result<Vec<f32>> {
-    let cursor: std::io::Cursor<Vec<u8>> = if let Some(stripped) = input.strip_prefix("data:") {
+    if let Some(stripped) = input.strip_prefix("data:") {
         if let Some((_, b64)) = stripped.split_once(";base64,") {
             let bytes = BASE64
                 .decode(b64.trim())
                 .context("Failed to base64-decode audio data URI")?;
-            std::io::Cursor::new(bytes)
+            glypr_core::multimodal::decode_wav_bytes(&bytes)
         } else {
             anyhow::bail!("Invalid data URI format: missing ';base64,' marker");
         }
     } else if std::path::Path::new(input).exists() {
-        let mut reader = hound::WavReader::open(input).context("Failed to open local WAV file")?;
-        let samples: Vec<f32> = reader
-            .samples::<i16>()
-            .map(|s| s.unwrap_or(0) as f32 / 32767.0)
-            .collect();
-        return Ok(samples);
+        glypr_core::multimodal::decode_wav_file(input)
     } else {
         let bytes = BASE64
             .decode(input.trim())
             .context("Failed to base64-decode audio string")?;
-        std::io::Cursor::new(bytes)
-    };
-
-    let mut reader = hound::WavReader::new(cursor).context("Failed to parse WAV audio bytes")?;
-    let samples: Vec<f32> = reader
-        .samples::<i16>()
-        .map(|s| s.unwrap_or(0) as f32 / 32767.0)
-        .collect();
-    Ok(samples)
+        glypr_core::multimodal::decode_wav_bytes(&bytes)
+    }
 }

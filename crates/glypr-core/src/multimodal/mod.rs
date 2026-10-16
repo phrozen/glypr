@@ -5,7 +5,10 @@ pub mod projector;
 pub mod vision;
 
 pub use audio::AudioTower;
-pub use audio_preprocessor::{compute_audio_soft_token_count, compute_audio_total_tokens, preprocess_audio, ProcessedAudio};
+pub use audio_preprocessor::{
+    compute_audio_soft_token_count, compute_audio_total_tokens, decode_wav_bytes, decode_wav_file,
+    decode_wav_reader, preprocess_audio, ProcessedAudio,
+};
 pub use image_preprocessor::{
     compute_image_total_tokens, compute_soft_token_count, preprocess_image, validate_vision_budget,
     ProcessedImage, VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH, VISION_BUDGET_LOW,

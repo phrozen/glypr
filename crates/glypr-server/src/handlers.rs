@@ -147,7 +147,7 @@ pub async fn handle_embeddings(
     let mut vectors = Vec::with_capacity(handles.len());
     for handle in handles {
         match handle.await {
-            Ok(Ok(vec)) => vectors.push(vec),
+            Ok(Ok(res)) => vectors.push(res),
             Ok(Err(e)) => return Err(bad_request(e.to_string()).into_response()),
             Err(e) => return Err(internal_error(e.to_string()).into_response()),
         }
@@ -157,9 +157,8 @@ pub async fn handle_embeddings(
     let mut embedding_objects = Vec::with_capacity(vectors.len());
     let mut total_tokens = 0;
 
-    for (index, vec) in vectors.into_iter().enumerate() {
-        // Approximate token count based on embedding size
-        total_tokens += vec.len() / 8 + 4;
+    for (index, (vec, prompt_tokens)) in vectors.into_iter().enumerate() {
+        total_tokens += prompt_tokens;
 
         let output = match encoding_format {
             EncodingFormat::Float => EmbeddingOutput::Float(vec),

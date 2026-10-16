@@ -290,6 +290,86 @@ pub fn compute_audio_total_tokens(samples_len: usize) -> usize {
     compute_audio_soft_token_count(samples_len) + 2
 }
 
+/// Decode a WAV stream into mono 16 kHz `f32` samples normalized to `[-1.0, 1.0]`.
+///
+/// Supports:
+/// - `SampleFormat::Int` (8-bit, 16-bit, 24-bit, 32-bit PCM)
+/// - `SampleFormat::Float` (32-bit IEEE float WAV)
+/// - Multi-channel (stereo, etc.) automatic averaging to mono
+/// - Automatic linear resampling to 16,000 Hz if source sample rate differs
+/// - Exact `32767.0` divisor for 16-bit mono 16kHz PCM to preserve bit-exact golden parity
+pub fn decode_wav_reader<R: std::io::Read>(mut reader: hound::WavReader<R>) -> Result<Vec<f32>> {
+    let spec = reader.spec();
+    let channels = spec.channels.max(1) as usize;
+
+    let raw_interleaved: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<std::result::Result<Vec<f32>, _>>()
+            .map_err(|e| anyhow::anyhow!("Failed to read float WAV samples: {e}"))?,
+        hound::SampleFormat::Int => {
+            let bits = spec.bits_per_sample;
+            if bits <= 16 {
+                let scale = if bits == 8 { 127.0f32 } else { 32767.0f32 };
+                reader
+                    .samples::<i16>()
+                    .map(|s| s.map(|v| (v as f32) / scale))
+                    .collect::<std::result::Result<Vec<f32>, _>>()
+                    .map_err(|e| anyhow::anyhow!("Failed to read {bits}-bit PCM WAV samples: {e}"))?
+            } else {
+                let scale = ((1i64 << (bits - 1)) - 1) as f32;
+                reader
+                    .samples::<i32>()
+                    .map(|s| s.map(|v| (v as f32) / scale))
+                    .collect::<std::result::Result<Vec<f32>, _>>()
+                    .map_err(|e| anyhow::anyhow!("Failed to read {bits}-bit PCM WAV samples: {e}"))?
+            }
+        }
+    };
+
+    let mono: Vec<f32> = if channels == 1 {
+        raw_interleaved
+    } else {
+        raw_interleaved
+            .chunks_exact(channels)
+            .map(|frame| frame.iter().sum::<f32>() / (channels as f32))
+            .collect()
+    };
+
+    if spec.sample_rate as usize == AUDIO_SAMPLE_RATE || mono.is_empty() {
+        Ok(mono)
+    } else {
+        let src_rate = spec.sample_rate as f64;
+        let dst_rate = AUDIO_SAMPLE_RATE as f64;
+        let ratio = src_rate / dst_rate;
+        let out_len = ((mono.len() as f64) / ratio).round() as usize;
+        let mut resampled = Vec::with_capacity(out_len);
+        for i in 0..out_len {
+            let src_pos = (i as f64) * ratio;
+            let idx = src_pos.floor() as usize;
+            let frac = (src_pos - (idx as f64)) as f32;
+            let s0 = mono[idx.min(mono.len() - 1)];
+            let s1 = mono[(idx + 1).min(mono.len() - 1)];
+            resampled.push(s0 + frac * (s1 - s0));
+        }
+        Ok(resampled)
+    }
+}
+
+/// Decode a WAV file from disk into mono 16 kHz `f32` samples.
+pub fn decode_wav_file<P: AsRef<std::path::Path>>(path: P) -> Result<Vec<f32>> {
+    let reader = hound::WavReader::open(path.as_ref())
+        .map_err(|e| anyhow::anyhow!("Failed to open WAV file {:?}: {e}", path.as_ref()))?;
+    decode_wav_reader(reader)
+}
+
+/// Decode WAV audio bytes in memory into mono 16 kHz `f32` samples.
+pub fn decode_wav_bytes(bytes: &[u8]) -> Result<Vec<f32>> {
+    let reader = hound::WavReader::new(std::io::Cursor::new(bytes))
+        .map_err(|e| anyhow::anyhow!("Failed to parse WAV audio bytes: {e}"))?;
+    decode_wav_reader(reader)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +395,49 @@ mod tests {
         assert_eq!(compute_audio_soft_token_count(202915), 317);
         assert_eq!(compute_audio_total_tokens(202915), 319);
     }
+
+    #[test]
+    fn test_decode_wav_formats_float_stereo_and_24bit() {
+        // 1. Test 32-bit float stereo WAV
+        let spec_f32 = hound::WavSpec {
+            channels: 2,
+            sample_rate: 16000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut buf = Vec::new();
+        {
+            let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buf), spec_f32).unwrap();
+            // L = 0.25, R = 0.75 -> Mono = 0.5
+            writer.write_sample(0.25f32).unwrap();
+            writer.write_sample(0.75f32).unwrap();
+            writer.write_sample(-0.5f32).unwrap();
+            writer.write_sample(0.5f32).unwrap();
+            writer.finalize().unwrap();
+        }
+        let decoded = decode_wav_bytes(&buf).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert!((decoded[0] - 0.5).abs() < 1e-6);
+        assert!((decoded[1] - 0.0).abs() < 1e-6);
+
+        // 2. Test 24-bit integer mono WAV
+        let spec_i24 = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 24,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut buf24 = Vec::new();
+        {
+            let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buf24), spec_i24).unwrap();
+            let max_24 = (1i32 << 23) - 1;
+            writer.write_sample(max_24).unwrap();
+            writer.finalize().unwrap();
+        }
+        let decoded24 = decode_wav_bytes(&buf24).unwrap();
+        assert_eq!(decoded24.len(), 1);
+        assert!((decoded24[0] - 1.0).abs() < 1e-5);
+    }
 }
+
 
