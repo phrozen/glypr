@@ -176,14 +176,20 @@ impl AttentionBackend for MetalFlashAttention {
                 o_strides: [out_layout.stride()[0] as i64, out_layout.stride()[1] as i64, out_layout.stride()[2] as i64],
             };
 
+            let elem_bytes = q.dtype().size_in_bytes();
+            let q_offset = q_layout.start_offset() * elem_bytes;
+            let k_offset = k_layout.start_offset() * elem_bytes;
+            let v_offset = v_layout.start_offset() * elem_bytes;
+            let out_offset = out_layout.start_offset() * elem_bytes;
+
             let encoder = mdev.command_encoder()?;
             let enc_ref: &candle_metal_kernels::metal::ComputeCommandEncoder = encoder.as_ref();
             enc_ref.set_compute_pipeline_state(&pipeline);
 
-            enc_ref.set_input_buffer(0, Some(q_buf), 0);
-            enc_ref.set_input_buffer(1, Some(k_buf), 0);
-            enc_ref.set_input_buffer(2, Some(v_buf), 0);
-            enc_ref.set_output_buffer(3, Some(out_buf), 0);
+            enc_ref.set_input_buffer(0, Some(q_buf), q_offset);
+            enc_ref.set_input_buffer(1, Some(k_buf), k_offset);
+            enc_ref.set_input_buffer(2, Some(v_buf), v_offset);
+            enc_ref.set_output_buffer(3, Some(out_buf), out_offset);
             enc_ref.set_bytes(4, &params);
 
             let grid_dims = MTLSize { width: nq, height: h, depth: b };

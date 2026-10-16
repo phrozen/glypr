@@ -92,8 +92,8 @@ pub fn fused_metal_rmsnorm(x: &Tensor, weight: Option<&Tensor>, eps: f64) -> Res
     let eps_f32 = eps as f32;
 
     {
-        let (x_storage, _) = x.storage_and_layout();
-        let (out_storage, _) = out.storage_and_layout();
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
 
         let x_buf = match &*x_storage {
             candle_core::Storage::Metal(m) => m.buffer(),
@@ -104,25 +104,30 @@ pub fn fused_metal_rmsnorm(x: &Tensor, weight: Option<&Tensor>, eps: f64) -> Res
             _ => unreachable!(),
         };
 
+        let elem_bytes = x.dtype().size_in_bytes();
+        let x_offset = x_layout.start_offset() * elem_bytes;
+        let out_offset = out_layout.start_offset() * elem_bytes;
+
         let encoder = mdev.command_encoder()?;
         let enc_ref: &candle_metal_kernels::metal::ComputeCommandEncoder = encoder.as_ref();
         enc_ref.set_compute_pipeline_state(&pipeline);
 
-        enc_ref.set_input_buffer(0, Some(x_buf), 0);
+        enc_ref.set_input_buffer(0, Some(x_buf), x_offset);
 
         if let Some(w) = weight_ref {
-            let (w_storage, _) = w.storage_and_layout();
+            let (w_storage, w_layout) = w.storage_and_layout();
             let w_buf = match &*w_storage {
                 candle_core::Storage::Metal(m) => m.buffer(),
                 _ => unreachable!(),
             };
-            enc_ref.set_input_buffer(1, Some(w_buf), 0);
+            let w_offset = w_layout.start_offset() * w.dtype().size_in_bytes();
+            enc_ref.set_input_buffer(1, Some(w_buf), w_offset);
         } else {
             // Null or placeholder buffer
-            enc_ref.set_input_buffer(1, Some(x_buf), 0);
+            enc_ref.set_input_buffer(1, Some(x_buf), x_offset);
         }
 
-        enc_ref.set_output_buffer(2, Some(out_buf), 0);
+        enc_ref.set_output_buffer(2, Some(out_buf), out_offset);
         enc_ref.set_bytes(3, &eps_f32);
         enc_ref.set_bytes(4, &d_i32);
         enc_ref.set_bytes(5, &has_weight);
@@ -151,9 +156,9 @@ pub fn fused_metal_geglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
     let total_i32 = total_elements as i32;
 
     {
-        let (gate_storage, _) = gate.storage_and_layout();
-        let (up_storage, _) = up.storage_and_layout();
-        let (out_storage, _) = out.storage_and_layout();
+        let (gate_storage, gate_layout) = gate.storage_and_layout();
+        let (up_storage, up_layout) = up.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
 
         let gate_buf = match &*gate_storage {
             candle_core::Storage::Metal(m) => m.buffer(),
@@ -168,13 +173,18 @@ pub fn fused_metal_geglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
             _ => unreachable!(),
         };
 
+        let elem_bytes = gate.dtype().size_in_bytes();
+        let gate_offset = gate_layout.start_offset() * elem_bytes;
+        let up_offset = up_layout.start_offset() * elem_bytes;
+        let out_offset = out_layout.start_offset() * elem_bytes;
+
         let encoder = mdev.command_encoder()?;
         let enc_ref: &candle_metal_kernels::metal::ComputeCommandEncoder = encoder.as_ref();
         enc_ref.set_compute_pipeline_state(&pipeline);
 
-        enc_ref.set_input_buffer(0, Some(gate_buf), 0);
-        enc_ref.set_input_buffer(1, Some(up_buf), 0);
-        enc_ref.set_output_buffer(2, Some(out_buf), 0);
+        enc_ref.set_input_buffer(0, Some(gate_buf), gate_offset);
+        enc_ref.set_input_buffer(1, Some(up_buf), up_offset);
+        enc_ref.set_output_buffer(2, Some(out_buf), out_offset);
         enc_ref.set_bytes(3, &total_i32);
 
         let thread_group_size = 256;
@@ -186,3 +196,64 @@ pub fn fused_metal_geglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
 
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metal_kernels_respect_start_offset() -> Result<()> {
+        if !candle_core::utils::metal_is_available() {
+            return Ok(());
+        }
+        let dev = Device::new_metal(0)?;
+
+        // Create a [2, 512] tensor where row 0 and row 1 have distinct values
+        let mut data = Vec::with_capacity(2 * 512);
+        for i in 0..512 {
+            data.push((i as f32 + 1.0) * 0.01);
+        }
+        for i in 0..512 {
+            data.push((512 - i) as f32 * 0.03 - 2.0);
+        }
+        let full = Tensor::from_vec(data, (2, 512), &dev)?.to_dtype(DType::BF16)?;
+        let weight = Tensor::ones(512, DType::BF16, &dev)?;
+
+        // Narrow to row 1 (contiguous == true, start_offset == 512)
+        let row1_view = full.narrow(0, 1, 1)?;
+        assert!(row1_view.is_contiguous());
+        assert_eq!(row1_view.layout().start_offset(), 512);
+
+        // Copy row 1 into a fresh offset-0 buffer for reference
+        let row1_fresh = Tensor::from_vec(
+            row1_view.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+            (1, 512),
+            &dev,
+        )?
+        .to_dtype(DType::BF16)?;
+        assert_eq!(row1_fresh.layout().start_offset(), 0);
+
+        let norm_view = fused_metal_rmsnorm(&row1_view, Some(&weight), 1e-6)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let norm_fresh = fused_metal_rmsnorm(&row1_fresh, Some(&weight), 1e-6)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(norm_view, norm_fresh, "fused_metal_rmsnorm ignored start_offset!");
+
+        let geglu_view = fused_metal_geglu(&row1_view, &row1_view)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let geglu_fresh = fused_metal_geglu(&row1_fresh, &row1_fresh)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(geglu_view, geglu_fresh, "fused_metal_geglu ignored start_offset!");
+
+        Ok(())
+    }
+}
+

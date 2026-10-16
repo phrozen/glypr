@@ -237,6 +237,15 @@ impl GlyprEmbedder {
         items: &[MediaItem],
         truncate_dim: Option<usize>,
     ) -> Result<Vec<f32>> {
+        with_autorelease_pool(|| self.embed_composite_inner(prompt, items, truncate_dim))
+    }
+
+    fn embed_composite_inner(
+        &self,
+        prompt: Option<&str>,
+        items: &[MediaItem],
+        truncate_dim: Option<usize>,
+    ) -> Result<Vec<f32>> {
         let projector = self.multimodal.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Multimodal projector not attached. Call embedder.attach_multimodal_projector() first.")
         })?;
@@ -384,6 +393,14 @@ impl GlyprEmbedder {
     /// `embedder.embed_interleaved(&[ModalityPart::Text("..."), ModalityPart::Image { ... }], Task::SearchQuery)`
     /// Returns native 768-dimensional L2-normalized embedding vector.
     pub fn embed_interleaved(
+        &self,
+        parts: &[ModalityPart],
+        task: Task,
+    ) -> Result<Vec<f32>> {
+        with_autorelease_pool(|| self.embed_interleaved_inner(parts, task))
+    }
+
+    fn embed_interleaved_inner(
         &self,
         parts: &[ModalityPart],
         task: Task,
@@ -758,41 +775,9 @@ impl GlyprEmbedder {
 
 
     fn encode_single_text(&self, text: &str, truncate_dim: Option<usize>) -> Result<Vec<f32>> {
-        let token_ids = self.tokenizer.encode(text)?;
-        let seq_len = token_ids.len();
-        if seq_len > self.max_seq_len {
-            anyhow::bail!(
-                "Text sequence length ({} tokens) exceeds maximum context limit ({} tokens)",
-                seq_len,
-                self.max_seq_len
-            );
-        }
-        let input_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
-
-        // Forward through backbone
-        let token_embeds = self.model.forward(&input_tensor, None)?;
-
-        // Pool and normalize
-        let pooled = self.model.pool_and_normalize(&token_embeds, None, truncate_dim)?;
-
-        // Cast to F32 vec
-        let pooled_f32 = pooled.to_dtype(DType::F32)?;
-        let vec = pooled_f32.squeeze(0)?.to_vec1::<f32>()?;
-        Ok(vec)
-    }
-
-    pub fn profile_encode_batch(
-        &self,
-        texts: &[&str],
-        truncate_dim: Option<usize>,
-    ) -> Result<(Vec<Vec<f32>>, PipelineProfile)> {
-        let t_total = std::time::Instant::now();
-        let batch_size = texts.len();
-
-        let t_tok = std::time::Instant::now();
-        let (input_ids, attention_mask) = if batch_size == 1 {
-            let ids = self.tokenizer.encode(texts[0])?;
-            let seq_len = ids.len();
+        with_autorelease_pool(|| {
+            let token_ids = self.tokenizer.encode(text)?;
+            let seq_len = token_ids.len();
             if seq_len > self.max_seq_len {
                 anyhow::bail!(
                     "Text sequence length ({} tokens) exceeds maximum context limit ({} tokens)",
@@ -800,48 +785,84 @@ impl GlyprEmbedder {
                     self.max_seq_len
                 );
             }
-            let t = Tensor::from_vec(ids, (1, seq_len), &self.device)?;
-            (t, None)
-        } else {
-            let (ids, mask) = self.tokenizer.encode_batch_padded_with_limit(texts, self.max_seq_len, &self.device)?;
-            (ids, Some(mask))
-        };
-        let tokenizer_ms = t_tok.elapsed().as_secs_f64() * 1000.0;
-        let seq_len = input_ids.dim(1)?;
+            let input_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
 
-        let (token_embeds, forward_profile) = self.model.forward_profiled(&input_ids, attention_mask.as_ref())?;
+            // Forward through backbone
+            let token_embeds = self.model.forward(&input_tensor, None)?;
 
-        let t_pool = std::time::Instant::now();
-        let pooled = self.model.pool_and_normalize(&token_embeds, attention_mask.as_ref(), truncate_dim)?;
-        let pooled_f32 = pooled.to_dtype(DType::F32)?;
-        let pooling_ms = t_pool.elapsed().as_secs_f64() * 1000.0;
+            // Pool and normalize
+            let pooled = self.model.pool_and_normalize(&token_embeds, None, truncate_dim)?;
 
-        let t_mrl = std::time::Instant::now();
-        let mut result = Vec::with_capacity(batch_size);
-        for b in 0..batch_size {
-            let vec = pooled_f32.get(b)?.to_vec1::<f32>()?;
-            result.push(vec);
-        }
-        let mrl_l2norm_ms = t_mrl.elapsed().as_secs_f64() * 1000.0;
-        let total_pipeline_ms = t_total.elapsed().as_secs_f64() * 1000.0;
-        let total_tokens = batch_size * seq_len;
-        let tokens_per_sec = if total_pipeline_ms > 0.0 {
-            (total_tokens as f64) / (total_pipeline_ms / 1000.0)
-        } else {
-            0.0
-        };
+            // Cast to F32 vec
+            let pooled_f32 = pooled.to_dtype(DType::F32)?;
+            let vec = pooled_f32.squeeze(0)?.to_vec1::<f32>()?;
+            Ok(vec)
+        })
+    }
 
-        let pipe_profile = PipelineProfile {
-            batch_size,
-            seq_len,
-            tokenizer_ms,
-            forward: forward_profile,
-            pooling_ms,
-            mrl_l2norm_ms,
-            total_pipeline_ms,
-            tokens_per_sec,
-        };
+    pub fn profile_encode_batch(
+        &self,
+        texts: &[&str],
+        truncate_dim: Option<usize>,
+    ) -> Result<(Vec<Vec<f32>>, PipelineProfile)> {
+        with_autorelease_pool(|| {
+            let t_total = std::time::Instant::now();
+            let batch_size = texts.len();
 
-        Ok((result, pipe_profile))
+            let t_tok = std::time::Instant::now();
+            let (input_ids, attention_mask) = if batch_size == 1 {
+                let ids = self.tokenizer.encode(texts[0])?;
+                let seq_len = ids.len();
+                if seq_len > self.max_seq_len {
+                    anyhow::bail!(
+                        "Text sequence length ({} tokens) exceeds maximum context limit ({} tokens)",
+                        seq_len,
+                        self.max_seq_len
+                    );
+                }
+                let t = Tensor::from_vec(ids, (1, seq_len), &self.device)?;
+                (t, None)
+            } else {
+                let (ids, mask) = self.tokenizer.encode_batch_padded_with_limit(texts, self.max_seq_len, &self.device)?;
+                (ids, Some(mask))
+            };
+            let tokenizer_ms = t_tok.elapsed().as_secs_f64() * 1000.0;
+            let seq_len = input_ids.dim(1)?;
+
+            let (token_embeds, forward_profile) = self.model.forward_profiled(&input_ids, attention_mask.as_ref())?;
+
+            let t_pool = std::time::Instant::now();
+            let pooled = self.model.pool_and_normalize(&token_embeds, attention_mask.as_ref(), truncate_dim)?;
+            let pooled_f32 = pooled.to_dtype(DType::F32)?;
+            let pooling_ms = t_pool.elapsed().as_secs_f64() * 1000.0;
+
+            let t_mrl = std::time::Instant::now();
+            let mut result = Vec::with_capacity(batch_size);
+            for b in 0..batch_size {
+                let vec = pooled_f32.get(b)?.to_vec1::<f32>()?;
+                result.push(vec);
+            }
+            let mrl_l2norm_ms = t_mrl.elapsed().as_secs_f64() * 1000.0;
+            let total_pipeline_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+            let total_tokens = batch_size * seq_len;
+            let tokens_per_sec = if total_pipeline_ms > 0.0 {
+                (total_tokens as f64) / (total_pipeline_ms / 1000.0)
+            } else {
+                0.0
+            };
+
+            let pipe_profile = PipelineProfile {
+                batch_size,
+                seq_len,
+                tokenizer_ms,
+                forward: forward_profile,
+                pooling_ms,
+                mrl_l2norm_ms,
+                total_pipeline_ms,
+                tokens_per_sec,
+            };
+
+            Ok((result, pipe_profile))
+        })
     }
 }
