@@ -21,7 +21,14 @@ pub enum AttentionMode {
 
 impl Default for AttentionMode {
     fn default() -> Self {
-        AttentionMode::ChunkedSliding
+        #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
+        {
+            AttentionMode::MetalFlash
+        }
+        #[cfg(not(any(feature = "metal", feature = "metal-flash-attn")))]
+        {
+            AttentionMode::ChunkedSliding
+        }
     }
 }
 

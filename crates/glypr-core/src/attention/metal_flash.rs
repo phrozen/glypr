@@ -34,17 +34,25 @@ struct AttnParams {
     o_strides: [i64; 3],
 }
 
+#[derive(Debug)]
+#[repr(C)]
+struct AttnMaskParams {
+    m_strides: [i64; 3],
+}
+
 struct PipelineCache {
     library: Library,
-    pipelines: Mutex<HashMap<(bool, bool), ComputePipeline>>,
+    pipelines: Mutex<HashMap<(usize, bool, bool, bool), ComputePipeline>>,
 }
 
 static PIPELINE_CACHE: OnceLock<PipelineCache> = OnceLock::new();
 
 fn get_or_compile_pipeline(
     device: &MtlDevice,
+    head_dim: usize,
     align_q: bool,
     align_k: bool,
+    has_mask: bool,
 ) -> Result<ComputePipeline> {
     let cache = PIPELINE_CACHE.get_or_init(|| {
         let lib = device
@@ -56,19 +64,28 @@ fn get_or_compile_pipeline(
         }
     });
 
+    let key = (head_dim, align_q, align_k, has_mask);
     let mut map = cache.pipelines.lock().unwrap();
-    if let Some(p) = map.get(&(align_q, align_k)) {
+    if let Some(p) = map.get(&key) {
         return Ok(p.clone());
     }
 
     let cv = ConstantValues::new(vec![
         (200, Value::Bool(align_q)),
         (201, Value::Bool(align_k)),
-        (300, Value::Bool(false)), // has_mask = false (hardware tile-skipping used)
-        (301, Value::Bool(false)), // do_causal = false (bidirectional sliding window)
+        (300, Value::Bool(has_mask)),
+        (301, Value::Bool(false)), // do_causal = false (bidirectional sliding window / full attention)
     ]);
 
-    let func_name = "steel_attention_bfloat16_bq32_bk16_bd256_wm4_wn1_maskbfloat16";
+    let func_name = match head_dim {
+        256 => "steel_attention_bfloat16_bq32_bk16_bd256_wm4_wn1_maskbfloat16",
+        512 => "steel_attention_bfloat16_bq16_bk16_bd512_wm2_wn1_maskbfloat16",
+        _ => {
+            return Err(candle_core::Error::Msg(format!(
+                "Unsupported head_dim for MetalFlashAttention: {head_dim}"
+            )))
+        }
+    };
     let func = cache
         .library
         .get_function(func_name, Some(&cv))
@@ -77,18 +94,19 @@ fn get_or_compile_pipeline(
         .new_compute_pipeline_state_with_function(&func)
         .map_err(|e| candle_core::Error::Metal(format!("Failed to create compute pipeline: {e}").into()))?;
 
-    map.insert((align_q, align_k), pipeline.clone());
+    map.insert(key, pipeline.clone());
     Ok(pipeline)
 }
 
-/// Dedicated Apple Silicon Sliding-Window Metal FlashAttention Engine.
+/// Dedicated Apple Silicon Sliding-Window & Full-Context Metal FlashAttention Engine.
 ///
 /// Features:
 /// - Custom Metal Shading Language kernel with hardware tile-skipping for sliding window attention.
-/// - Zero mask allocation (0 MB VRAM overhead) on arbitrary sequence lengths up to 8K.
-/// - Unmasked full-attention execution for global layers (`window_size = 0`).
-/// - 100% bit-for-bit parity against reference CPU/GPU models.
-/// - Automatic fallback to ChunkedSlidingAttention when running on CPU or unsupported configurations.
+/// - Supports both `head_dim = 256` (sliding layers) and `head_dim = 512` (global layers 5, 11, 17, 23).
+/// - Zero mask allocation (0 MB VRAM overhead) on unpadded sequences up to 8K, and $O(B \cdot S)$
+///   stride-broadcasted key-padding mask on heterogeneous batches.
+/// - Native GQA without `repeat_kv` tensor duplication.
+/// - Automatic fallback to ChunkedSlidingAttention when running on CPU or unsupported dtypes.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MetalFlashAttention;
 
@@ -105,7 +123,12 @@ impl AttentionBackend for MetalFlashAttention {
             Device::Metal(m) => m,
             _ => {
                 // Graceful CPU fallback
-                return ChunkedSlidingAttention.compute_attention(q, k, v, attention_mask, sliding_window);
+                let (_b, h, _s, _d) = q.dims4()?;
+                let (_kb, kh, _ks, _kd) = k.dims4()?;
+                let gqa = h / kh;
+                let k_rep = if gqa > 1 { super::repeat_kv(k, gqa)? } else { k.clone() };
+                let v_rep = if gqa > 1 { super::repeat_kv(v, gqa)? } else { v.clone() };
+                return ChunkedSlidingAttention.compute_attention(q, &k_rep, &v_rep, attention_mask, sliding_window);
             }
         };
 
@@ -113,25 +136,35 @@ impl AttentionBackend for MetalFlashAttention {
         let (_kb, kh, _ks, _kd) = k.dims4()?;
         let gqa_factor = (h / kh) as i32;
 
-        // If an explicit external mask is provided (e.g. batch padding), fall back to MetalSdpaAttention
-        if attention_mask.is_some() {
-            let k_rep = if gqa_factor > 1 { super::repeat_kv(k, gqa_factor as usize)? } else { k.clone() };
-            let v_rep = if gqa_factor > 1 { super::repeat_kv(v, gqa_factor as usize)? } else { v.clone() };
-            return super::metal_sdpa::MetalSdpaAttention.compute_attention(q, &k_rep, &v_rep, attention_mask, sliding_window);
-        }
-
-        // Metal Flash Kernel is specialized for head_dim = 256 and BF16
-        if d != 256 || q.dtype() != DType::BF16 {
+        // Metal Flash Kernel supports head_dim = 256 and 512 in BF16
+        if (d != 256 && d != 512) || q.dtype() != DType::BF16 {
             let k_rep = if gqa_factor > 1 { super::repeat_kv(k, gqa_factor as usize)? } else { k.clone() };
             let v_rep = if gqa_factor > 1 { super::repeat_kv(v, gqa_factor as usize)? } else { v.clone() };
             return ChunkedSlidingAttention.compute_attention(q, &k_rep, &v_rep, attention_mask, sliding_window);
         }
 
-        let (bq, bk, wm, wn) = (32, 16, 4, 1);
+        // Validate optional additive mask ([B, 1, 1, S] or [B, H|1, S|1, S] in BF16 on Metal)
+        let mask_contig = if let Some(m) = attention_mask {
+            if m.dtype() != DType::BF16 || !m.device().is_metal() || m.dims().len() != 4 || m.dim(3)? != s {
+                let k_rep = if gqa_factor > 1 { super::repeat_kv(k, gqa_factor as usize)? } else { k.clone() };
+                let v_rep = if gqa_factor > 1 { super::repeat_kv(v, gqa_factor as usize)? } else { v.clone() };
+                return super::metal_sdpa::MetalSdpaAttention.compute_attention(q, &k_rep, &v_rep, attention_mask, sliding_window);
+            }
+            Some(if m.is_contiguous() { m.clone() } else { m.contiguous()? })
+        } else {
+            None
+        };
+
+        let (bq, bk, wm, wn) = if d == 256 {
+            (32, 16, 4, 1)
+        } else {
+            (16, 16, 2, 1)
+        };
         let align_q = (s % bq) == 0;
         let align_k = (s % bk) == 0;
+        let has_mask = mask_contig.is_some();
 
-        let pipeline = get_or_compile_pipeline(mdev.metal_device(), align_q, align_k)?;
+        let pipeline = get_or_compile_pipeline(mdev.metal_device(), d, align_q, align_k, has_mask)?;
 
         let out_tensor = Tensor::zeros((b, h, s, d), DType::BF16, q.device())?;
 
@@ -191,6 +224,23 @@ impl AttentionBackend for MetalFlashAttention {
             enc_ref.set_input_buffer(2, Some(v_buf), v_offset);
             enc_ref.set_output_buffer(3, Some(out_buf), out_offset);
             enc_ref.set_bytes(4, &params);
+
+            if let Some(ref m_tensor) = mask_contig {
+                let (m_storage, m_layout) = m_tensor.storage_and_layout();
+                let m_buf = match &*m_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
+                let m_dims = m_layout.dims();
+                let m_str = m_layout.stride();
+                // Zero-stride broadcast across batch/head/query-row dimensions when dim == 1
+                let stride_b = if m_dims[0] == 1 { 0 } else { m_str[0] as i64 };
+                let stride_h = if m_dims[1] == 1 { 0 } else { m_str[1] as i64 };
+                let stride_q = if m_dims[2] == 1 { 0 } else { m_str[2] as i64 };
+                let mask_params = AttnMaskParams {
+                    m_strides: [stride_b, stride_h, stride_q],
+                };
+                let m_offset = m_layout.start_offset() * m_tensor.dtype().size_in_bytes();
+                enc_ref.set_bytes(5, &mask_params);
+                enc_ref.set_input_buffer(6, Some(m_buf), m_offset);
+            }
 
             let grid_dims = MTLSize { width: nq, height: h, depth: b };
             let group_dims = MTLSize { width: 32, height: wm, depth: wn };

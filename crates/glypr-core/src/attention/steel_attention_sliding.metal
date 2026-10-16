@@ -1943,9 +1943,9 @@ template <
   }
 
   // Prepare threadgroup memory
-  constexpr short padQ = 16 / sizeof(T);
-  constexpr short padK = 16 / sizeof(T);
-  constexpr short padV = 16 / sizeof(T);
+  constexpr short padQ = (BD == 512) ? 0 : (16 / sizeof(T));
+  constexpr short padK = (BD == 512) ? 0 : (16 / sizeof(T));
+  constexpr short padV = (BD == 512) ? 0 : (16 / sizeof(T));
 
   constexpr short LDQ_tgp = BD + padQ;
   constexpr short LDK_tgp = BK + padK;
@@ -2363,12 +2363,13 @@ instantiate_attn_mask_helper(float16, half);
 instantiate_attn_mask_helper(bfloat16, bfloat16_t);
 instantiate_attn_mask_helper(float32, float);
 
-// BD=512: reduced tiles (BQ=8, BK=8) to fit 32KB threadgroup memory.
+// BD=512: reduced tiles to fit 32KB threadgroup memory (with pad=0 for BD=512, BQ=16, BK=16 uses exactly 32,768 bytes).
 // Only f16/bf16 — float32 exceeds the limit.
 instantiate_attn(float16,  half,        8, 8, 512, 1, 1, float16,  half)
 instantiate_attn(float16,  half,        8, 8, 512, 1, 1, bool_,    bool)
 instantiate_attn(bfloat16, bfloat16_t,  8, 8, 512, 1, 1, bfloat16, bfloat16_t)
 instantiate_attn(bfloat16, bfloat16_t,  8, 8, 512, 1, 1, bool_,    bool)
+instantiate_attn(bfloat16, bfloat16_t, 16, 16, 512, 2, 1, bfloat16, bfloat16_t)
 
 // SDPA vector instantiations
 #define instantiate_sdpa_vector(type, head_dim)                              \

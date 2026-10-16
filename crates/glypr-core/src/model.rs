@@ -487,6 +487,20 @@ impl EmbeddingGemma2Model {
             return Ok(None);
         }
 
+        // Fast O(B * S) GPU path when sliding window is handled natively by the kernel
+        // (e.g. MetalFlash or ChunkedSliding) or on global full-attention layers:
+        // converts [B, S] {1=valid, 0=pad} into a broadcastable [B, 1, 1, S] additive mask {0.0, -1e9}.
+        if !needs_sliding {
+            if let Some(mask) = attention_mask {
+                let mask_f32 = mask.to_dtype(DType::F32)?;
+                let inv = (1.0 - mask_f32)?;
+                let additive = (inv * (-1e9f64))?
+                    .reshape((batch, 1, 1, seq_len))?
+                    .to_dtype(self.dtype)?;
+                return Ok(Some(additive));
+            }
+        }
+
         let mut mask_vec = vec![0.0f32; batch * seq_len * seq_len];
 
         let pad_data: Option<Vec<u32>> = if let Some(mask) = attention_mask {

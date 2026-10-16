@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{Device, Module, Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -91,7 +91,14 @@ impl EmbeddingGemma2Model {
 
         // 4. Attention masks
         let t0 = Instant::now();
-        let sliding_mask = self.build_attention_mask(batch, seq_len, Some(self.config.sliding_window), attention_mask)?;
+        let is_chunked_or_flash = !self.layers.is_empty() && match self.layers[0].self_attn.attention_mode {
+            crate::attention::AttentionMode::ChunkedSliding => true,
+            #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
+            crate::attention::AttentionMode::MetalFlash => true,
+            _ => false,
+        };
+        let sliding_window_for_mask = if is_chunked_or_flash { None } else { Some(self.config.sliding_window) };
+        let sliding_mask = self.build_attention_mask(batch, seq_len, sliding_window_for_mask, attention_mask)?;
         let full_mask = self.build_attention_mask(batch, seq_len, None, attention_mask)?;
         if let Some(ref m) = sliding_mask {
             sync(m)?;
@@ -149,32 +156,42 @@ impl EmbeddingGemma2Model {
             let v = layer.self_attn.v_norm.forward(&v)?;
             let q = apply_rotary_pos_emb(&q, cos, sin)?;
             let k = apply_rotary_pos_emb(&k, cos, sin)?;
-            let num_groups = layer.self_attn.num_attention_heads / layer.self_attn.num_key_value_heads;
-            let k = repeat_kv(&k, num_groups)?;
-            let v = repeat_kv(&v, num_groups)?;
-            sync(&v)?;
+            sync(&k)?;
             let qk_norm_rope_ms = elapsed_ms(t0);
 
-            // Attention Core (QK matmul, mask add, softmax, V matmul)
+            // Attention Core (dispatched via configured AttentionBackend)
             let t0 = Instant::now();
-            let k_t = k.transpose(2, 3)?.contiguous()?;
-            let mut attn_weights = q.matmul(&k_t)?;
-            if let Some(m) = mask {
-                attn_weights = attn_weights.broadcast_add(m)?;
-            }
-            let orig_dtype = attn_weights.dtype();
-            let attn_weights_f32 = if orig_dtype != DType::F32 {
-                attn_weights.to_dtype(DType::F32)?
-            } else {
-                attn_weights
+            let context = match layer.self_attn.attention_mode {
+                #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
+                crate::attention::AttentionMode::MetalFlash => {
+                    use crate::attention::AttentionBackend;
+                    crate::attention::MetalFlashAttention.compute_attention(&q, &k, &v, mask, layer.self_attn.sliding_window)?
+                }
+                _ => {
+                    use crate::attention::AttentionBackend;
+                    let num_groups = layer.self_attn.num_attention_heads / layer.self_attn.num_key_value_heads;
+                    let k_rep = repeat_kv(&k, num_groups)?;
+                    let v_rep = repeat_kv(&v, num_groups)?;
+                    match layer.self_attn.attention_mode {
+                        crate::attention::AttentionMode::Standard => {
+                            crate::attention::StandardAttention.compute_attention(&q, &k_rep, &v_rep, mask, layer.self_attn.sliding_window)?
+                        }
+                        crate::attention::AttentionMode::ChunkedSliding => {
+                            crate::attention::ChunkedSlidingAttention.compute_attention(&q, &k_rep, &v_rep, mask, layer.self_attn.sliding_window)?
+                        }
+                        #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
+                        crate::attention::AttentionMode::MetalSdpa => {
+                            crate::attention::MetalSdpaAttention.compute_attention(&q, &k_rep, &v_rep, mask, layer.self_attn.sliding_window)?
+                        }
+                        #[cfg(feature = "cuda-flash-attn")]
+                        crate::attention::AttentionMode::CudaFlash => {
+                            crate::attention::ChunkedSlidingAttention.compute_attention(&q, &k_rep, &v_rep, mask, layer.self_attn.sliding_window)?
+                        }
+                        #[allow(unreachable_patterns)]
+                        _ => unreachable!(),
+                    }
+                }
             };
-            let attn_probs_f32 = candle_nn::ops::softmax(&attn_weights_f32, D::Minus1)?;
-            let attn_probs = if orig_dtype != DType::F32 {
-                attn_probs_f32.to_dtype(orig_dtype)?
-            } else {
-                attn_probs_f32
-            };
-            let context = attn_probs.matmul(&v)?;
             let context = context
                 .transpose(1, 2)?
                 .contiguous()?
