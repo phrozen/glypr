@@ -117,20 +117,22 @@ Peak Metal VRAM (MB)
 ### Architectural Trade-off Summary:
 
 1. **`AttentionMode::ChunkedSliding` (The Memory Champion):**
-   - **Peak VRAM:** **$3,094.6\text{ MB}$** at 8,192 tokens (**$53.1\%$ lower memory than PyTorch MPS**).
+   - **Peak VRAM:** **$2,880.0\text{ MB}$** at 8,192 tokens (**$56.3\%$ lower memory than PyTorch MPS**).
    - **Mechanism:** Queries are evaluated in strict chunks of 512 tokens. Intermediate matrix materializations never exceed a $3W$ window.
    - **Recommended For:** Background embedding daemons, memory-constrained machines (8 GB / 16 GB unified RAM), and concurrent multi-model serving.
 
-2. **`AttentionMode::MetalFlash` (The Speed Champion):**
-   - **Execution Latency:** **$868.00\text{ ms}$** at 8,192 tokens (**beats PyTorch MPS by 7.5 ms**).
-   - **Peak VRAM:** **$3,951.5\text{ MB}$** (**$40.1\%$ lower memory than PyTorch MPS**).
-   - **Mechanism:** GPU thread registers compute in-place tile reductions with zero-copy GQA and fused RMSNorm/GeGLU ops.
-   - **Recommended For:** Real-time search endpoints, interactive agent query answering, and high-throughput document ingestion.
+2. **`AttentionMode::MetalFlash` (The Default & Speed Champion):**
+   - **Execution Latency:** **$860.86\text{ ms}$** at 8,192 tokens (**faster than PyTorch MPS's $875.00\text{ ms}$**).
+   - **Peak VRAM:** **$2,093.5\text{ MB}$** at 8,192 tokens (**$-68.2\%$ lower than PyTorch MPS**; down from $4,079.5\text{ MB}$ prior to Phase 1's native $d_{\text{head}}=512$ kernel).
+   - **Transient VRAM:** Slashed by **$60.2\%$** from $3,298.4\text{ MB} \to \mathbf{1,312.4\text{ MB}}$.
+   - **Mechanism:** GPU thread registers compute in-place tile reductions with zero-copy GQA across both $d_{\text{head}}=256$ and $d_{\text{head}}=512$, with zero mask allocation for unpadded sequences and $O(B \cdot S)$ stride-broadcasted masks for padded batches.
+   - **Recommended For:** Default engine across text, multimodal, and server serving.
 
 3. **`GGUF Q8_0` + `MetalFlash` (The Production Edge Sweet Spot):**
    - Cuts base model disk storage down to **$295.5\text{ MB}$** ($-44.5\%$).
-   - Drops model VRAM down to **$540.9\text{ MB}$**.
-   - Peak VRAM at 8K is **$3,727.4\text{ MB}$** while latency remains at **$894.78\text{ ms}$**.
+   - Drops base model VRAM down to **$540.9\text{ MB}$**.
+   - Peak VRAM at 8K context is **$1,997.4\text{ MB}$** (down from $3,855.4\text{ MB}$ prior to Phase 1) with transient VRAM reduced to **$1,456.4\text{ MB}$** ($-56.1\%$).
+
 
 ---
 

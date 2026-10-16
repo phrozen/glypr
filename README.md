@@ -11,10 +11,10 @@ It deploys from a **single self-contained `.gguf` file**—extracting all model 
 ## Key Highlights
 
 - **100% Self-Contained Single-File Deployment:** Point `glypr` to a single `.gguf` file (`embeddinggemma-2-BF16.gguf` or `embeddinggemma-2-Q8_0.gguf`). Model architecture and the complete 262,144-token BPE tokenizer are reconstructed in-memory in milliseconds.
-- **Beating PyTorch MPS at 8K Tokens:** Fused Metal Flash Attention drops 8,192-token latency to **868.00 ms** (outperforming PyTorch MPS's **875.00 ms**) with peak throughput reaching **14,673 tok/s** at 1K context.
-- **Ultra-Efficient Metal VRAM Footprint:** Through zero-copy GQA, sliced PLE RMSNorm, and query-chunked attention, peak Metal VRAM at 8,192 tokens dropped from **14.59 GB $\to$ 3.09 GB (Chunked) / 3.95 GB (Flash)**, saving up to **$3.5\text{ GB}$ vs PyTorch MPS (6.59 GB)**.
+- **Beating PyTorch MPS at 8K Tokens:** Fused Metal Flash Attention drops 8,192-token latency to **860.86 ms** (outperforming PyTorch MPS's **875.00 ms**) with peak throughput reaching **14,827 tok/s** at 1K context.
+- **Ultra-Efficient Metal VRAM Footprint:** Through zero-copy GQA, native $d_{\text{head}}=512$ full-context kernels, and zero-allocation stride-broadcasted padding masks, peak Metal VRAM at 8,192 tokens dropped from **14.59 GB $\to$ 2.09 GB (BF16) / 1.99 GB (Q8_0)**, slashing transient VRAM by **60.2%** and saving over **$4.5\text{ GB}$ vs PyTorch MPS (6.59 GB)**.
 - **Universal Cross-Platform CPU SIMD:** Powered by `pulp` and Rayon with runtime dynamic architecture dispatch (ARM64 NEON & x86_64 AVX2/AVX-512), delivering a **10.49x isolated kernel speedup** on GeGLU and eliminating ~30 GB of intermediate heap allocations.
-- **Full Parity Suite in 5.09 Seconds:** Evaluates the complete 292-vector golden test suite across context lengths from 64 to 8,192 tokens in just **5.09 s** (Flash BF16) and **5.29 s** (Flash Q8_0), beating PyTorch MPS (**5.73 s**) with **0.999949** average cosine similarity.
+- **Harden Four-9s Parity Suite:** Evaluates the complete 292-vector golden test suite across context lengths from 64 to 8,192 tokens with strict **0.9998** (min) / **0.9999** (avg) cosine similarity thresholds across both `ChunkedSliding` and `MetalFlash`, plus complete multimodal coverage across BF16 and Q8_0 mmproj projectors.
 - **Dynamic Multimodal Projector (`mmproj`):** Text embeddings remain lightweight and self-contained; vision and audio projector towers (`mmproj-embeddinggemma-2-*.gguf`) can be dynamically attached at runtime on demand.
 - **Matryoshka Representation Learning (MRL):** Native support for dynamic vector truncation ($768\text{d} \to 512\text{d}, 256\text{d}, 128\text{d}$) with automatic L2 re-normalization.
 

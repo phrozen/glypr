@@ -101,15 +101,18 @@ To satisfy diverse deployment environments (from edge CPU to Apple Silicon Metal
    - **Sliding Layers:** Leverages zero-copy broadcasted additive mask $[B, 1, N, N] \to [B, H, N, N]$ across attention heads.
    - **Fallback:** Seamlessly delegates to `ChunkedSlidingAttention` when invoked on CPU.
 
-4. **Dedicated Sliding-Window Metal FlashAttention (`AttentionMode::MetalFlash`):**
+4. **Dedicated Sliding-Window & Full-Context Metal FlashAttention (`AttentionMode::MetalFlash`):**
    - Custom Metal Shading Language (`steel_attention_sliding.metal` & `fused_ops.metal`) kernels compiling directly to Apple Silicon GPU machine code.
-   - **Zero-Copy GQA:** Bypasses KV head replication in memory by passing $gqa\_factor = 2$ directly into thread registers, cutting sliding attention layer time from $13.45\text{ ms} \to 6.76\text{ ms}$.
-   - **Fused In-Register MSL Shaders:** Evaluates RMSNorm via hardware warp reduction (`simd_sum()`) and GeGLU via streaming register activation with bounded clamping ($[-10.0, 10.0]$) to eliminate float exponent overflows (`NaN` elimination).
-   - **Hardware Tile-Skipping:** Blocks of queries ($B_Q = 32$) compute their active key range directly:
-     $$k_{b,\text{start}} = \max\left(0, \frac{q_{\min} - W}{B_K}\right), \quad k_{b,\text{lim}} = \min\left(N_K, \frac{q_{\max} + W + B_K - 1}{B_K}\right)$$
-     Out-of-window tile blocks are entirely skipped in hardware execution, eliminating $>90\%$ of attention FLOPS at 8K context.
-   - **Zero Mask Tensor Allocation (0 MB Overhead):** The $134.2\text{ MB}$ ($8192 \times 8192$) additive attention mask tensor is completely eliminated; distance gating is calculated mathematically in-register (`abs(row_pos - col_pos) > window_size`).
-   - **Class-Leading Performance:** Full 8,192-token inference latency drops to **$868.00\text{ ms}$** (**faster than PyTorch MPS's $875.00\text{ ms}$**) with peak throughput reaching **$14,673\text{ tok/s}$** at 1K context while maintaining exact **$0.999949$ golden parity**.
+   - **Default Execution on Metal:** As of Phase 1, `AttentionMode::default()` automatically selects `AttentionMode::MetalFlash` when running on Apple Silicon GPU with the `metal` / `metal-flash-attn` feature, while seamlessly falling back to `ChunkedSlidingAttention` on CPU or non-BF16 activations.
+   - **Unified Coverage Across All 24 Layers (`BD=256` & `BD=512`):**
+     - Sliding Window Layers (20 layers, $d_{\text{head}} = 256$): Dispatches `steel_attention_bfloat16_bq32_bk16_bd256_wm4_wn1_maskbfloat16` with $B_Q = 32, B_K = 16, W_M = 4, W_N = 1$.
+     - Global Full-Attention Layers (Layers 5, 11, 17, 23, $d_{\text{head}} = 512$): Dispatches `steel_attention_bfloat16_bq16_bk16_bd512_wm2_wn1_maskbfloat16` ($B_Q = 16, B_K = 16, W_M = 2, W_N = 1$), eliminating `repeat_kv` memory duplication and $O(S^2)$ dense attention fallback on global layers.
+   - **Zero-Copy GQA:** Bypasses KV head replication in memory by passing $gqa\_factor$ directly into thread registers ($G = 2$ on sliding layers, $G = 4$ on global layers).
+   - **Native Hardware Tile-Skipping & $O(B \cdot S)$ Stride-Broadcasted Masks:**
+     - For unpadded sequences: $0.0\text{ MB}$ mask tensor overhead up to 8,192 tokens.
+     - For heterogeneous batches: Replaces $O(B \cdot S^2)$ CPU mask generation with GPU-constructed $O(B \cdot S)$ additive masks (`has_mask = true`) using 0-stride broadcasting (`M_strides = [S, 0, 0]`), preserving $1.000000$ batch equivalence across multimodal batches.
+   - **Transient VRAM Elimination:** Drops 8,192-token transient VRAM from $3,298.4\text{ MB} \to 1,312.4\text{ MB}$ (**$-60.2\%$**) and peak Metal VRAM to **$2,093.5\text{ MB}$** (BF16) / **$1,997.4\text{ MB}$** (Q8_0).
+
 
 ---
 

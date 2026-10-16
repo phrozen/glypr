@@ -35,28 +35,31 @@ Glypr is designed around a unified, pluggable acceleration abstraction that deco
 
 The Metal GPU engine executes natively on Apple Silicon GPUs through custom **Metal Shading Language (MSL)** compute pipelines, eliminating CPU-GPU synchronization barriers and intermediate unified memory allocations.
 
-### A. Zero-Copy Grouped Query Attention (GQA)
+### A. Zero-Copy Grouped Query Attention (GQA) & Full-Context Support (`BD=512`)
 
 In Gemma-2-2B, the transformer backbone uses an asymmetric head topology:
 - **Query Heads ($H_Q$):** 4 heads ($d_{\text{head}} = 256$ in sliding layers, $512$ in global layers)
 - **Key/Value Heads ($H_{KV}$):** 2 heads in sliding layers ($G = H_Q / H_{KV} = 2$) and 1 head in global layers ($G = 4$)
 
-#### The Naive Approach (KV Head Duplication):
+#### The Naive Approach (KV Head Duplication & Fallback):
 Standard PyTorch and unoptimized frameworks call `repeat_kv` prior to attention, copying and materializing duplicated KV tensors in memory:
 $$\text{Memory Overhead} = B \times H_Q \times N \times d_{\text{head}} \times 2 \text{ bytes (BF16)}$$
-For an 8,192-token sequence, duplicating KV heads allocates **67.1 MB** per layer, thrashing unified memory cache lines.
+For an 8,192-token sequence, duplicating KV heads allocates **67.1 MB** per layer, thrashing unified memory cache lines. Previously, global layers ($d_{\text{head}} = 512$) also fell back to standard dense attention, creating gigabytes of transient $N \times N$ matrices.
 
-#### The Glypr Zero-Copy Solution:
-Instead of duplicating memory, `MetalFlash` passes the GQA factor $G = 2$ directly into the GPU shader grid. The hardware kernel indexes the key and value heads on-the-fly inside thread registers:
+#### The Glypr Zero-Copy Solution Across All 24 Layers:
+Instead of duplicating memory or falling back on global layers, `MetalFlash` passes the GQA factor $G$ ($2$ or $4$) directly into thread registers and dispatches dedicated MSL kernels for both head dimensions:
+1. **Sliding Layers ($d_{\text{head}} = 256$):** `steel_attention_bfloat16_bq32_bk16_bd256_wm4_wn1_maskbfloat16` with $B_Q = 32, B_K = 16, W_M = 4, W_N = 1$.
+2. **Global Layers ($d_{\text{head}} = 512$):** `steel_attention_bfloat16_bq16_bk16_bd512_wm2_wn1_maskbfloat16` ($B_Q = 16, B_K = 16, W_M = 2, W_N = 1$, using 0 threadgroup padding to fit within 32 KB threadgroup memory).
 
 ```metal
 // In-register head index mapping (Zero-Copy GQA)
-uint kv_head_idx = query_head_idx / gqa_factor;
-const device bfloat *k_head = k_base + (batch_idx * num_kv_heads + kv_head_idx) * (seq_len * head_dim);
-const device bfloat *v_head = v_base + (batch_idx * num_kv_heads + kv_head_idx) * (seq_len * head_dim);
+uint kv_head_idx = int(tid.y) / params->gqa_factor;
+K += tidl.z * params->K_strides[0] + kv_head_idx * params->K_strides[1];
+V += tidl.z * params->V_strides[0] + kv_head_idx * params->V_strides[1];
 ```
 
-**Empirical Impact:** Single-layer sliding attention latency at 8,192 tokens dropped from **$13.45\text{ ms} \to 6.76\text{ ms}$** (**$50\%$ layer reduction**).
+**Empirical Impact:** Eliminating `repeat_kv` and dense chunk fallback on global layers dropped peak Metal VRAM at 8,192 tokens from **$4,079.5\text{ MB} \to 2,093.5\text{ MB}$** (**$-60.2\%$ transient VRAM reduction**).
+
 
 ---
 
@@ -87,7 +90,7 @@ Standard RMSNorm implementations allocate intermediate tensors for:
 4. $\text{rsqrt}(\dots)$
 5. $x \cdot \text{rsqrt} \cdot \gamma$
 
-In Glypr's custom shader, a single threadgroup of 32 threads cooperatively reduces the hidden dimension ($D = 2304$ or $512$) using hardware warp intrinsics (`simd_sum`):
+In Glypr's custom shader, a single threadgroup of 32 threads cooperatively reduces the hidden dimension ($D = 2304$ or $512$) using hardware warp intrinsics (`simd_sum`), while respecting tensor slice byte offsets (`layout.start_offset() * sizeof(T)`) and being wrapped in thread-local Objective-C autorelease pool scopes:
 
 ```metal
 float thread_sum_sq = 0.0f;
@@ -105,6 +108,7 @@ for (uint i = lane_id; i < dim; i += 32) {
     output_row[i] = bfloat(val * inv_rms * w);
 }
 ```
+
 
 #### 2. Fused GeGLU with Numerical Clamping (`geglu_bf16`)
 EmbeddingGemma 2 utilizes the gated activation:
