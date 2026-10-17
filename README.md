@@ -11,8 +11,8 @@ It deploys from a **single self-contained `.gguf` file**—extracting all model 
 ## Key Highlights
 
 - **100% Self-Contained Single-File Deployment:** Point `glypr` to a single `.gguf` file (`embeddinggemma-2-BF16.gguf` or `embeddinggemma-2-Q8_0.gguf`). Model architecture and the complete 262,144-token BPE tokenizer are reconstructed in-memory in milliseconds.
-- **Beating PyTorch MPS at 8K Tokens:** Fused Metal Flash Attention drops 8,192-token latency to **860.86 ms** (outperforming PyTorch MPS's **875.00 ms**) with peak throughput reaching **14,827 tok/s** at 1K context.
-- **Ultra-Efficient Metal VRAM Footprint:** Through zero-copy GQA, native $d_{\text{head}}=512$ full-context kernels, and zero-allocation stride-broadcasted padding masks, peak Metal VRAM at 8,192 tokens dropped from **14.59 GB $\to$ 2.09 GB (BF16) / 1.99 GB (Q8_0)**, slashing transient VRAM by **60.2%** and saving over **$4.5\text{ GB}$ vs PyTorch MPS (6.59 GB)**.
+- **Beating PyTorch MPS at 8K Tokens:** Fused Metal Flash Attention drops 8,192-token latency to **774.83 ms** (outperforming PyTorch MPS's **875.00 ms** by over 100 ms) with peak throughput reaching **19,366 tok/s** at 1K context.
+- **Ultra-Efficient Metal VRAM Footprint:** Through zero-copy GQA, native $d_{\text{head}}=512$ full-context kernels, fused backbone MSL operations, and zero-overhead weight concatenation views, peak Metal VRAM at 8,192 tokens dropped from **14.59 GB $\to$ 1.47 GB (BF16) / 1.58 GB (Q8_0)**, slashing transient VRAM by **86.6%** down to **688 MB** and saving **over $5.1\text{ GB}$ vs PyTorch MPS (6.59 GB)**.
 - **Universal Cross-Platform CPU SIMD:** Powered by `pulp` and Rayon with runtime dynamic architecture dispatch (ARM64 NEON & x86_64 AVX2/AVX-512), delivering a **10.49x isolated kernel speedup** on GeGLU and eliminating ~30 GB of intermediate heap allocations.
 - **Harden Four-9s Parity Suite:** Evaluates the complete 292-vector golden test suite across context lengths from 64 to 8,192 tokens with strict **0.9998** (min) / **0.9999** (avg) cosine similarity thresholds across both `ChunkedSliding` and `MetalFlash`, plus complete multimodal coverage across BF16 and Q8_0 mmproj projectors.
 - **Dynamic Multimodal Projector (`mmproj`):** Text embeddings remain lightweight and self-contained; vision and audio projector towers (`mmproj-embeddinggemma-2-*.gguf`) can be dynamically attached at runtime on demand.
@@ -235,21 +235,21 @@ Tested on Apple Silicon Metal GPU across sequence lengths up to 8,192 tokens:
 
 | Context Length | Framework / Variant | Attention Engine | Base Model RAM | Peak Metal VRAM | Transient VRAM | Max Process RSS | Latency | Peak Throughput |
 | :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1,024t** | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $1,045.7\text{ MB}$ | $264.6\text{ MB}$ | $2,037.3\text{ MB}$ | $107.6\text{ ms}$ | $9,512\text{ tok/s}$ |
-| **1,024t** | `glypr-core` BF16 | Metal Flash (Fused) | $781.0\text{ MB}$ | **$1,015.3\text{ MB}$** | **$234.2\text{ MB}$** | $2,039.2\text{ MB}$ | **$69.8\text{ ms}$** | **$14,673\text{ tok/s}$** 🚀 |
-| **1,024t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$540.9\text{ MB}$** | **$779.2\text{ MB}$** | $238.2\text{ MB}$ | **$1,677.3\text{ MB}$** | **$72.8\text{ ms}$** | **$14,076\text{ tok/s}$** |
+| **1,024t** | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $1,045.7\text{ MB}$ | $264.6\text{ MB}$ | $2,037.3\text{ MB}$ | $95.58\text{ ms}$ | $10,714\text{ tok/s}$ |
+| **1,024t** | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$986.2\text{ MB}$** | **$201.2\text{ MB}$** | $2,038.5\text{ MB}$ | **$52.88\text{ ms}$** | **$19,366\text{ tok/s}$** 🚀 |
+| **1,024t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$754.1\text{ MB}$** | **$147.8\text{ MB}$** | **$1,678.5\text{ MB}$** | **$55.00\text{ ms}$** | **$18,616\text{ tok/s}$** |
 | | | | | | | | | |
-| **2,048t** | `glypr-core` BF16 | Metal Flash (Fused) | $781.0\text{ MB}$ | **$1,253.3\text{ MB}$** | **$472.2\text{ MB}$** | $2,037.2\text{ MB}$ | **$147.9\text{ ms}$** | **$13,847\text{ tok/s}$** |
-| **2,048t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$540.9\text{ MB}$** | **$1,017.2\text{ MB}$** | $476.2\text{ MB}$ | **$1,677.3\text{ MB}$** | **$150.1\text{ ms}$** | **$13,645\text{ tok/s}$** |
+| **2,048t** | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$1,120.4\text{ MB}$** | **$335.4\text{ MB}$** | $2,038.5\text{ MB}$ | **$114.73\text{ ms}$** | **$17,850\text{ tok/s}$** |
+| **2,048t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$935.2\text{ MB}$** | **$328.9\text{ MB}$** | **$1,678.5\text{ MB}$** | **$116.54\text{ ms}$** | **$17,574\text{ tok/s}$** |
 | | | | | | | | | |
-| **4,096t** | `glypr-core` BF16 | Metal Flash (Fused) | $781.0\text{ MB}$ | **$1,854.4\text{ MB}$** | **$1,073.3\text{ MB}$** | $2,037.2\text{ MB}$ | **$338.6\text{ ms}$** | **$12,098\text{ tok/s}$** |
-| **4,096t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$540.9\text{ MB}$** | **$1,622.3\text{ MB}$** | $1,081.3\text{ MB}$ | **$1,677.3\text{ MB}$** | **$349.3\text{ ms}$** | **$11,728\text{ tok/s}$** |
+| **4,096t** | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$1,177.4\text{ MB}$** | **$392.4\text{ MB}$** | $2,038.6\text{ MB}$ | **$277.24\text{ ms}$** | **$14,774\text{ tok/s}$** |
+| **4,096t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$1,086.7\text{ MB}$** | **$480.4\text{ MB}$** | **$1,678.6\text{ MB}$** | **$287.25\text{ ms}$** | **$14,259\text{ tok/s}$** |
 | | | | | | | | | |
-| **8,192t** | **PyTorch MPS (Golden)** | **MPSGraph SDPA** | **$1,472.5\text{ MB}$** | **$6,592.8\text{ MB}$** | $5,120.3\text{ MB}$ | **$1,211.1\text{ MB}$** | **$875.5\text{ ms}$** | **$9,360\text{ tok/s}$** |
-| **8,192t** | `glypr-core` BF16 (Unopt) | Standard Dense | $781.0\text{ MB}$ | $4,608.2\text{ MB}$ | $3,827.2\text{ MB}$ | $2,037.2\text{ MB}$ | $3,086.7\text{ ms}$ | $2,654\text{ tok/s}$ |
-| **8,192t** | `glypr-core` BF16 (Opt) | Chunked Sliding | $781.0\text{ MB}$ | **$3,094.6\text{ MB}$** | **$2,313.5\text{ MB}$** | $2,037.2\text{ MB}$ | $1,267.9\text{ ms}$ | $6,461\text{ tok/s}$ |
-| **8,192t** | **`glypr-core` BF16 (Flash)** | **Metal Flash (Fused)** | **$781.0\text{ MB}$** | **$3,951.5\text{ MB}$** | $3,170.4\text{ MB}$ | $2,037.2\text{ MB}$ | **$868.0\text{ ms}$** 🏆 | **$9,438\text{ tok/s}$** |
-| **8,192t** | **`glypr-core` Q8_0 (Flash)** | **Metal Flash (Fused)** | **$540.9\text{ MB}$** | **$3,727.4\text{ MB}$** | $3,186.4\text{ MB}$ | **$1,677.3\text{ MB}$** | **$894.8\text{ ms}$** | **$9,155\text{ tok/s}$** |
+| **8,192t** | **PyTorch MPS (Golden)** | **MPSGraph SDPA** | **$1,472.5\text{ MB}$** | **$6,592.8\text{ MB}$** | $5,120.3\text{ MB}$ | **$1,211.1\text{ MB}$** | **$875.00\text{ ms}$** | **$9,360\text{ tok/s}$** |
+| **8,192t** | `glypr-core` BF16 (Unopt) | Standard Dense | $781.0\text{ MB}$ | $4,608.2\text{ MB}$ | $3,827.2\text{ MB}$ | $2,037.2\text{ MB}$ | $2,937.26\text{ ms}$ | $2,789\text{ tok/s}$ |
+| **8,192t** | `glypr-core` BF16 (Opt) | Chunked Sliding | $785.0\text{ MB}$ | **$2,880.0\text{ MB}$** | **$2,095.0\text{ MB}$** | $2,038.5\text{ MB}$ | $1,118.50\text{ ms}$ | $7,324\text{ tok/s}$ |
+| **8,192t** | **`glypr-core` BF16 (Flash)** | **Metal Flash (Fused)** | **$785.0\text{ MB}$** | **$1,473.5\text{ MB}$** | **$688.4\text{ MB}$** | $2,038.5\text{ MB}$ | **$774.83\text{ ms}$** 🏆 | **$10,573\text{ tok/s}$** |
+| **8,192t** | **`glypr-core` Q8_0 (Flash)** | **Metal Flash (Fused)** | **$606.3\text{ MB}$** | **$1,582.7\text{ MB}$** | **$976.4\text{ MB}$** | **$1,678.5\text{ MB}$** | **$796.23\text{ ms}$** | **$10,289\text{ tok/s}$** |
 
 ---
 
@@ -259,11 +259,11 @@ Validation against the official PyTorch MPS Golden Oracle across 10 languages, c
 
 | Model & Precision | Attention Engine | Full Suite Time | Evaluation Rate | Avg Parity | Min Parity | Speedup vs Baseline |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| 🏆 **GGUF BF16** | **Metal Flash (Fused)** | **$5.09\text{ s}$** | **$57.37\text{ vec/s}$** | **0.999949** | **0.999870** | **2.77x** |
-| 🥈 **GGUF Q8_0** | **Metal Flash (Fused)** | **$5.29\text{ s}$** | **$55.20\text{ vec/s}$** | **0.999864** | **0.999602** | **2.67x** |
+| 🏆 **GGUF BF16** | **Metal Flash (Fused)** | **$4.25\text{ s}$** | **$68.71\text{ vec/s}$** | **0.999950** | **0.999844** | **3.32x** |
+| 🥈 **GGUF Q8_0** | **Metal Flash (Fused)** | **$4.34\text{ s}$** | **$67.28\text{ vec/s}$** | **0.999868** | **0.999659** | **3.25x** |
 | 🥉 **PyTorch MPS (Ref)**| **MPSGraph SDPA** | **$5.73\text{ s}$** | **$50.96\text{ vec/s}$** | 1.000000 | 1.000000 | **2.46x** |
-| **GGUF BF16** | **Chunked Sliding** | **$7.37\text{ s}$** | **$39.62\text{ vec/s}$** | **0.999943** | **0.999839** | **1.92x** |
-| **GGUF Q8_0** | **Chunked Sliding** | **$7.58\text{ s}$** | **$38.52\text{ vec/s}$** | **0.999860** | **0.999620** | **1.86x** |
+| **GGUF BF16** | **Chunked Sliding** | **$6.35\text{ s}$** | **$45.98\text{ vec/s}$** | **0.999943** | **0.999839** | **2.22x** |
+| **GGUF Q8_0** | **Chunked Sliding** | **$6.45\text{ s}$** | **$45.27\text{ vec/s}$** | **0.999860** | **0.999620** | **2.19x** |
 | **GGUF BF16** | **Standard Dense** | **$14.12\text{ s}$** | **$20.68\text{ vec/s}$** | **0.999943** | **0.999839** | **1.00x** (ref) |
 
 ---

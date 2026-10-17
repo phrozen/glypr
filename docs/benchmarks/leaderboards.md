@@ -88,16 +88,16 @@ To establish ground-truth runtime metrics, `glypr-core` was evaluated against th
 
 | Metric | PyTorch MPS (Golden) | `glypr-core` BF16 (Standard) | `glypr-core` BF16 (Chunked) | `glypr-core` BF16 (Metal Flash) | `glypr-core` Q8_0 (Metal Flash) | Delta (BF16 Flash vs PyTorch) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Execution Latency** | $875.00\text{ ms}$ | $3,086.73\text{ ms}$ | $1,267.90\text{ ms}$ | **$868.00\text{ ms}$** 🏆 | **$894.78\text{ ms}$** | **$-7.0\text{ ms}$ (Faster!)** |
-| **Peak Throughput** | $9,360\text{ tok/s}$ | $2,654\text{ tok/s}$ | $6,461\text{ tok/s}$ | **$9,438\text{ tok/s}$** 🏆 | **$9,155\text{ tok/s}$** | **$+78\text{ tok/s}$** |
-| **Peak Hardware Metal VRAM** | $6,592.8\text{ MB} (6.44\text{ GB})$ | $4,608.2\text{ MB}$ | **$3,094.6\text{ MB}$** | **$3,951.5\text{ MB}$** | **$3,727.4\text{ MB}$** | **$-40.1\%$ ($2.64\text{ GB}$ saved)** |
-| **Transient VRAM Churn** | $5,120.3\text{ MB}$ | $3,827.2\text{ MB}$ | **$2,313.5\text{ MB}$** | $3,170.4\text{ MB}$ | $3,186.4\text{ MB}$ | **$-38.1\%$** |
+| **Execution Latency** | $875.00\text{ ms}$ | $2,937.26\text{ ms}$ | $1,118.50\text{ ms}$ | **$774.83\text{ ms}$** 🏆 | **$796.23\text{ ms}$** | **$-100.2\text{ ms} / 1.13\text{x}$ (Faster!)** |
+| **Peak Throughput** | $9,360\text{ tok/s}$ | $2,789\text{ tok/s}$ | $7,324\text{ tok/s}$ | **$10,573\text{ tok/s}$** 🏆 | **$10,289\text{ tok/s}$** | **$+1,213\text{ tok/s}$** |
+| **Peak Hardware Metal VRAM** | $6,592.8\text{ MB} (6.44\text{ GB})$ | $4,608.2\text{ MB}$ | **$2,880.0\text{ MB}$** | **$1,473.5\text{ MB}$** | **$1,582.7\text{ MB}$** | **$-77.7\%$ ($5.12\text{ GB}$ saved)** |
+| **Transient VRAM Churn** | $5,120.3\text{ MB}$ | $3,827.2\text{ MB}$ | **$2,095.0\text{ MB}$** | **$688.4\text{ MB}$** | **$976.4\text{ MB}$** | **$-86.6\%$ ($4.43\text{ GB}$ saved)** |
 | **Active Mask Tensor Overhead** | $134.2\text{ MB}$ | $134.2\text{ MB}$ | $134.2\text{ MB}$ | **$0.0\text{ MB}$ (Tile-Skipping)** | **$0.0\text{ MB}$ (Tile-Skipping)** | **$-100\%$ (Eliminated)** |
 | **Model Disk Size** | $1,420.0\text{ MB}$ | $532.1\text{ MB}$ | $532.1\text{ MB}$ | $532.1\text{ MB}$ | **$295.5\text{ MB}$** | **$-79.2\%$** |
-| **Avg Cosine Parity (292 vec)** | $1.000000$ (Ref) | **$0.999943$** | **$0.999943$** | **$0.999949$** | **$0.999864$** | $-0.000051$ |
-| **Min Cosine Parity (292 vec)** | $1.000000$ (Ref) | **$0.999839$** | **$0.999839$** | **$0.999870$** | **$0.999602$** | $-0.000130$ |
-| **Multilingual Margin** | $+0.2950$ | $+0.2953$ | $+0.2953$ | **$+0.2949$** | **$+0.2952$** | $-0.0001$ |
-| **Length Scaling Margin** | $+0.1493$ | $+0.1497$ | $+0.1497$ | **$+0.1498$** | **$+0.1498$** | $+0.0005$ |
+| **Avg Cosine Parity (292 vec)** | $1.000000$ (Ref) | **$0.999943$** | **$0.999943$** | **$0.999950$** | **$0.999868$** | $-0.000050$ |
+| **Min Cosine Parity (292 vec)** | $1.000000$ (Ref) | **$0.999839$** | **$0.999839$** | **$0.999844$** | **$0.999659$** | $-0.000156$ |
+| **Multilingual Margin** | $+0.2950$ | $+0.2953$ | $+0.2953$ | **$+0.2950$** | **$+0.2957$** | $+0.0000$ |
+| **Length Scaling Margin** | $+0.1493$ | $+0.1497$ | $+0.1497$ | **$+0.1496$** | **$+0.1500$** | $+0.0003$ |
 
 ---
 
@@ -105,11 +105,11 @@ To establish ground-truth runtime metrics, `glypr-core` was evaluated against th
 
 | Model & Attention Engine | Total Parity Suite Time | Evaluation Rate | Avg Parity | Min Parity | Speedup vs Baseline |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| 🏆 **Glypr GGUF BF16 (Fused Metal Flash)** | **$5.09\text{ s}$** | **$57.37\text{ vec/s}$** | **$0.999949$** | **$0.999870$** | **$2.77\times$** |
-| 🥈 **Glypr GGUF Q8_0 (Fused Metal Flash)** | **$5.29\text{ s}$** | **$55.20\text{ vec/s}$** | **$0.999864$** | **$0.999602$** | **$2.67\times$** |
+| 🏆 **Glypr GGUF BF16 (Fused Metal Flash)** | **$4.25\text{ s}$** | **$68.71\text{ vec/s}$** | **$0.999950$** | **$0.999844$** | **$3.32\times$** |
+| 🥈 **Glypr GGUF Q8_0 (Fused Metal Flash)** | **$4.34\text{ s}$** | **$67.28\text{ vec/s}$** | **$0.999868$** | **$0.999659$** | **$3.25\times$** |
 | 🥉 **PyTorch MPS (`bfloat16` Golden Reference)** | **$5.73\text{ s}$** | **$50.96\text{ vec/s}$** | $1.000000$ | $1.000000$ | **$2.46\times$** |
-| **Glypr GGUF BF16 (Chunked Sliding)** | **$7.37\text{ s}$** | **$39.62\text{ vec/s}$** | **$0.999943$** | **$0.999839$** | **$1.92\times$** |
-| **Glypr GGUF Q8_0 (Chunked Sliding)** | **$7.58\text{ s}$** | **$38.52\text{ vec/s}$** | **$0.999860$** | **$0.999620$** | **$1.86\times$** |
+| **Glypr GGUF BF16 (Chunked Sliding)** | **$6.35\text{ s}$** | **$45.98\text{ vec/s}$** | **$0.999943$** | **$0.999839$** | **$2.22\times$** |
+| **Glypr GGUF Q8_0 (Chunked Sliding)** | **$6.45\text{ s}$** | **$45.27\text{ vec/s}$** | **$0.999860$** | **$0.999620$** | **$2.19\times$** |
 | **Glypr GGUF BF16 (Standard Dense Attention)** | **$14.12\text{ s}$** | **$20.68\text{ vec/s}$** | **$0.999943$** | **$0.999839$** | **$1.00\times$ (ref)** |
 
 ---
@@ -118,13 +118,13 @@ To establish ground-truth runtime metrics, `glypr-core` was evaluated against th
 
 | Context Length | Standard Attention | Chunked Sliding | Metal Flash (BF16) | Metal Flash (Q8_0) | Speedup vs Standard | Peak Throughput |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **64 tokens** | $14.28\text{ ms}$ | $14.29\text{ ms}$ | **$12.99\text{ ms}$** | $14.72\text{ ms}$ | **$1.10\times$** | $4,927\text{ tok/s}$ |
-| **256 tokens** | $24.81\text{ ms}$ | $24.87\text{ ms}$ | **$21.98\text{ ms}$** | $23.93\text{ ms}$ | **$1.13\times$** | $11,648\text{ tok/s}$ |
-| **512 tokens** | $47.15\text{ ms}$ | $49.87\text{ ms}$ | **$36.32\text{ ms}$** | $37.67\text{ ms}$ | **$1.30\times$** | $14,098\text{ tok/s}$ |
-| **1,024 tokens** | $107.65\text{ ms}$ | $111.63\text{ ms}$ | **$69.79\text{ ms}$** | $72.75\text{ ms}$ | **$1.54\times$** | **$14,673\text{ tok/s}$** 🚀 |
-| **2,048 tokens** | $291.72\text{ ms}$ | $235.65\text{ ms}$ | **$147.90\text{ ms}$** | $150.09\text{ ms}$ | **$1.97\times$** | $13,847\text{ tok/s}$ |
-| **4,096 tokens** | $899.87\text{ ms}$ | $531.37\text{ ms}$ | **$338.57\text{ ms}$** | $349.26\text{ ms}$ | **$2.66\times$** | $12,098\text{ tok/s}$ |
-| **8,192 tokens** | $3,086.73\text{ ms}$ | $1,267.90\text{ ms}$ | **$868.00\text{ ms}$ 🏆** | **$894.78\text{ ms}$** | **$3.56\times$** | **$9,438\text{ tok/s}$** |
+| **64 tokens** | $10.65\text{ ms}$ | $10.58\text{ ms}$ | **$8.92\text{ ms}$** | **$9.33\text{ ms}$** | **$1.19\times$** | $7,177\text{ tok/s}$ |
+| **256 tokens** | $19.79\text{ ms}$ | $19.77\text{ ms}$ | **$16.05\text{ ms}$** | **$16.61\text{ ms}$** | **$1.23\times$** | $15,954\text{ tok/s}$ |
+| **512 tokens** | $38.75\text{ ms}$ | $41.43\text{ ms}$ | **$26.67\text{ ms}$** | **$27.40\text{ ms}$** | **$1.45\times$** | $19,195\text{ tok/s}$ |
+| **1,024 tokens** | $91.38\text{ ms}$ | $95.58\text{ ms}$ | **$52.88\text{ ms}$** | **$55.00\text{ ms}$** | **$1.73\times$** | **$19,366\text{ tok/s}$** 🚀 |
+| **2,048 tokens** | $258.30\text{ ms}$ | $204.18\text{ ms}$ | **$114.73\text{ ms}$** | **$116.54\text{ ms}$** | **$2.25\times$** | $17,850\text{ tok/s}$ |
+| **4,096 tokens** | $831.51\text{ ms}$ | $462.23\text{ ms}$ | **$277.24\text{ ms}$** | **$287.25\text{ ms}$** | **$3.00\times$** | $14,774\text{ tok/s}$ |
+| **8,192 tokens** | $2,937.26\text{ ms}$ | $1,118.50\text{ ms}$ | **$774.83\text{ ms}$ 🏆** | **$796.23\text{ ms}$** | **$3.79\times$** | **$10,573\text{ tok/s}$** |
 
 ---
 

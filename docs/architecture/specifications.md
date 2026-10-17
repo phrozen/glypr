@@ -111,7 +111,7 @@ To satisfy diverse deployment environments (from edge CPU to Apple Silicon Metal
    - **Native Hardware Tile-Skipping & $O(B \cdot S)$ Stride-Broadcasted Masks:**
      - For unpadded sequences: $0.0\text{ MB}$ mask tensor overhead up to 8,192 tokens.
      - For heterogeneous batches: Replaces $O(B \cdot S^2)$ CPU mask generation with GPU-constructed $O(B \cdot S)$ additive masks (`has_mask = true`) using 0-stride broadcasting (`M_strides = [S, 0, 0]`), preserving $1.000000$ batch equivalence across multimodal batches.
-   - **Transient VRAM Elimination:** Drops 8,192-token transient VRAM from $3,298.4\text{ MB} \to 1,312.4\text{ MB}$ (**$-60.2\%$**) and peak Metal VRAM to **$2,093.5\text{ MB}$** (BF16) / **$1,997.4\text{ MB}$** (Q8_0).
+   - **Transient VRAM Elimination:** Drops 8,192-token transient VRAM from $3,298.4\text{ MB} \to 688.4\text{ MB}$ (**$-79.1\%$**) and peak Metal VRAM to **$1,473.5\text{ MB}$** (BF16) / **$1,582.7\text{ MB}$** (Q8_0).
 
 
 ---

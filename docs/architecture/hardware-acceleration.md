@@ -58,7 +58,7 @@ K += tidl.z * params->K_strides[0] + kv_head_idx * params->K_strides[1];
 V += tidl.z * params->V_strides[0] + kv_head_idx * params->V_strides[1];
 ```
 
-**Empirical Impact:** Eliminating `repeat_kv` and dense chunk fallback on global layers dropped peak Metal VRAM at 8,192 tokens from **$4,079.5\text{ MB} \to 2,093.5\text{ MB}$** (**$-60.2\%$ transient VRAM reduction**).
+**Empirical Impact:** Eliminating `repeat_kv`, fusing backbone operations, and employing zero-VRAM-overhead weight concatenation views dropped peak Metal VRAM at 8,192 tokens from **$4,079.5\text{ MB} \to 1,473.5\text{ MB}$ (BF16) / $1,582.7\text{ MB}$ (Q8_0)** (**$-79.1\%$ transient VRAM reduction**).
 
 
 ---
@@ -217,19 +217,19 @@ Empirically measured on Apple Silicon M-series unified hardware across sequence 
 
 | Context Length | Standard Dense (Metal) | Chunked Sliding (Metal) | Metal Flash (BF16) | Metal Flash (Q8_0) | CPU SIMD (BF16) | CPU SIMD (Q8_0) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **64 tokens** | $14.28\text{ ms}$ | $14.29\text{ ms}$ | **$12.99\text{ ms}$** | $14.72\text{ ms}$ | $159.1\text{ ms}$ | **$135.0\text{ ms}$** |
-| **256 tokens** | $24.81\text{ ms}$ | $24.87\text{ ms}$ | **$21.98\text{ ms}$** | $23.93\text{ ms}$ | $317.4\text{ ms}$ | **$319.7\text{ ms}$** |
-| **512 tokens** | $47.15\text{ ms}$ | $49.87\text{ ms}$ | **$36.32\text{ ms}$** | $37.67\text{ ms}$ | **$607.7\text{ ms}$** | $656.4\text{ ms}$ |
-| **1,024 tokens** | $107.65\text{ ms}$ | $111.63\text{ ms}$ | **$69.79\text{ ms}$** | $72.75\text{ ms}$ | **$1,256.7\text{ ms}$** | $1,509.2\text{ ms}$ |
-| **2,048 tokens** | $291.72\text{ ms}$ | $235.65\text{ ms}$ | **$147.90\text{ ms}$** | $150.09\text{ ms}$ | **$2,815.3\text{ ms}$** | $3,140.2\text{ ms}$ |
-| **4,096 tokens** | $899.87\text{ ms}$ | $531.37\text{ ms}$ | **$338.57\text{ ms}$** | $349.26\text{ ms}$ | **$6,222.3\text{ ms}$** | $7,086.9\text{ ms}$ |
-| **8,192 tokens** | $3,086.73\text{ ms}$ | $1,267.90\text{ ms}$ | **$868.00\text{ ms}$ 🏆** | **$894.78\text{ ms}$** | N/A | N/A |
+| **64 tokens** | $10.65\text{ ms}$ | $10.58\text{ ms}$ | **$8.92\text{ ms}$** | **$9.33\text{ ms}$** | $159.1\text{ ms}$ | **$135.0\text{ ms}$** |
+| **256 tokens** | $19.79\text{ ms}$ | $19.77\text{ ms}$ | **$16.05\text{ ms}$** | **$16.61\text{ ms}$** | $317.4\text{ ms}$ | **$319.7\text{ ms}$** |
+| **512 tokens** | $38.75\text{ ms}$ | $41.43\text{ ms}$ | **$26.67\text{ ms}$** | **$27.40\text{ ms}$** | **$607.7\text{ ms}$** | $656.4\text{ ms}$ |
+| **1,024 tokens** | $91.38\text{ ms}$ | $95.58\text{ ms}$ | **$52.88\text{ ms}$** | **$55.00\text{ ms}$** | **$1,256.7\text{ ms}$** | $1,509.2\text{ ms}$ |
+| **2,048 tokens** | $258.30\text{ ms}$ | $204.18\text{ ms}$ | **$114.73\text{ ms}$** | **$116.54\text{ ms}$** | **$2,815.3\text{ ms}$** | $3,140.2\text{ ms}$ |
+| **4,096 tokens** | $831.51\text{ ms}$ | $462.23\text{ ms}$ | **$277.24\text{ ms}$** | **$287.25\text{ ms}$** | **$6,222.3\text{ ms}$** | $7,086.9\text{ ms}$ |
+| **8,192 tokens** | $2,937.26\text{ ms}$ | $1,118.50\text{ ms}$ | **$774.83\text{ ms}$ 🏆** | **$796.23\text{ ms}$** | N/A | N/A |
 
 > [!NOTE]
 > **PyTorch MPS Comparison at 8,192 Tokens:**
 > - PyTorch MPS Golden Baseline: **$875.00\text{ ms}$**
-> - Glypr BF16 Fused Metal Flash: **$868.00\text{ ms}$** (Glypr is faster by **$7.0\text{ ms}$**)
-> - Peak Throughput: **$9,438\text{ tok/s}$** (8K context) and **$14,673\text{ tok/s}$** (1K context).
+> - Glypr BF16 Fused Metal Flash: **$774.83\text{ ms}$** (Glypr is faster by **$100.2\text{ ms} / 1.13\text{x}$**)
+> - Peak Throughput: **$10,573\text{ tok/s}$** (8K context) and **$19,366\text{ tok/s}$** (1K context).
 
 ---
 
@@ -249,12 +249,12 @@ In addition to text backbone acceleration, `glypr-core` optimizes the multimodal
 
 ### Empirical Multimodal Benchmarks:
 
-| Component / Metric | Baseline (Pre-Optimization) | Optimized (`main`) | Speedup |
-| :--- | :--- | :--- | :--- |
-| **Vision Tower Only (Budget 140)** | ~200.0 ms | **8.30 ms** | **~24x** |
-| **Vision Tower Only (Budget 280)** | ~1,100.0 ms | **12.98 ms** | **~85x** |
-| **Total Card Embedding (Budget 140)** | **269.60 ms** (3.71 cards/sec) | **118.23 ms** (8.46 cards/sec) | **2.28x** |
-| **Total Card Embedding (Budget 280)** | **1,260.99 ms** (0.79 cards/sec) | **255.34 ms** (3.92 cards/sec) | **4.94x** |
+| Component / Metric | Baseline (Pre-Optimization) | Phase 2 | Phase 3 Optimized (`main`) | Speedup vs Baseline |
+| :--- | :--- | :--- | :--- | :--- |
+| **Vision Tower Only (Budget 140)** | ~200.0 ms | 7.77 ms | **6.19 ms** | **~32x** |
+| **Vision Tower Only (Budget 280)** | ~1,100.0 ms | 11.01 ms | **9.42 ms** | **~116x** |
+| **Total Card Embedding (Budget 140)** | **269.60 ms** (3.71 cards/sec) | 67.50 ms | **50.87 ms (56.78 ms avg, 17.61 cards/s)** | **5.30x** |
+| **Total Card Embedding (Budget 280)** | **1,260.99 ms** (0.79 cards/sec) | 140.20 ms | **106.07 ms (120.51 ms avg, 8.30 cards/s)** | **11.89x** |
 
 ---
 
@@ -279,11 +279,11 @@ Building upon the multimodal projector architecture, `glypr-core` accelerates th
 
 ### Empirical Audio Benchmarks (Apple Silicon Metal GPU, BF16):
 
-| Audio Clip Duration | Metric | Baseline | Optimized | Speedup / Throughput |
-| :--- | :--- | :---: | :---: | :---: |
-| **Short (1.0s Synthetic)**<br>*(16,000 samples $\to 25$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 2.30 ms<br>2,896.61 ms<br>**2,946.68 ms** | **0.52 ms**<br>**6.37 ms**<br>**35.91 ms** | **4.4x**<br>**454x 🚀**<br>**27.8x real-time** |
-| **Medium (5.0s Music)**<br>*(80,000 samples $\to 125$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 11.16 ms<br>3,170.47 ms<br>**3,219.75 ms** | **1.52 ms**<br>**8.01 ms**<br>**50.99 ms** | **7.3x**<br>**395x 🚀**<br>**98.1x real-time** |
-| **Long (12.3s Speech)**<br>*(196,348 samples $\to 307$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 27.12 ms<br>3,184.88 ms<br>**3,222.78 ms** | **3.37 ms**<br>**11.74 ms**<br>**97.88 ms** | **8.8x**<br>**271x 🚀**<br>**125.4x real-time 🏆** |
+| Audio Clip Duration | Metric | Baseline | Phase 2 | Phase 3 Optimized (`main`) | Speedup / Throughput |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Short (1.0s Synthetic)**<br>*(16,000 samples $\to 25$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 2.30 ms<br>2,896.61 ms<br>**2,946.68 ms** | 0.62 ms<br>5.47 ms<br>23.90 ms | **0.19 ms**<br>**5.16 ms**<br>**21.54 ms (23.07 ms avg)** | **12.1x**<br>**561x 🚀**<br>**43.4x real-time** |
+| **Medium (5.0s Music)**<br>*(80,000 samples $\to 125$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 11.16 ms<br>3,170.47 ms<br>**3,219.75 ms** | 1.20 ms<br>8.33 ms<br>33.50 ms | **0.29 ms**<br>**6.65 ms**<br>**29.85 ms (32.05 ms avg)** | **38.5x**<br>**476x 🚀**<br>**156.0x real-time** |
+| **Long (12.3s Speech)**<br>*(196,348 samples $\to 307$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 27.12 ms<br>3,184.88 ms<br>**3,222.78 ms** | 2.65 ms<br>10.70 ms<br>60.00 ms | **0.72 ms**<br>**9.10 ms**<br>**52.99 ms (57.62 ms avg)** | **37.7x**<br>**350x 🚀**<br>**213.0x real-time 🏆** |
 
 > [!TIP]
 > **Real-Time Factor (RTF):**
