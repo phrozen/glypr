@@ -73,26 +73,26 @@ The following metrics were captured on Apple Silicon hardware using an isolated 
 
 | Context Length | Framework / Precision | Attention Backend | Model VRAM | Peak Metal VRAM | Transient VRAM | Max Process RSS | Latency |
 | :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **1,024 tokens** | `glypr-core` BF16 | Standard Dense | 781.0 MB | 1,045.7 MB | 264.6 MB | 2,037.3 MB | 95.58 ms |
-| **1,024 tokens** | `glypr-core` BF16 | Chunked Sliding | 785.0 MB | 1,180.3 MB | 395.3 MB | 2,038.5 MB | 95.58 ms |
-| **1,024 tokens** | `glypr-core` BF16 | Metal Flash (Fused) | 785.0 MB | **986.2 MB** | **201.2 MB** | 2,038.5 MB | **52.88 ms** |
-| **1,024 tokens** | `glypr-core` Q8_0 | Metal Flash (Fused) | **606.3 MB** | **754.1 MB** | **147.8 MB** | **1,678.5 MB** | **55.00 ms** |
+| **1,024 tokens** | `glypr-core` BF16 | Standard Dense | 781.0 MB | 1,045.7 MB | 264.6 MB | 2,037.3 MB | 90.59 ms |
+| **1,024 tokens** | `glypr-core` BF16 | Chunked Sliding | 785.0 MB | 1,180.3 MB | 395.3 MB | 2,038.5 MB | 94.74 ms |
+| **1,024 tokens** | `glypr-core` BF16 | Metal Flash (Fused) | 785.0 MB | **986.2 MB** | **201.2 MB** | 2,038.5 MB | **52.28 ms** |
+| **1,024 tokens** | `glypr-core` Q8_0 | Metal Flash (Fused) | **606.3 MB** | **754.1 MB** | **147.8 MB** | **1,678.5 MB** | **43.93 ms** |
 | | | | | | | | |
-| **2,048 tokens** | `glypr-core` BF16 | Standard Dense | 781.0 MB | 1,370.0 MB | 589.0 MB | 2,037.2 MB | 258.30 ms |
-| **2,048 tokens** | `glypr-core` BF16 | Chunked Sliding | 785.0 MB | 1,430.3 MB | 645.3 MB | 2,038.5 MB | 204.18 ms |
-| **2,048 tokens** | `glypr-core` BF16 | Metal Flash (Fused) | 785.0 MB | **1,120.4 MB** | **335.4 MB** | 2,038.5 MB | **114.73 ms** |
-| **2,048 tokens** | `glypr-core` Q8_0 | Metal Flash (Fused) | **606.3 MB** | **935.2 MB** | **328.9 MB** | **1,678.5 MB** | **116.54 ms** |
+| **2,048 tokens** | `glypr-core` BF16 | Standard Dense | 781.0 MB | 1,370.0 MB | 589.0 MB | 2,037.2 MB | 257.64 ms |
+| **2,048 tokens** | `glypr-core` BF16 | Chunked Sliding | 785.0 MB | 1,430.3 MB | 645.3 MB | 2,038.5 MB | 203.50 ms |
+| **2,048 tokens** | `glypr-core` BF16 | Metal Flash (Fused) | 785.0 MB | **1,120.4 MB** | **335.4 MB** | 2,038.5 MB | **107.19 ms** |
+| **2,048 tokens** | `glypr-core` Q8_0 | Metal Flash (Fused) | **606.3 MB** | **935.2 MB** | **328.9 MB** | **1,678.5 MB** | **87.68 ms** |
 | | | | | | | | |
-| **4,096 tokens** | `glypr-core` BF16 | Standard Dense | 781.0 MB | 2,118.8 MB | 1,337.7 MB | 2,037.3 MB | 831.51 ms |
-| **4,096 tokens** | `glypr-core` BF16 | Chunked Sliding | 785.0 MB | 2,006.5 MB | 1,221.5 MB | 2,038.6 MB | 462.23 ms |
-| **4,096 tokens** | `glypr-core` BF16 | Metal Flash (Fused) | 785.0 MB | **1,177.4 MB** | **392.4 MB** | 2,038.6 MB | **277.24 ms** |
-| **4,096 tokens** | `glypr-core` Q8_0 | Metal Flash (Fused) | **606.3 MB** | **1,086.7 MB** | **480.4 MB** | **1,678.6 MB** | **287.25 ms** |
+| **4,096 tokens** | `glypr-core` BF16 | Standard Dense | 781.0 MB | 2,118.8 MB | 1,337.7 MB | 2,037.3 MB | 830.42 ms |
+| **4,096 tokens** | `glypr-core` BF16 | Chunked Sliding | 785.0 MB | 2,006.5 MB | 1,221.5 MB | 2,038.6 MB | 461.29 ms |
+| **4,096 tokens** | `glypr-core` BF16 | Metal Flash (Fused) | 785.0 MB | **1,177.4 MB** | **392.4 MB** | 2,038.6 MB | **255.29 ms** |
+| **4,096 tokens** | `glypr-core` Q8_0 | Metal Flash (Fused) | **606.3 MB** | **1,086.7 MB** | **480.4 MB** | **1,678.6 MB** | **225.10 ms** |
 | | | | | | | | |
 | **8,192 tokens** | **PyTorch MPS (Golden)**| **MPSGraph SDPA** | **1,472.5 MB** | **6,592.8 MB** | 5,120.3 MB | **1,211.1 MB** | **875.00 ms** |
-| **8,192 tokens** | `glypr-core` BF16 | Standard Dense | 781.0 MB | 4,608.2 MB | 3,827.2 MB | 2,037.2 MB | 2,937.26 ms |
-| **8,192 tokens** | `glypr-core` BF16 | Chunked Sliding | 785.0 MB | **2,880.0 MB** | **2,095.0 MB** | 2,038.5 MB | 1,118.50 ms |
-| **8,192 tokens** | `glypr-core` BF16 | Metal Flash (Fused) | 785.0 MB | **1,473.5 MB** | **688.4 MB** | 2,038.5 MB | **774.83 ms** 🏆 |
-| **8,192 tokens** | `glypr-core` Q8_0 | Metal Flash (Fused) | **606.3 MB** | **1,582.7 MB** | **976.4 MB** | **1,678.5 MB** | **796.23 ms** |
+| **8,192 tokens** | `glypr-core` BF16 | Standard Dense | 781.0 MB | 4,608.2 MB | 3,827.2 MB | 2,037.2 MB | 2,946.44 ms |
+| **8,192 tokens** | `glypr-core` BF16 | Chunked Sliding | 785.0 MB | **2,880.0 MB** | **2,095.0 MB** | 2,038.5 MB | 1,121.50 ms |
+| **8,192 tokens** | `glypr-core` BF16 | Metal Flash (Fused) | 785.0 MB | **1,473.5 MB** | **688.4 MB** | 2,038.5 MB | **670.79 ms** |
+| **8,192 tokens** | `glypr-core` Q8_0 | Metal Flash (Fused) | **606.3 MB** | **1,582.7 MB** | **976.4 MB** | **1,678.5 MB** | **615.30 ms** 🏆 |
 
 ---
 
@@ -105,13 +105,13 @@ Peak Metal VRAM (MB)
   ▲
   │   [PyTorch MPS: 6,593 MB / 875 ms]
   │
-4K│                    [Metal Flash BF16: 3,952 MB / 868 ms] ◄── Lowest Latency (Beats PyTorch)
-  │                    [Metal Flash Q8_0: 3,727 MB / 895 ms] ◄── Balanced Edge Champion
+3K│   [Chunked Sliding: 2,880 MB / 1,122 ms] ◄── Lowest Memory (Strict Envelopes)
   │
-3K│   [Chunked Sliding: 3,095 MB / 1,288 ms] ◄── Lowest Memory (Strict Envelopes)
+1.6K│                  [Metal Flash Q8_0: 1,583 MB / 615 ms] ◄── Absolute Latency Champion 🏆
+1.5K│                  [Metal Flash BF16: 1,474 MB / 671 ms] ◄── Lowest Latency + Float Precision
   │
   └──────────────────────────────────────────────────────────► Execution Latency (ms)
-      800ms                   1,000ms                 1,400ms
+      600ms                   800ms                   1,200ms
 ```
 
 ### Architectural Trade-off Summary:
@@ -122,17 +122,17 @@ Peak Metal VRAM (MB)
    - **Recommended For:** Background embedding daemons, memory-constrained machines (8 GB / 16 GB unified RAM), and concurrent multi-model serving.
 
 2. **`AttentionMode::MetalFlash` (The Default & Speed Champion):**
-   - **Execution Latency:** **$774.83\text{ ms}$** at 8,192 tokens (**faster than PyTorch MPS's $875.00\text{ ms}$ by over 100 ms**).
+   - **Execution Latency:** **$615.30\text{ ms}$** (Q8_0) / **$670.79\text{ ms}$** (BF16) at 8,192 tokens (**faster than PyTorch MPS's $875.00\text{ ms}$ by up to 260 ms / 1.42x**).
    - **Peak VRAM:** **$1,473.5\text{ MB}$** at 8,192 tokens (**$-77.7\%$ lower than PyTorch MPS**; down from $4,079.5\text{ MB}$ prior to Phase 1's native $d_{\text{head}}=512$ kernel).
    - **Transient VRAM:** Slashed by **$79.1\%$** from $3,298.4\text{ MB} \to \mathbf{688.4\text{ MB}}$.
-   - **Mechanism:** GPU thread registers compute in-place tile reductions with zero-copy GQA across both $d_{\text{head}}=256$ and $d_{\text{head}}=512$, with zero mask allocation for unpadded sequences, fused backbone RMSNorm/RoPE/GeGLU/Residual kernels, and zero-overhead weight concatenation views.
+   - **Mechanism:** GPU thread registers compute in-place tile reductions with zero-copy GQA across both $d_{\text{head}}=256$ and $d_{\text{head}}=512$, with zero mask allocation for unpadded sequences, fused backbone RMSNorm/RoPE/GeGLU/Residual kernels, zero-overhead weight concatenation views, and M5 Neural Accelerator `mpp::tensor_ops` tensor contractions.
    - **Recommended For:** Default engine across text, multimodal, and server serving.
 
 3. **`GGUF Q8_0` + `MetalFlash` (The Production Edge Sweet Spot):**
    - Cuts base model disk storage down to **$295.5\text{ MB}$** ($-44.5\%$).
    - Base model VRAM is **$606.3\text{ MB}$** (with 0.0 MB weight-fusion overhead).
    - Peak VRAM at 8K context is **$1,582.7\text{ MB}$** (down from $3,855.4\text{ MB}$ prior to Phase 1) with transient VRAM reduced to **$976.4\text{ MB}$** ($-70.5\%$).
-   - Native Metal `block_q8_0` dequant kernels eliminate all 432 `BF16 <-> F32` cast dispatches per pass.
+   - Native Metal `block_q8_0` dequant kernels and M5 NAX INT8 GEMM eliminate all 432 `BF16 <-> F32` cast dispatches per pass, delivering **$615.30\text{ ms}$** at 8K tokens.
 
 
 ---

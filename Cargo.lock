@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "glypr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "glypr-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "glypr-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",

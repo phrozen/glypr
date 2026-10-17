@@ -1,6 +1,9 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#if defined(__HAVE_BFLOAT__)
+typedef bfloat MLX_BF16;
+#else
 struct MLX_BF16 {
     uint16_t bits_;
     MLX_BF16() thread = default;
@@ -32,6 +35,7 @@ struct MLX_BF16 {
         return u.f;
     }
 };
+#endif
 
 // =========================================================================
 // 1. Fused RMSNorm Kernel (Direct Register Reduction via SIMD Shuffle)

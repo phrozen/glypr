@@ -152,6 +152,30 @@ Because $\tanh(\pm 10.0) \equiv \pm 1.0$ to within machine epsilon ($\le 2^{-24}
 
 ---
 
+### E. Apple Silicon M5 Neural Accelerators (Metal 4 / `mpp::tensor_ops`)
+
+Apple's M5 architecture equips every GPU shader core with dedicated Neural Accelerators (NAX), programmed via Metal 4 (`MTLGPUFamilyMetal4` / `MTLGPUFamilyApple10`, MSL 4.0) and Metal Performance Primitives (`metal::mpp::tensor_ops`). Glypr introduces a specialized M5 acceleration subsystem:
+
+#### 1. Zero-Cost Runtime Capability Detection (`MetalCapabilities`)
+On startup, `glypr-core` queries the default `MTLDevice` for `MTLGPUFamily(1004)` and `MTLGPUFamily(1010)`, combined with a one-time runtime MSL compiler probe for `#include <metal_tensor>` and `metal::mpp::tensor_ops::matmul2d`.
+- **Seamless Portability:** If run on M1–M4 hardware or older macOS versions, the system defaults to the Phase 1–3 `simdgroup_matrix` pipeline with zero runtime overhead.
+- **Profiling Toggle:** Accepts `GLYPR_METAL_TIER=auto|m5|legacy` to directly benchmark M5 tensor ops against legacy paths.
+
+#### 2. Native Hardware `bfloat` ALU in Fused MSL Kernels
+By gating MSL definitions behind `#if defined(__HAVE_BFLOAT__) typedef bfloat MLX_BF16;`, all 11 fused kernels (norms, RoPE, GeGLU, Conformer convs) leverage M3/M4/M5 native hardware brain-float execution units, eliminating software float-conversion emulation.
+
+#### 3. M5 Block-Quantized INT8 (`Q8_0`) GEMM (`q8_0_mm_m5_bf16`)
+For batch tokens ($M > 1$), `crates/glypr-core/src/metal_kernels/m5_ops.metal` executes register-streamed block-quantized INT8 matrix multiplications directly into `bfloat` registers.
+
+#### 4. Hardware Cooperative FlashAttention (`steel_attention_m5.metal`)
+- **Single SIMD-Group Scoped Reductions:** Metal 4's `mpp::tensor_ops::reduce_rows` requires `execution_simdgroup`. Launching `WM=4` SIMD groups per threadgroup and partitioning query rows into `BQ_SG = 16` gives each SIMD group an isolated row slice, executing online softmax max/sum reductions directly in hardware without threadgroup memory barriers.
+- **Left-Input Cooperative Tensors:** Chaining $S = Q \times K^T$ into $O += P \times V$ utilizes `pv_op.template get_left_input_cooperative_tensor<bfloat, bfloat, float>(sT_bf16)` directly in registers.
+- **Dual-Tile Column Slicing for $d_{\text{head}}=512$:** To satisfy Metal 4's $N \le 256$ cooperative tensor limit, the kernel splits $P \times V$ into dual 256-column tiles (`oT0` and `oT1`), preserving four-9s cosine parity ($> 0.99986$) without clamping.
+
+**M5 Empirical Impact:** 8,192-token Q8_0 latency dropped from **$814.97\text{ ms} \to 627.20\text{ ms}$** (**$1.30\times$ speedup**), while full 292-vector suite time dropped to **$3.50\text{ s}$** (**$1.64\times$ faster than Python PyTorch MPS**).
+
+---
+
 ## 3. Track 2: Universal Cross-Platform CPU SIMD
 
 To deliver server-grade and laptop-grade embedding generation on CPUs (Apple Silicon, AWS Graviton ARM64, Intel/AMD x86_64), Glypr integrates portable SIMD vectorization via the `pulp` crate (`pulp = { version = "0.22.3", features = ["macro"] }`).
@@ -217,19 +241,20 @@ Empirically measured on Apple Silicon M-series unified hardware across sequence 
 
 | Context Length | Standard Dense (Metal) | Chunked Sliding (Metal) | Metal Flash (BF16) | Metal Flash (Q8_0) | CPU SIMD (BF16) | CPU SIMD (Q8_0) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **64 tokens** | $10.65\text{ ms}$ | $10.58\text{ ms}$ | **$8.92\text{ ms}$** | **$9.33\text{ ms}$** | $159.1\text{ ms}$ | **$135.0\text{ ms}$** |
-| **256 tokens** | $19.79\text{ ms}$ | $19.77\text{ ms}$ | **$16.05\text{ ms}$** | **$16.61\text{ ms}$** | $317.4\text{ ms}$ | **$319.7\text{ ms}$** |
-| **512 tokens** | $38.75\text{ ms}$ | $41.43\text{ ms}$ | **$26.67\text{ ms}$** | **$27.40\text{ ms}$** | **$607.7\text{ ms}$** | $656.4\text{ ms}$ |
-| **1,024 tokens** | $91.38\text{ ms}$ | $95.58\text{ ms}$ | **$52.88\text{ ms}$** | **$55.00\text{ ms}$** | **$1,256.7\text{ ms}$** | $1,509.2\text{ ms}$ |
-| **2,048 tokens** | $258.30\text{ ms}$ | $204.18\text{ ms}$ | **$114.73\text{ ms}$** | **$116.54\text{ ms}$** | **$2,815.3\text{ ms}$** | $3,140.2\text{ ms}$ |
-| **4,096 tokens** | $831.51\text{ ms}$ | $462.23\text{ ms}$ | **$277.24\text{ ms}$** | **$287.25\text{ ms}$** | **$6,222.3\text{ ms}$** | $7,086.9\text{ ms}$ |
-| **8,192 tokens** | $2,937.26\text{ ms}$ | $1,118.50\text{ ms}$ | **$774.83\text{ ms}$ 🏆** | **$796.23\text{ ms}$** | N/A | N/A |
+| **64 tokens** | $10.47\text{ ms}$ | $10.47\text{ ms}$ | **$10.30\text{ ms}$** | **$9.47\text{ ms}$** | $165.9\text{ ms}$ | **$152.9\text{ ms}$** |
+| **256 tokens** | $19.42\text{ ms}$ | $19.41\text{ ms}$ | **$19.09\text{ ms}$** | **$15.88\text{ ms}$** | $316.1\text{ ms}$ | **$326.0\text{ ms}$** |
+| **512 tokens** | $37.59\text{ ms}$ | $40.86\text{ ms}$ | **$28.77\text{ ms}$** | **$24.34\text{ ms}$** | **$591.2\text{ ms}$** | $642.1\text{ ms}$ |
+| **1,024 tokens** | $90.59\text{ ms}$ | $94.74\text{ ms}$ | **$52.28\text{ ms}$** | **$43.93\text{ ms}$** | **$1,231.0\text{ ms}$** | $1,383.0\text{ ms}$ |
+| **2,048 tokens** | $257.64\text{ ms}$ | $203.50\text{ ms}$ | **$107.19\text{ ms}$** | **$87.68\text{ ms}$** | **$2,604.4\text{ ms}$** | $2,977.9\text{ ms}$ |
+| **4,096 tokens** | $830.42\text{ ms}$ | $461.29\text{ ms}$ | **$255.29\text{ ms}$** | **$225.10\text{ ms}$** | **$5,878.8\text{ ms}$** | $6,797.6\text{ ms}$ |
+| **8,192 tokens** | $2,946.44\text{ ms}$ | $1,121.50\text{ ms}$ | **$670.79\text{ ms}$** | **$615.30\text{ ms}$ 🏆** | N/A | N/A |
 
 > [!NOTE]
 > **PyTorch MPS Comparison at 8,192 Tokens:**
 > - PyTorch MPS Golden Baseline: **$875.00\text{ ms}$**
-> - Glypr BF16 Fused Metal Flash: **$774.83\text{ ms}$** (Glypr is faster by **$100.2\text{ ms} / 1.13\text{x}$**)
-> - Peak Throughput: **$10,573\text{ tok/s}$** (8K context) and **$19,366\text{ tok/s}$** (1K context).
+> - Glypr Q8_0 M5 Neural Flash: **$615.30\text{ ms}$** (Glypr is faster by **$259.7\text{ ms} / 1.42\text{x}$**)
+> - Glypr BF16 M5 Neural Flash: **$670.79\text{ ms}$** (Glypr is faster by **$204.2\text{ ms} / 1.30\text{x}$**)
+> - Peak Throughput: **$13,314\text{ tok/s}$** (8K context) and **$23,359\text{ tok/s}$** (2K context).
 
 ---
 

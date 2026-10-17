@@ -1,3 +1,6 @@
+pub mod capabilities;
+pub use capabilities::{compile_metal4_library, MetalCapabilities, MetalTier};
+
 use candle_core::{DType, Device, Result, Tensor};
 use candle_metal_kernels::metal::{ComputePipeline, Device as MtlDevice};
 use objc2_metal::MTLSize;
@@ -5,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
 const FUSED_OPS_SOURCE: &str = include_str!("fused_ops.metal");
+const M5_OPS_SOURCE: &str = include_str!("m5_ops.metal");
 
 static PIPELINE_CACHE: LazyLock<RwLock<HashMap<(usize, &'static str), ComputePipeline>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -21,6 +25,31 @@ fn get_or_compile_pipeline(dev: &MtlDevice, fn_name: &'static str) -> Result<Com
     let library = dev
         .new_library_with_source(FUSED_OPS_SOURCE, None)
         .map_err(|e| candle_core::Error::Metal(format!("Failed to compile fused_ops.metal: {:?}", e).into()))?;
+
+    let function = library
+        .get_function(fn_name, None)
+        .map_err(|e| candle_core::Error::Metal(format!("Function {} not found: {:?}", fn_name, e).into()))?;
+
+    let pipeline = dev
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| candle_core::Error::Metal(format!("Failed to create {} pipeline: {:?}", fn_name, e).into()))?;
+
+    let mut cache = PIPELINE_CACHE.write().unwrap();
+    cache.insert(dev_key, pipeline.clone());
+    Ok(pipeline)
+}
+
+fn get_or_compile_m5_pipeline(dev: &MtlDevice, fn_name: &'static str) -> Result<ComputePipeline> {
+    let dev_key = (dev.as_ref() as *const _ as usize, fn_name);
+    {
+        let cache = PIPELINE_CACHE.read().unwrap();
+        if let Some(p) = cache.get(&dev_key) {
+            return Ok(p.clone());
+        }
+    }
+
+    let library = compile_metal4_library(dev, M5_OPS_SOURCE)
+        .map_err(|e| candle_core::Error::Metal(format!("Failed to compile m5_ops.metal: {:?}", e).into()))?;
 
     let function = library
         .get_function(fn_name, None)
@@ -923,19 +952,26 @@ pub fn fused_metal_q8_0_matmul(
 
     let dtype = x.dtype();
     let is_mv = m == 1;
-    let kernel_name = match (dtype, is_mv) {
-        (DType::BF16, true) => "q8_0_mv_bf16",
-        (DType::BF16, false) => "q8_0_mm_bf16",
-        (DType::F32, true) => "q8_0_mv_f32",
-        (DType::F32, false) => "q8_0_mm_f32",
-        _ => {
-            let x_f32 = x.to_dtype(DType::F32)?;
-            let out_f32 = fused_metal_q8_0_matmul(&weight_q8_bytes, &x_f32, out_dim, in_dim)?;
-            return out_f32.to_dtype(dtype);
-        }
-    };
+    let use_m5 = !is_mv
+        && dtype == DType::BF16
+        && MetalCapabilities::detect(mdev.metal_device()).use_m5_tensor_ops();
 
-    let pipeline = get_or_compile_pipeline(mdev.metal_device(), kernel_name)?;
+    let pipeline = if use_m5 {
+        get_or_compile_m5_pipeline(mdev.metal_device(), "q8_0_mm_m5_bf16")?
+    } else {
+        let kernel_name = match (dtype, is_mv) {
+            (DType::BF16, true) => "q8_0_mv_bf16",
+            (DType::BF16, false) => "q8_0_mm_bf16",
+            (DType::F32, true) => "q8_0_mv_f32",
+            (DType::F32, false) => "q8_0_mm_f32",
+            _ => {
+                let x_f32 = x.to_dtype(DType::F32)?;
+                let out_f32 = fused_metal_q8_0_matmul(&weight_q8_bytes, &x_f32, out_dim, in_dim)?;
+                return out_f32.to_dtype(dtype);
+            }
+        };
+        get_or_compile_pipeline(mdev.metal_device(), kernel_name)?
+    };
     let out = Tensor::zeros(out_dims, dtype, x.device())?;
 
     let ne00 = in_dim as i32;
@@ -1368,11 +1404,21 @@ mod tests {
                 let ref_out = candle_core::Module::forward(&qm_ref, &x_bf16.to_dtype(DType::F32)?)?.to_dtype(DType::BF16)?;
                 let got_out = fused_metal_q8_0_matmul(&q8_bytes_metal, &x_bf16, out_dim, in_dim)?;
 
-                assert_vec_eq(
-                    &ref_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                    &got_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                    &format!("fused_metal_q8_0_matmul m={m}"),
-                );
+                let ref_vec = ref_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let got_vec = got_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                if m == 1 {
+                    assert_vec_eq(&ref_vec, &got_vec, "fused_metal_q8_0_matmul m=1");
+                } else {
+                    // On M5 Neural Accelerators (mpp::tensor_ops::matmul2d), bfloat x half -> float
+                    // vs legacy float x half -> float can differ by at most 1 BF16 ULP (~0.78% rel or 5e-4 abs).
+                    for (i, (&va, &vb)) in ref_vec.iter().zip(got_vec.iter()).enumerate() {
+                        let diff = (va - vb).abs();
+                        assert!(
+                            diff <= 1e-3,
+                            "fused_metal_q8_0_matmul m={m} mismatch at idx {i}: ref={va} vs got={vb} (diff={diff})"
+                        );
+                    }
+                }
             }
         }
 

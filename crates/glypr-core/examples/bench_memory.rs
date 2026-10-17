@@ -25,7 +25,7 @@ struct CorpusEntry {
 #[allow(clippy::duplicated_attributes)]
 #[link(name = "Metal", kind = "framework")]
 #[link(name = "Foundation", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn MTLCreateSystemDefaultDevice() -> *mut std::ffi::c_void;
     fn sel_registerName(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
     fn objc_msgSend(receiver: *mut std::ffi::c_void, selector: *mut std::ffi::c_void) -> usize;

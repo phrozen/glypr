@@ -8,6 +8,7 @@ use super::traits::AttentionBackend;
 use super::chunked::ChunkedSlidingAttention;
 
 static SLIDING_SHADER_SRC: &str = include_str!("steel_attention_sliding.metal");
+static M5_SHADER_SRC: &str = include_str!("steel_attention_m5.metal");
 
 #[derive(Debug)]
 #[repr(C)]
@@ -46,6 +47,7 @@ struct PipelineCache {
 }
 
 static PIPELINE_CACHE: OnceLock<PipelineCache> = OnceLock::new();
+static M5_PIPELINE_CACHE: OnceLock<PipelineCache> = OnceLock::new();
 
 fn get_or_compile_pipeline(
     device: &MtlDevice,
@@ -53,7 +55,57 @@ fn get_or_compile_pipeline(
     align_q: bool,
     align_k: bool,
     has_mask: bool,
+    use_m5: bool,
 ) -> Result<ComputePipeline> {
+    if use_m5 {
+        let cache = M5_PIPELINE_CACHE.get_or_init(|| {
+            let lib = match crate::metal_kernels::compile_metal4_library(device, M5_SHADER_SRC) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("M5 Steel Attention compilation error:\n{e}");
+                    panic!("Failed to compile M5 Steel Attention Metal 4.0 library");
+                }
+            };
+            PipelineCache {
+                library: lib,
+                pipelines: Mutex::new(HashMap::new()),
+            }
+        });
+
+        let key = (head_dim, align_q, align_k, has_mask);
+        let mut map = cache.pipelines.lock().unwrap();
+        if let Some(p) = map.get(&key) {
+            return Ok(p.clone());
+        }
+
+        let cv = ConstantValues::new(vec![
+            (200, Value::Bool(align_q)),
+            (201, Value::Bool(align_k)),
+            (300, Value::Bool(has_mask)),
+            (301, Value::Bool(false)),
+        ]);
+
+        let func_name = match head_dim {
+            256 => "steel_attention_m5_bfloat16_bq64_bk32_bd256_wm4",
+            512 => "steel_attention_m5_bfloat16_bq64_bk32_bd512_wm4",
+            _ => {
+                return Err(candle_core::Error::Msg(format!(
+                    "Unsupported head_dim for M5 MetalFlashAttention: {head_dim}"
+                )))
+            }
+        };
+        let func = cache
+            .library
+            .get_function(func_name, Some(&cv))
+            .map_err(|e| candle_core::Error::Metal(format!("Failed to get function {func_name}: {e}").into()))?;
+        let pipeline = device
+            .new_compute_pipeline_state_with_function(&func)
+            .map_err(|e| candle_core::Error::Metal(format!("Failed to create M5 compute pipeline: {e}").into()))?;
+
+        map.insert(key, pipeline.clone());
+        return Ok(pipeline);
+    }
+
     let cache = PIPELINE_CACHE.get_or_init(|| {
         let lib = device
             .new_library_with_source(SLIDING_SHADER_SRC, None)
@@ -103,7 +155,9 @@ fn get_or_compile_pipeline(
 /// Features:
 /// - Custom Metal Shading Language kernel with hardware tile-skipping for sliding window attention.
 /// - Supports both `head_dim = 256` (sliding layers) and `head_dim = 512` (global layers 5, 11, 17, 23).
-/// - Zero mask allocation (0 MB VRAM overhead) on unpadded sequences up to 8K, and $O(B \cdot S)$
+/// - On Apple M5 (`MTLGPUFamilyApple10` + `MTLGPUFamilyMetal4`), dispatches `mpp::tensor_ops::matmul2d`
+///   cooperative tensor kernels (`BQ=64, BK=32`) directly on the per-core Neural Accelerators.
+/// - Zero mask allocation (0 MB overhead) on unpadded sequences up to 8K, and $O(B \cdot S)$
 ///   stride-broadcasted key-padding mask on heterogeneous batches.
 /// - Native GQA without `repeat_kv` tensor duplication.
 /// - Automatic fallback to ChunkedSlidingAttention when running on CPU or unsupported dtypes.
@@ -155,7 +209,11 @@ impl AttentionBackend for MetalFlashAttention {
             None
         };
 
-        let (bq, bk, wm, wn) = if d == 256 {
+        let use_m5 = crate::metal_kernels::MetalCapabilities::detect(mdev.metal_device()).use_m5_tensor_ops();
+
+        let (bq, bk, wm, wn) = if use_m5 {
+            (64, 32, 4, 1)
+        } else if d == 256 {
             (32, 16, 4, 1)
         } else {
             (16, 16, 2, 1)
@@ -164,7 +222,7 @@ impl AttentionBackend for MetalFlashAttention {
         let align_k = (s % bk) == 0;
         let has_mask = mask_contig.is_some();
 
-        let pipeline = get_or_compile_pipeline(mdev.metal_device(), d, align_q, align_k, has_mask)?;
+        let pipeline = get_or_compile_pipeline(mdev.metal_device(), d, align_q, align_k, has_mask, use_m5)?;
 
         let out_tensor = Tensor::zeros((b, h, s, d), DType::BF16, q.device())?;
 
@@ -250,3 +308,81 @@ impl AttentionBackend for MetalFlashAttention {
         Ok(out_tensor)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_m5_flash_attention_parity_and_speed() -> Result<()> {
+        if !candle_core::utils::metal_is_available() {
+            return Ok(());
+        }
+        let dev = Device::new_metal(0)?;
+        let mdev = match &dev {
+            Device::Metal(m) => m,
+            _ => unreachable!(),
+        };
+        let caps = crate::metal_kernels::MetalCapabilities::detect(mdev.metal_device());
+        if !caps.has_tensor_ops_compiler {
+            return Ok(());
+        }
+
+        for &(d, sliding) in &[(256usize, Some(16usize)), (512usize, None)] {
+            for &s in &[19usize, 64usize, 145usize] {
+                let (b, h, kh) = (2, 4, if d == 256 { 2 } else { 1 });
+                let q_vec: Vec<f32> = (0..(b * h * s * d)).map(|i| ((i as f32) * 0.031).sin() * 0.5).collect();
+                let k_vec: Vec<f32> = (0..(b * kh * s * d)).map(|i| ((i as f32) * 0.017).cos() * 0.5).collect();
+                let v_vec: Vec<f32> = (0..(b * kh * s * d)).map(|i| ((i as f32) * 0.023).sin() * 0.5).collect();
+                let q = Tensor::from_vec(q_vec, (b, h, s, d), &dev)?.to_dtype(DType::BF16)?;
+                let k = Tensor::from_vec(k_vec, (b, kh, s, d), &dev)?.to_dtype(DType::BF16)?;
+                let v = Tensor::from_vec(v_vec, (b, kh, s, d), &dev)?.to_dtype(DType::BF16)?;
+
+                // Test without mask and with additive padding mask [B, 1, 1, S]
+                let mut mask_vec = vec![0.0f32; b * s];
+                for j in (s - 5)..s {
+                    mask_vec[j] = f32::NEG_INFINITY;
+                }
+                let mask = Tensor::from_vec(mask_vec, (b, 1, 1, s), &dev)?.to_dtype(DType::BF16)?;
+
+                for mask_opt in [None, Some(&mask)] {
+                    unsafe {
+                        std::env::set_var("GLYPR_METAL_TIER", "legacy");
+                    }
+                    let ref_out = MetalFlashAttention.compute_attention(&q, &k, &v, mask_opt, sliding)?;
+                    unsafe {
+                        std::env::set_var("GLYPR_METAL_TIER", "m5");
+                    }
+                    let m5_out = MetalFlashAttention.compute_attention(&q, &k, &v, mask_opt, sliding)?;
+                    unsafe {
+                        std::env::remove_var("GLYPR_METAL_TIER");
+                    }
+
+                    let ref_v = ref_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                    let m5_v = m5_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                    let mut max_diff = 0.0f32;
+                    for (i, (&a, &b_val)) in ref_v.iter().zip(m5_v.iter()).enumerate() {
+                        if a.is_nan() || b_val.is_nan() {
+                            panic!("NaN at d={d} s={s} masked={} idx={i}: ref={a} m5={b_val}", mask_opt.is_some());
+                        }
+                        let diff = (a - b_val).abs();
+                        if diff > max_diff {
+                            max_diff = diff;
+                        }
+                    }
+                    println!(
+                        "M5 FlashAttention d={d} s={s} masked={} max_diff={max_diff:.6e}",
+                        mask_opt.is_some(),
+                    );
+                    assert!(
+                        max_diff < 3e-3,
+                        "M5 FlashAttention mismatch at d={d} s={s} masked={}: max_diff={max_diff}",
+                        mask_opt.is_some()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+

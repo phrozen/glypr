@@ -387,6 +387,38 @@ fn main() -> Result<()> {
 
         println!("Hardware & Runtime:");
         if metal_avail {
+            #[cfg(feature = "metal")]
+            if let Some(caps) = glypr_core::metal_kernels::MetalCapabilities::detect_default() {
+                let tier = glypr_core::metal_kernels::MetalTier::from_env();
+                let nax_status = if caps.use_m5_tensor_ops() {
+                    "Active (Metal 4 mpp::tensor_ops)"
+                } else if caps.has_tensor_ops_compiler {
+                    "Supported (Disabled via GLYPR_METAL_TIER=legacy)"
+                } else {
+                    "Not available (Using M1–M4 simdgroup_matrix)"
+                };
+                println!(
+                    "  Device:             {} ({}, BF16)",
+                    caps.device_name, caps.architecture
+                );
+                println!(
+                    "  GPU Families:       Apple9={} | Apple10(M5)={} | Metal4={}",
+                    caps.has_native_bfloat16, caps.has_apple10_m5, caps.has_metal4_family
+                );
+                println!(
+                    "  Neural Accel (NAX): {} [tier={}]",
+                    nax_status,
+                    tier.as_str()
+                );
+                println!(
+                    "  Memory Limits:      {} threadgroup | {} recommended VRAM",
+                    format_bytes(caps.max_threadgroup_memory as u64),
+                    format_bytes(caps.recommended_max_working_set_size as u64)
+                );
+            } else {
+                println!("  Device:             Apple Silicon Metal GPU (BF16)");
+            }
+            #[cfg(not(feature = "metal"))]
             println!("  Device:             Apple Silicon Metal GPU (BF16)");
         } else {
             println!("  Device:             CPU SIMD (FP32)");

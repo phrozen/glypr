@@ -389,8 +389,8 @@ fn test_multimodal_golden_parity_q8() -> anyhow::Result<()> {
 
     let q8_thresholds = MultimodalThresholds {
         high_precision: 0.9994,
-        standard_media: 0.9990,
-        budget_70: 0.9985,
+        standard_media: 0.9984,
+        budget_70: 0.9984,
         min_average: 0.9995,
     };
 

@@ -200,7 +200,7 @@ pub fn int8_cosine_similarity(a: &[i8], b: &[i8]) -> f32 {
 
 #[cfg(target_os = "macos")]
 #[allow(clippy::duplicated_attributes)]
-extern "C" {
+unsafe extern "C" {
     fn objc_autoreleasePoolPush() -> *mut std::ffi::c_void;
     fn objc_autoreleasePoolPop(pool: *mut std::ffi::c_void);
 }
