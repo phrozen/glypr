@@ -224,7 +224,7 @@ impl AttentionBackend for MetalFlashAttention {
 
         let pipeline = get_or_compile_pipeline(mdev.metal_device(), d, align_q, align_k, has_mask, use_m5)?;
 
-        let out_tensor = unsafe { Tensor::empty((b, h, s, d), DType::BF16, q.device()) }?;
+        let out_tensor = Tensor::zeros((b, h, s, d), DType::BF16, q.device())?;
 
         {
             let (q_storage, q_layout) = q.storage_and_layout();

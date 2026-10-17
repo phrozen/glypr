@@ -121,7 +121,7 @@ pub fn fused_metal_rmsnorm(x: &Tensor, weight: Option<&Tensor>, eps: f64) -> Res
     let num_rows = x.elem_count() / d;
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_bf16")?;
-    let out = unsafe { Tensor::empty(orig_shape.clone(), DType::BF16, x.device()) }?;
+    let out = Tensor::zeros(orig_shape.clone(), DType::BF16, x.device())?;
 
     let has_weight: i32 = if weight_ref.is_some() { 1 } else { 0 };
     let d_i32 = d as i32;
@@ -213,7 +213,7 @@ pub fn fused_metal_rmsnorm_residual_add(
     let num_rows = x.elem_count() / d;
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_residual_add_bf16")?;
-    let out = unsafe { Tensor::empty(orig_shape.clone(), DType::BF16, x.device()) }?;
+    let out = Tensor::zeros(orig_shape.clone(), DType::BF16, x.device())?;
 
     let has_weight: i32 = if weight_ref.is_some() { 1 } else { 0 };
     let has_scale: i32 = if scalar_ref.is_some() { 1 } else { 0 };
@@ -313,7 +313,7 @@ pub fn fused_metal_qk_rmsnorm_rope_transpose(
     let sin = if !sin.is_contiguous() { sin.contiguous()? } else { sin.clone() };
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_rope_transpose_bf16")?;
-    let out = unsafe { Tensor::empty((batch, num_heads, seq_len, head_dim), DType::BF16, x.device()) }?;
+    let out = Tensor::zeros((batch, num_heads, seq_len, head_dim), DType::BF16, x.device())?;
 
     let eps_f32 = eps as f32;
     let s_i32 = seq_len as i32;
@@ -402,7 +402,7 @@ pub fn fused_metal_v_rmsnorm_transpose(
     let weight_ref = weight_holder.as_ref();
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_transpose_bf16")?;
-    let out = unsafe { Tensor::empty((batch, num_heads, seq_len, head_dim), DType::BF16, x.device()) }?;
+    let out = Tensor::zeros((batch, num_heads, seq_len, head_dim), DType::BF16, x.device())?;
 
     let eps_f32 = eps as f32;
     let s_i32 = seq_len as i32;
@@ -481,7 +481,7 @@ pub fn fused_metal_ple_scale_rmsnorm_transpose(
     let weight = if weight.dtype() != DType::BF16 { weight.to_dtype(DType::BF16)? } else { weight };
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "ple_scale_rms_norm_transpose_bf16")?;
-    let out = unsafe { Tensor::empty((num_layers, batch, seq_len, d), DType::BF16, x.device()) }?;
+    let out = Tensor::zeros((num_layers, batch, seq_len, d), DType::BF16, x.device())?;
 
     let scale_f32 = scale as f32;
     let eps_f32 = eps as f32;
@@ -556,7 +556,7 @@ fn fused_metal_geglu_impl(gate: &Tensor, up: &Tensor, kernel_name: &'static str)
 
     let total_elements = gate.elem_count();
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), kernel_name)?;
-    let out = unsafe { Tensor::empty(gate.shape().clone(), DType::BF16, gate.device()) }?;
+    let out = Tensor::zeros(gate.shape().clone(), DType::BF16, gate.device())?;
     let total_i32 = total_elements as i32;
 
     {
@@ -619,7 +619,7 @@ pub fn fused_metal_geglu_gate_up(gate_up: &Tensor) -> Result<Tensor> {
 
     let total_elements = gate_up.elem_count() / 2;
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "geglu_gate_up_bf16")?;
-    let out = unsafe { Tensor::empty(out_dims, DType::BF16, gate_up.device()) }?;
+    let out = Tensor::zeros(out_dims, DType::BF16, gate_up.device())?;
     let total_i32 = total_elements as i32;
     let d_i32 = d as i32;
 
@@ -698,9 +698,9 @@ pub fn fused_metal_qkv_rmsnorm_rope_transpose(
     let sin = if !sin.is_contiguous() { sin.contiguous()? } else { sin.clone() };
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "qkv_rmsnorm_rope_transpose_bf16")?;
-    let q_out = unsafe { Tensor::empty((batch, num_q_heads, seq_len, head_dim), DType::BF16, qkv.device()) }?;
-    let k_out = unsafe { Tensor::empty((batch, num_kv_heads, seq_len, head_dim), DType::BF16, qkv.device()) }?;
-    let v_out = unsafe { Tensor::empty((batch, num_kv_heads, seq_len, head_dim), DType::BF16, qkv.device()) }?;
+    let q_out = Tensor::zeros((batch, num_q_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
+    let k_out = Tensor::zeros((batch, num_kv_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
+    let v_out = Tensor::zeros((batch, num_kv_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
 
     let q_eps_f32 = q_eps as f32;
     let k_eps_f32 = k_eps as f32;
@@ -817,9 +817,9 @@ pub fn fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
     let sin = if !sin.is_contiguous() { sin.contiguous()? } else { sin.clone() };
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "vision_qkv_rmsnorm_rope2d_transpose_bf16")?;
-    let q_out = unsafe { Tensor::empty((batch, num_heads, seq_len, head_dim), DType::BF16, qkv.device()) }?;
-    let k_out = unsafe { Tensor::empty((batch, num_heads, seq_len, head_dim), DType::BF16, qkv.device()) }?;
-    let v_out = unsafe { Tensor::empty((batch, num_heads, seq_len, head_dim), DType::BF16, qkv.device()) }?;
+    let q_out = Tensor::zeros((batch, num_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
+    let k_out = Tensor::zeros((batch, num_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
+    let v_out = Tensor::zeros((batch, num_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
 
     let eps_f32 = eps as f32;
     let s_i32 = seq_len as i32;
@@ -914,7 +914,7 @@ pub fn fused_metal_audio_glu_causal_dwconv5(pw1: &Tensor, dw_weight: &Tensor) ->
     let total_elements = batch * seq_len * c;
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "audio_glu_causal_dwconv5_bf16")?;
-    let out = unsafe { Tensor::empty((batch, seq_len, c), DType::BF16, pw1.device()) }?;
+    let out = Tensor::zeros((batch, seq_len, c), DType::BF16, pw1.device())?;
 
     let b_i32 = batch as i32;
     let s_i32 = seq_len as i32;
@@ -1008,7 +1008,7 @@ pub fn fused_metal_q8_0_matmul(
         };
         get_or_compile_pipeline(mdev.metal_device(), kernel_name)?
     };
-    let out = unsafe { Tensor::empty(out_dims, dtype, x.device()) }?;
+    let out = Tensor::zeros(out_dims, dtype, x.device())?;
 
     let ne00 = in_dim as i32;
     let ne0 = out_dim as i32;
