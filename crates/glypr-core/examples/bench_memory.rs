@@ -134,10 +134,15 @@ fn run_single_measurement(model_type: &str, mode: &str, token_len: usize) -> Res
         }
     });
 
-    // Embed target document
-    let t0 = Instant::now();
+    // Embed target document - Iteration 0 (Cold, includes shader compilation if not cached)
+    let t_cold = Instant::now();
     let _ = embedder.embed_document(&entry.content, entry.title.as_deref(), Some(768))?;
-    let duration_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let cold_duration_ms = t_cold.elapsed().as_secs_f64() * 1000.0;
+
+    // Iteration 1 (Warm, steady state)
+    let t_warm = Instant::now();
+    let _ = embedder.embed_document(&entry.content, entry.title.as_deref(), Some(768))?;
+    let warm_duration_ms = t_warm.elapsed().as_secs_f64() * 1000.0;
 
     running.store(false, Ordering::Relaxed);
     sampler_thread.join().unwrap();
@@ -149,8 +154,8 @@ fn run_single_measurement(model_type: &str, mode: &str, token_len: usize) -> Res
 
     // Output machine readable line
     println!(
-        "RESULT|{}|{}|{}|{:.1}|{:.1}|{:.1}|{:.1}|{:.1}|{:.2}|{:.1}",
-        model_type, mode, token_len, model_metal_ram, loaded_metal_mb, peak_metal_mb, transient_metal_mb, end_metal_mb, duration_ms, peak_rss_mb
+        "RESULT|{}|{}|{}|{:.1}|{:.1}|{:.1}|{:.1}|{:.1}|{:.2}|{:.2}|{:.1}",
+        model_type, mode, token_len, model_metal_ram, loaded_metal_mb, peak_metal_mb, transient_metal_mb, end_metal_mb, cold_duration_ms, warm_duration_ms, peak_rss_mb
     );
 
     Ok(())
@@ -189,10 +194,10 @@ fn main() -> Result<()> {
     ];
 
     println!("--- 1. Apple Silicon Metal GPU Memory & Latency Scaling ---");
-    println!("{:<8} | {:<12} | {:<8} | {:<12} | {:<14} | {:<14} | {:<10} | {:<12}",
-        "Model", "Attention", "Tokens", "Model VRAM", "Peak VRAM", "Transient VRAM", "Latency", "Process RSS"
+    println!("{:<8} | {:<12} | {:<8} | {:<12} | {:<14} | {:<14} | {:<10} | {:<10} | {:<12}",
+        "Model", "Attention", "Tokens", "Model VRAM", "Peak VRAM", "Transient VRAM", "Cold Lat", "Warm Lat", "Process RSS"
     );
-    println!("------------------------------------------------------------------------------------------------------------------------");
+    println!("----------------------------------------------------------------------------------------------------------------------------------");
 
     for (model, mode, tokens, _label) in metal_configurations {
         let output = std::process::Command::new(std::env::current_exe()?)
@@ -205,7 +210,7 @@ fn main() -> Result<()> {
         for line in stdout.lines() {
             if line.starts_with("RESULT|") {
                 let parts: Vec<&str> = line.split('|').collect();
-                if parts.len() >= 11 {
+                if parts.len() >= 12 {
                     let m_type = parts[1].to_uppercase();
                     let a_mode = match parts[2] {
                         "standard" => "Standard",
@@ -217,11 +222,12 @@ fn main() -> Result<()> {
                     let m_ram = format!("{} MB", parts[4]);
                     let p_ram = format!("{} MB", parts[6]);
                     let tr_ram = format!("{} MB", parts[7]);
-                    let lat = format!("{} ms", parts[9]);
-                    let rss = format!("{} MB", parts[10]);
+                    let cold_lat = format!("{} ms", parts[9]);
+                    let warm_lat = format!("{} ms", parts[10]);
+                    let rss = format!("{} MB", parts[11]);
 
-                    println!("{:<8} | {:<12} | {:>8} | {:>12} | {:>14} | {:>14} | {:>10} | {:>12}",
-                        m_type, a_mode, t_len, m_ram, p_ram, tr_ram, lat, rss
+                    println!("{:<8} | {:<12} | {:>8} | {:>12} | {:>14} | {:>14} | {:>10} | {:>10} | {:>12}",
+                        m_type, a_mode, t_len, m_ram, p_ram, tr_ram, cold_lat, warm_lat, rss
                     );
                 }
             }
@@ -230,8 +236,8 @@ fn main() -> Result<()> {
 
     println!("\n--- 2. CPU SIMD (pulp NEON/AVX) Latency, Throughput & Memory Scaling ---");
     let cpu_tokens = [64, 256, 512, 1024, 2048, 4096];
-    println!("{:<8} | {:<12} | {:<8} | {:<12} | {:<16} | {:<12}",
-        "Model", "Backend", "Tokens", "Latency", "Throughput", "Process RSS"
+    println!("{:<8} | {:<12} | {:<8} | {:<10} | {:<10} | {:<16} | {:<12}",
+        "Model", "Backend", "Tokens", "Cold Lat", "Warm Lat", "Throughput", "Process RSS"
     );
     println!("------------------------------------------------------------------------------------------------------------------------");
 
@@ -247,17 +253,19 @@ fn main() -> Result<()> {
             for line in stdout.lines() {
                 if line.starts_with("RESULT|") {
                     let parts: Vec<&str> = line.split('|').collect();
-                    if parts.len() >= 11 {
+                    if parts.len() >= 12 {
                         let m_type = parts[1].to_uppercase();
                         let t_len = format!("{}t", parts[3]);
-                        let lat_f: f64 = parts[9].parse().unwrap_or(0.0);
-                        let tok_per_sec = (tokens as f64 / (lat_f / 1000.0)).round();
-                        let lat = format!("{:.1} ms", lat_f);
+                        let cold_f: f64 = parts[9].parse().unwrap_or(0.0);
+                        let warm_f: f64 = parts[10].parse().unwrap_or(0.0);
+                        let tok_per_sec = (tokens as f64 / (warm_f / 1000.0)).round();
+                        let cold_lat = format!("{:.1} ms", cold_f);
+                        let warm_lat = format!("{:.1} ms", warm_f);
                         let tps = format!("{:.0} tok/s", tok_per_sec);
-                        let rss = format!("{} MB", parts[10]);
+                        let rss = format!("{} MB", parts[11]);
 
-                        println!("{:<8} | {:<12} | {:>8} | {:>12} | {:>16} | {:>12}",
-                            m_type, "CPU SIMD", t_len, lat, tps, rss
+                        println!("{:<8} | {:<12} | {:>8} | {:>10} | {:>10} | {:>16} | {:>12}",
+                            m_type, "CPU SIMD", t_len, cold_lat, warm_lat, tps, rss
                         );
                     }
                 }

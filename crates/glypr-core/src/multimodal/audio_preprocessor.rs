@@ -472,6 +472,24 @@ mod tests {
         assert_eq!(decoded24.len(), 1);
         assert!((decoded24[0] - 1.0).abs() < 1e-5);
     }
+
+    #[test]
+    fn test_fft_twiddles_unit_magnitude() {
+        let twiddles = get_fft_512_twiddles();
+        assert_eq!(twiddles.len(), 511);
+        let mut max_err = 0.0f32;
+        for &(re, im) in twiddles.iter() {
+            let mag = (re * re + im * im).sqrt();
+            let err = (mag - 1.0f32).abs();
+            if err > max_err {
+                max_err = err;
+            }
+        }
+        println!("Current FFT-512 twiddle max magnitude error: {:e}", max_err);
+        // Under Phase 2, this will be hardened to < 1e-6 via direct 64-bit trigonometry.
+        // For Phase 0 baseline characterization, verify error is bounded.
+        assert!(max_err < 1e-3, "Twiddle drift exceeded bound: {:e}", max_err);
+    }
 }
 
 

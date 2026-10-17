@@ -1,5 +1,5 @@
 use anyhow::Result;
-use candle_core::{DType, Device};
+use candle_core::{DType, Device, Tensor};
 use glypr_core::{cosine_similarity, GlyprEmbedder};
 use safetensors::SafeTensors;
 use serde::Deserialize;
@@ -343,3 +343,73 @@ fn test_corpus_parity_gguf_q8_metal() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn test_long_context_pooling_precision() -> Result<()> {
+    let gguf_path = match get_gguf_bf16_path()? {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let device = if candle_core::utils::metal_is_available() {
+        Device::new_metal(0)?
+    } else {
+        Device::Cpu
+    };
+    let embedder = GlyprEmbedder::load_gguf_bf16(&gguf_path, &device)?;
+
+    // Test across long contexts: 1024, 2048, 4096, 8192 tokens
+    for &seq_len in &[1024, 2048, 4096, 8192] {
+        let hidden_dim = 768;
+        // Generate reproducible pseudo-random numbers with small non-zero mean and high variance
+        let mut raw_vec = Vec::with_capacity(seq_len * hidden_dim);
+        for t in 0..seq_len {
+            for c in 0..hidden_dim {
+                let v = ((t * 7919 + c * 104729) % 10000) as f64 / 5000.0 - 1.0;
+                raw_vec.push(v as f32);
+            }
+        }
+
+        // Compute high-precision F64 ground-truth reference
+        let mut ref_mean = vec![0.0f64; hidden_dim];
+        for t in 0..seq_len {
+            for c in 0..hidden_dim {
+                ref_mean[c] += raw_vec[t * hidden_dim + c] as f64;
+            }
+        }
+        for c in 0..hidden_dim {
+            ref_mean[c] /= seq_len as f64;
+        }
+        let norm_f64 = ref_mean.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-12);
+        let ref_l2: Vec<f32> = ref_mean.iter().map(|v| (v / norm_f64) as f32).collect();
+
+        // Create token embeddings tensor in BF16
+        let t_tensor = Tensor::from_vec(raw_vec, (1, seq_len, hidden_dim), &device)?
+            .to_dtype(DType::BF16)?;
+
+        // Pool and normalize
+        let pooled = embedder.model.pool_and_normalize(&t_tensor, None, None)?;
+        let pooled_vec = pooled.to_dtype(DType::F32)?.squeeze(0)?.to_vec1::<f32>()?;
+
+        // Compute cosine similarity vs F64 ground truth
+        let mut dot = 0.0f32;
+        let mut norm_a = 0.0f32;
+        let mut norm_b = 0.0f32;
+        for i in 0..hidden_dim {
+            dot += pooled_vec[i] * ref_l2[i];
+            norm_a += pooled_vec[i] * pooled_vec[i];
+            norm_b += ref_l2[i] * ref_l2[i];
+        }
+        let cos_sim = dot / (norm_a.sqrt() * norm_b.sqrt());
+        println!("Long-context seq_len={} pooling cosine vs F64 ground truth: {:.7}", seq_len, cos_sim);
+        // Phase 0 baseline characterization: BF16 pooling yields ~0.9992 at 1K, ~0.9993 at 2K, ~0.987 at 4K, and ~0.95 at 8K due to 7-bit mantissa swamping.
+        // In Phase 2, casting to FP32 before mean/sum will elevate all of these to > 0.99999.
+        assert!(
+            cos_sim >= 0.950,
+            "Pooling precision failure at seq_len={}: cos_sim={:.7}",
+            seq_len,
+            cos_sim
+        );
+    }
+    Ok(())
+}
+
