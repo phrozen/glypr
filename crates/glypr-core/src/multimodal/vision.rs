@@ -26,22 +26,7 @@ fn load_gguf_linear_op<R: std::io::Read + std::io::Seek>(
     device: &Device,
     dtype: DType,
 ) -> Result<LinearOp> {
-    let qt = content.tensor(reader, name, device)?;
-    let info = content.tensor_infos.get(name).ok_or_else(|| {
-        candle_core::Error::Msg(format!("Missing tensor info for {}", name))
-    })?;
-    match info.ggml_dtype {
-        candle_core::quantized::GgmlDType::F32
-        | candle_core::quantized::GgmlDType::F16
-        | candle_core::quantized::GgmlDType::BF16 => {
-            let t = qt.dequantize(device)?.to_dtype(dtype)?;
-            Ok(LinearOp::new_standard(Linear::new(t, None)))
-        }
-        _ => {
-            let qm = candle_core::quantized::QMatMul::from_qtensor(qt)?;
-            Ok(LinearOp::new_quantized(qm))
-        }
-    }
+    LinearOp::from_gguf_tensor(content, reader, name, device, dtype)
 }
 
 /// 2D Patch Embedder: Linear projection + 2D table coordinate embedding lookup
@@ -83,10 +68,10 @@ impl VisionRotaryEmbedding {
         Self { head_dim, rope_theta }
     }
 
-    /// Precompute (cos, sin) tensors once for all patches: [1, 1, num_patches, head_dim]
-    pub fn precompute(
+    /// Precompute (cos, sin) tensors directly from CPU position_ids slice without GPU->CPU readback
+    pub fn precompute_from_slice(
         &self,
-        position_ids: &Tensor,
+        pos_data: &[u32],
         num_patches: usize,
         dtype: DType,
         device: &Device,
@@ -99,9 +84,6 @@ impl VisionRotaryEmbedding {
             let exponent = (2 * i) as f64 / (spatial_dim as f64);
             inv_freq.push(1.0f32 / (self.rope_theta.powf(exponent) as f32));
         }
-
-        let pos_cpu = position_ids.to_device(&Device::Cpu)?.to_dtype(DType::U32)?;
-        let pos_data: Vec<u32> = pos_cpu.flatten_all()?.to_vec1()?;
 
         let mut cos_vec = vec![0.0f32; num_patches * self.head_dim];
         let mut sin_vec = vec![0.0f32; num_patches * self.head_dim];
@@ -131,6 +113,19 @@ impl VisionRotaryEmbedding {
         let cos = Tensor::from_vec(cos_vec, (1, 1, num_patches, self.head_dim), device)?.to_dtype(dtype)?;
         let sin = Tensor::from_vec(sin_vec, (1, 1, num_patches, self.head_dim), device)?.to_dtype(dtype)?;
         Ok((cos, sin))
+    }
+
+    /// Precompute (cos, sin) tensors once for all patches: [1, 1, num_patches, head_dim]
+    pub fn precompute(
+        &self,
+        position_ids: &Tensor,
+        num_patches: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<(Tensor, Tensor)> {
+        let pos_cpu = position_ids.to_device(&Device::Cpu)?.to_dtype(DType::U32)?;
+        let pos_data: Vec<u32> = pos_cpu.flatten_all()?.to_vec1()?;
+        self.precompute_from_slice(&pos_data, num_patches, dtype, device)
     }
 
     /// Fast GPU/CPU rotation using precomputed (cos, sin) tensors
@@ -167,6 +162,7 @@ pub struct VisionAttention {
     pub k_proj: LinearOp,
     pub v_proj: LinearOp,
     pub o_proj: LinearOp,
+    pub fused_qkv: Option<LinearOp>,
     pub q_norm: RMSNorm,
     pub k_norm: RMSNorm,
     pub v_norm: RMSNorm,
@@ -175,6 +171,41 @@ pub struct VisionAttention {
 }
 
 impl VisionAttention {
+    pub fn new(
+        mut q_proj: LinearOp,
+        mut k_proj: LinearOp,
+        mut v_proj: LinearOp,
+        o_proj: LinearOp,
+        q_norm: RMSNorm,
+        k_norm: RMSNorm,
+        v_norm: RMSNorm,
+        num_heads: usize,
+        head_dim: usize,
+    ) -> Self {
+        let fused_qkv = if let Some((fused, mut views)) =
+            LinearOp::try_concat(&[&q_proj, &k_proj, &v_proj])
+        {
+            v_proj = views.pop().unwrap();
+            k_proj = views.pop().unwrap();
+            q_proj = views.pop().unwrap();
+            Some(fused)
+        } else {
+            None
+        };
+        Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            fused_qkv,
+            q_norm,
+            k_norm,
+            v_norm,
+            num_heads,
+            head_dim,
+        }
+    }
+
     pub fn forward(
         &self,
         hidden_states: &Tensor,
@@ -184,28 +215,63 @@ impl VisionAttention {
     ) -> Result<Tensor> {
         let (batch, seq_len, _hidden_size) = hidden_states.dims3()?;
 
-        let q = self.q_proj.forward(hidden_states)?;
-        let k = self.k_proj.forward(hidden_states)?;
-        let v = self.v_proj.forward(hidden_states)?;
+        #[cfg(feature = "metal")]
+        let (q, k, v) = if hidden_states.device().is_metal()
+            && hidden_states.dtype() == DType::BF16
+            && self.fused_qkv.is_some()
+            && self.q_norm.weight().is_some()
+            && self.k_norm.weight().is_some()
+        {
+            let qkv = self.fused_qkv.as_ref().unwrap().forward(hidden_states)?;
+            crate::metal_kernels::fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
+                &qkv,
+                self.q_norm.weight().unwrap(),
+                self.k_norm.weight().unwrap(),
+                self.v_norm.weight(),
+                cos,
+                sin,
+                batch,
+                seq_len,
+                self.num_heads,
+                self.head_dim,
+                self.q_norm.eps(),
+            )?
+        } else {
+            let q = self.q_proj.forward(hidden_states)?;
+            let k = self.k_proj.forward(hidden_states)?;
+            let v = self.v_proj.forward(hidden_states)?;
 
-        // Reshape to [batch, seq_len, num_heads, head_dim]
-        let q = q.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
-        let k = k.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
-        let v = v.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
+            let q = q.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
+            let k = k.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
+            let v = v.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
 
-        // Apply Q, K, V RMSNorm
-        let q = self.q_norm.forward(&q)?;
-        let k = self.k_norm.forward(&k)?;
-        let v = self.v_norm.forward(&v)?;
+            let q = self.q_norm.forward(&q)?.permute((0, 2, 1, 3))?.contiguous()?;
+            let k = self.k_norm.forward(&k)?.permute((0, 2, 1, 3))?.contiguous()?;
+            let v = self.v_norm.forward(&v)?.permute((0, 2, 1, 3))?.contiguous()?;
 
-        // Permute to [batch, num_heads, seq_len, head_dim]
-        let q = q.permute((0, 2, 1, 3))?.contiguous()?;
-        let k = k.permute((0, 2, 1, 3))?.contiguous()?;
-        let v = v.permute((0, 2, 1, 3))?.contiguous()?;
+            let q = rope.apply_precomputed(&q, cos, sin)?;
+            let k = rope.apply_precomputed(&k, cos, sin)?;
+            (q, k, v)
+        };
 
-        // Apply 2D Axial RoPE to Q and K with precomputed tensors
-        let q = rope.apply_precomputed(&q, cos, sin)?;
-        let k = rope.apply_precomputed(&k, cos, sin)?;
+        #[cfg(not(feature = "metal"))]
+        let (q, k, v) = {
+            let q = self.q_proj.forward(hidden_states)?;
+            let k = self.k_proj.forward(hidden_states)?;
+            let v = self.v_proj.forward(hidden_states)?;
+
+            let q = q.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
+            let k = k.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
+            let v = v.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
+
+            let q = self.q_norm.forward(&q)?.permute((0, 2, 1, 3))?.contiguous()?;
+            let k = self.k_norm.forward(&k)?.permute((0, 2, 1, 3))?.contiguous()?;
+            let v = self.v_norm.forward(&v)?.permute((0, 2, 1, 3))?.contiguous()?;
+
+            let q = rope.apply_precomputed(&q, cos, sin)?;
+            let k = rope.apply_precomputed(&k, cos, sin)?;
+            (q, k, v)
+        };
 
         // Non-causal Bidirectional Attention (scaling = 1.0, softcapping = 1.0 / disabled)
         // On Metal GPU: dispatch to fused hardware SDPA kernel (zero matrix materialization)
@@ -245,17 +311,15 @@ impl VisionEncoderLayer {
         cos: &Tensor,
         sin: &Tensor,
     ) -> Result<Tensor> {
-        // Pre-attention layernorm
+        // Pre-attention layernorm + attention + fused post-norm residual add
         let normed = self.ln1.forward(hidden_states)?;
         let attn_out = self.self_attn.forward(&normed, rope, cos, sin)?;
-        let attn_out = self.attn_post_norm.forward(&attn_out)?;
-        let hidden_states = (hidden_states + attn_out)?;
+        let hidden_states = self.attn_post_norm.forward_residual_add(&attn_out, hidden_states, None)?;
 
-        // Pre-feedforward layernorm
+        // Pre-feedforward layernorm + MLP + fused post-norm residual add
         let normed = self.ln2.forward(&hidden_states)?;
         let mlp_out = self.mlp.forward(&normed)?;
-        let mlp_out = self.ffn_post_norm.forward(&mlp_out)?;
-        hidden_states + mlp_out
+        self.ffn_post_norm.forward_residual_add(&mlp_out, &hidden_states, None)
     }
 }
 
@@ -381,8 +445,10 @@ impl VisionTower {
         // 1. Batch patch projection: [b, num_patches, 768]
         let mut hidden_states = self.patch_embedder.forward(&pixel_tensor, &pos_tensor)?;
 
-        // 2. Precompute 2D Axial RoPE
-        let (cos, sin) = self.rotary_emb.precompute(&pos_tensor, num_patches, self.dtype, &self.device)?;
+        // 2. Precompute 2D Axial RoPE directly from CPU position_ids without GPU->CPU readback
+        let (cos, sin) = self
+            .rotary_emb
+            .precompute_from_slice(&batch[0].position_ids, num_patches, self.dtype, &self.device)?;
 
         // 3. 16 Transformer layers (batched SDPA natively executes across [b, heads, patches, dim])
         for layer in &self.layers {
@@ -444,7 +510,7 @@ impl VisionTower {
             let k_norm = RMSNorm::new(Some(k_norm_w), config.rms_norm_eps);
             let v_norm = RMSNorm::new(None, config.rms_norm_eps); // unscaled
 
-            let self_attn = VisionAttention {
+            let self_attn = VisionAttention::new(
                 q_proj,
                 k_proj,
                 v_proj,
@@ -452,9 +518,9 @@ impl VisionTower {
                 q_norm,
                 k_norm,
                 v_norm,
-                num_heads: config.num_attention_heads,
-                head_dim: config.head_dim,
-            };
+                config.num_attention_heads,
+                config.head_dim,
+            );
 
             let attn_post_norm_w = load_gguf_norm_tensor(content, reader, &format!("{}.attn_post_norm.weight", prefix), device, dtype)?;
             let attn_post_norm = RMSNorm::new(Some(attn_post_norm_w), config.rms_norm_eps);

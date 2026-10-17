@@ -1,5 +1,5 @@
 use candle_core::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{LayerNorm, Linear};
+use candle_nn::LayerNorm;
 
 use crate::config::AudioConfig;
 use crate::linear::LinearOp;
@@ -25,22 +25,7 @@ fn load_gguf_linear_op<R: std::io::Read + std::io::Seek>(
     device: &Device,
     dtype: DType,
 ) -> Result<LinearOp> {
-    let qt = content.tensor(reader, name, device)?;
-    let info = content.tensor_infos.get(name).ok_or_else(|| {
-        candle_core::Error::Msg(format!("Missing tensor info for {}", name))
-    })?;
-    match info.ggml_dtype {
-        candle_core::quantized::GgmlDType::F32
-        | candle_core::quantized::GgmlDType::F16
-        | candle_core::quantized::GgmlDType::BF16 => {
-            let t = qt.dequantize(device)?.to_dtype(dtype)?;
-            Ok(LinearOp::new_standard(Linear::new(t, None)))
-        }
-        _ => {
-            let qm = candle_core::quantized::QMatMul::from_qtensor(qt)?;
-            Ok(LinearOp::new_quantized(qm))
-        }
-    }
+    LinearOp::from_gguf_tensor(content, reader, name, device, dtype)
 }
 fn load_optional_f32_scalar<R: std::io::Read + std::io::Seek>(
     content: &candle_core::quantized::gguf_file::Content,
@@ -334,26 +319,56 @@ impl AudioLightConv1d {
         let normed = self.pre_layer_norm.forward(x)?;
         let pw1 = self.linear_start.forward(&normed)?;
 
-        // GLU activation along last dimension: half0 * sigmoid(half1)
-        let half0 = pw1.narrow(D::Minus1, 0, self.hidden_size)?;
-        let half1 = pw1.narrow(D::Minus1, self.hidden_size, self.hidden_size)?;
-        let sig = candle_nn::ops::sigmoid(&half1)?;
-        let glu_out = (half0 * sig)?;
+        #[cfg(feature = "metal")]
+        let dw_out = if pw1.device().is_metal() && pw1.dtype() == DType::BF16 {
+            crate::metal_kernels::fused_metal_audio_glu_causal_dwconv5(
+                &pw1,
+                &self.depthwise_conv_weight,
+            )?
+        } else {
+            let half0 = pw1.narrow(D::Minus1, 0, self.hidden_size)?;
+            let half1 = pw1.narrow(D::Minus1, self.hidden_size, self.hidden_size)?;
+            let sig = candle_nn::ops::sigmoid(&half1)?;
+            let glu_out = (half0 * sig)?;
 
-        // Depthwise 1D conv with kernel size 5:
-        // glu_out: [batch, seq_len, 1024] -> [batch, 1024, seq_len]
-        let dw_in = glu_out.transpose(1, 2)?.contiguous()?;
-        // Causal padding: pad 4 on the left
-        let dw_in = dw_in.pad_with_zeros(D::Minus1, 4, 0)?;
-        let seq_len = glu_out.dim(1)?;
+            let dw_in = glu_out.transpose(1, 2)?.contiguous()?;
+            let dw_in = dw_in.pad_with_zeros(D::Minus1, 4, 0)?;
+            let seq_len = glu_out.dim(1)?;
 
-        // Fused 5-tap depthwise convolution: replaces Candle's 1,024 single-group chunk & cat dispatches
-        let mut dw_out = dw_in.narrow(2, 0, seq_len)?.broadcast_mul(&self.depthwise_conv_weight.narrow(2, 0, 1)?)?;
-        for k in 1..5 {
-            let term = dw_in.narrow(2, k, seq_len)?.broadcast_mul(&self.depthwise_conv_weight.narrow(2, k, 1)?)?;
-            dw_out = (dw_out + term)?;
-        }
-        let dw_out = dw_out.transpose(1, 2)?.contiguous()?; // [batch, seq_len, 1024]
+            let mut dw_out = dw_in
+                .narrow(2, 0, seq_len)?
+                .broadcast_mul(&self.depthwise_conv_weight.narrow(2, 0, 1)?)?;
+            for k in 1..5 {
+                let term = dw_in
+                    .narrow(2, k, seq_len)?
+                    .broadcast_mul(&self.depthwise_conv_weight.narrow(2, k, 1)?)?;
+                dw_out = (dw_out + term)?;
+            }
+            dw_out.transpose(1, 2)?.contiguous()?
+        };
+
+        #[cfg(not(feature = "metal"))]
+        let dw_out = {
+            let half0 = pw1.narrow(D::Minus1, 0, self.hidden_size)?;
+            let half1 = pw1.narrow(D::Minus1, self.hidden_size, self.hidden_size)?;
+            let sig = candle_nn::ops::sigmoid(&half1)?;
+            let glu_out = (half0 * sig)?;
+
+            let dw_in = glu_out.transpose(1, 2)?.contiguous()?;
+            let dw_in = dw_in.pad_with_zeros(D::Minus1, 4, 0)?;
+            let seq_len = glu_out.dim(1)?;
+
+            let mut dw_out = dw_in
+                .narrow(2, 0, seq_len)?
+                .broadcast_mul(&self.depthwise_conv_weight.narrow(2, 0, 1)?)?;
+            for k in 1..5 {
+                let term = dw_in
+                    .narrow(2, k, seq_len)?
+                    .broadcast_mul(&self.depthwise_conv_weight.narrow(2, k, 1)?)?;
+                dw_out = (dw_out + term)?;
+            }
+            dw_out.transpose(1, 2)?.contiguous()?
+        };
 
         let conv_normed = self.conv_norm.forward(&dw_out)?;
         let silu_out = candle_nn::ops::silu(&conv_normed)?;
@@ -402,13 +417,11 @@ impl AudioConformerLayer {
     pub fn forward(&self, x: &Tensor, mask_tensor: &Tensor) -> Result<Tensor> {
         // Macaron FFN 1
         let x = self.feed_forward1.forward(x)?;
-        let residual = x.clone();
 
-        // Self-Attention
+        // Self-Attention + Fused Post-Norm Residual Add
         let pre_attn = self.norm_pre_attn.forward(&x)?;
         let attn_out = self.self_attn.forward(&pre_attn, mask_tensor)?;
-        let post_attn = self.norm_post_attn.forward(&attn_out)?;
-        let x = (residual + post_attn)?;
+        let x = self.norm_post_attn.forward_residual_add(&attn_out, &x, None)?;
 
         // Light Conv 1D
         let x = self.lconv1d.forward(&x)?;

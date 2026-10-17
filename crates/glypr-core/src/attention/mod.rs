@@ -36,6 +36,7 @@ pub struct SelfAttention {
     pub k_proj: LinearOp,
     pub v_proj: LinearOp,
     pub o_proj: LinearOp,
+    pub fused_qkv: Option<LinearOp>,
     pub q_norm: RMSNorm,
     pub k_norm: RMSNorm,
     pub v_norm: RMSNorm,
@@ -48,9 +49,9 @@ pub struct SelfAttention {
 
 impl SelfAttention {
     pub fn new(
-        q_proj: LinearOp,
-        k_proj: LinearOp,
-        v_proj: LinearOp,
+        mut q_proj: LinearOp,
+        mut k_proj: LinearOp,
+        mut v_proj: LinearOp,
         o_proj: LinearOp,
         q_norm: RMSNorm,
         k_norm: RMSNorm,
@@ -60,11 +61,22 @@ impl SelfAttention {
         head_dim: usize,
         sliding_window: Option<usize>,
     ) -> Self {
+        let fused_qkv = if let Some((fused, mut views)) =
+            LinearOp::try_concat(&[&q_proj, &k_proj, &v_proj])
+        {
+            v_proj = views.pop().unwrap();
+            k_proj = views.pop().unwrap();
+            q_proj = views.pop().unwrap();
+            Some(fused)
+        } else {
+            None
+        };
         Self {
             q_proj,
             k_proj,
             v_proj,
             o_proj,
+            fused_qkv,
             q_norm,
             k_norm,
             v_norm,
@@ -89,51 +101,71 @@ impl SelfAttention {
     ) -> Result<Tensor> {
         let (batch, seq_len, _hidden_size) = hidden_states.dims3()?;
 
-        // Projections
-        let q = self.q_proj.forward(hidden_states)?;
-        let k = self.k_proj.forward(hidden_states)?;
-        let v = self.v_proj.forward(hidden_states)?;
-
-        // Fused Q/K RMSNorm + RoPE + Transpose and V RMSNorm + Transpose on Metal BF16
         #[cfg(feature = "metal")]
-        let (q, k, v) = if q.device().is_metal()
-            && q.dtype() == candle_core::DType::BF16
+        let (q, k, v) = if hidden_states.device().is_metal()
+            && hidden_states.dtype() == candle_core::DType::BF16
             && self.q_norm.weight().is_some()
             && self.k_norm.weight().is_some()
         {
-            let q = crate::metal_kernels::fused_metal_qk_rmsnorm_rope_transpose(
-                &q,
-                self.q_norm.weight().unwrap(),
-                cos,
-                sin,
-                batch,
-                seq_len,
-                self.num_attention_heads,
-                self.head_dim,
-                self.q_norm.eps(),
-            )?;
-            let k = crate::metal_kernels::fused_metal_qk_rmsnorm_rope_transpose(
-                &k,
-                self.k_norm.weight().unwrap(),
-                cos,
-                sin,
-                batch,
-                seq_len,
-                self.num_key_value_heads,
-                self.head_dim,
-                self.k_norm.eps(),
-            )?;
-            let v = crate::metal_kernels::fused_metal_v_rmsnorm_transpose(
-                &v,
-                self.v_norm.weight(),
-                batch,
-                seq_len,
-                self.num_key_value_heads,
-                self.head_dim,
-                self.v_norm.eps(),
-            )?;
-            (q, k, v)
+            if let Some(ref fused_qkv) = self.fused_qkv {
+                let qkv = fused_qkv.forward(hidden_states)?;
+                crate::metal_kernels::fused_metal_qkv_rmsnorm_rope_transpose(
+                    &qkv,
+                    self.q_norm.weight().unwrap(),
+                    self.k_norm.weight().unwrap(),
+                    self.v_norm.weight(),
+                    cos,
+                    sin,
+                    batch,
+                    seq_len,
+                    self.num_attention_heads,
+                    self.num_key_value_heads,
+                    self.head_dim,
+                    self.q_norm.eps(),
+                    self.k_norm.eps(),
+                    self.v_norm.eps(),
+                )?
+            } else {
+                let q = self.q_proj.forward(hidden_states)?;
+                let k = self.k_proj.forward(hidden_states)?;
+                let v = self.v_proj.forward(hidden_states)?;
+                let q = crate::metal_kernels::fused_metal_qk_rmsnorm_rope_transpose(
+                    &q,
+                    self.q_norm.weight().unwrap(),
+                    cos,
+                    sin,
+                    batch,
+                    seq_len,
+                    self.num_attention_heads,
+                    self.head_dim,
+                    self.q_norm.eps(),
+                )?;
+                let k = crate::metal_kernels::fused_metal_qk_rmsnorm_rope_transpose(
+                    &k,
+                    self.k_norm.weight().unwrap(),
+                    cos,
+                    sin,
+                    batch,
+                    seq_len,
+                    self.num_key_value_heads,
+                    self.head_dim,
+                    self.k_norm.eps(),
+                )?;
+                let v = crate::metal_kernels::fused_metal_v_rmsnorm_transpose(
+                    &v,
+                    self.v_norm.weight(),
+                    batch,
+                    seq_len,
+                    self.num_key_value_heads,
+                    self.head_dim,
+                    self.v_norm.eps(),
+                )?;
+                (q, k, v)
+            }
         } else {
+            let q = self.q_proj.forward(hidden_states)?;
+            let k = self.k_proj.forward(hidden_states)?;
+            let v = self.v_proj.forward(hidden_states)?;
             // Normalize while [batch, seq_len, num_heads, head_dim] is still contiguous, then transpose
             let q = self
                 .q_norm
@@ -157,6 +189,9 @@ impl SelfAttention {
 
         #[cfg(not(feature = "metal"))]
         let (q, k, v) = {
+            let q = self.q_proj.forward(hidden_states)?;
+            let k = self.k_proj.forward(hidden_states)?;
+            let v = self.v_proj.forward(hidden_states)?;
             let q = self
                 .q_norm
                 .forward(&q.reshape((batch, seq_len, self.num_attention_heads, self.head_dim))?)?

@@ -46,6 +46,39 @@ pub fn get_htk_mel_filterbank() -> &'static [f32] {
     })
 }
 
+static SPARSE_HTK_MEL_FILTERBANK: OnceLock<Vec<(usize, Vec<f32>)>> = OnceLock::new();
+
+/// Cached sparse HTK Mel filterbank storing `(start_bin, non_zero_weights)` per Mel channel
+fn get_sparse_htk_mel_filterbank() -> &'static [(usize, Vec<f32>)] {
+    SPARSE_HTK_MEL_FILTERBANK.get_or_init(|| {
+        let dense = get_htk_mel_filterbank();
+        let mut sparse = Vec::with_capacity(AUDIO_NUM_MELS);
+        for m in 0..AUDIO_NUM_MELS {
+            let mut first = None;
+            let mut last = 0;
+            for b in 0..AUDIO_NUM_BINS {
+                let w = dense[b * AUDIO_NUM_MELS + m];
+                if w != 0.0 {
+                    if first.is_none() {
+                        first = Some(b);
+                    }
+                    last = b + 1;
+                }
+            }
+            if let Some(start) = first {
+                let mut weights = Vec::with_capacity(last - start);
+                for b in start..last {
+                    weights.push(dense[b * AUDIO_NUM_MELS + m]);
+                }
+                sparse.push((start, weights));
+            } else {
+                sparse.push((0, Vec::new()));
+            }
+        }
+        sparse
+    })
+}
+
 static HANN_WINDOW: OnceLock<[f32; AUDIO_FRAME_LEN]> = OnceLock::new();
 
 /// Cached periodic Hann window of length 320
@@ -218,7 +251,7 @@ pub fn preprocess_audio(samples: &[f32]) -> Result<ProcessedAudio> {
     let num_frames = (padded.len() - frame_size_for_unfold) / AUDIO_HOP_LEN + 1;
 
     let window = get_hann_window();
-    let mel_filters = get_htk_mel_filterbank();
+    let sparse_mel_filters = get_sparse_htk_mel_filterbank();
 
     let mut features = vec![0.0f32; num_frames * AUDIO_NUM_MELS];
 
@@ -244,11 +277,12 @@ pub fn preprocess_audio(samples: &[f32]) -> Result<ProcessedAudio> {
                 mag_spec[b] = (real_buf[b] * real_buf[b] + imag_buf[b] * imag_buf[b]).sqrt();
             }
 
-            // Mel filterbank projection + log(mel + 0.001)
-            for m in 0..AUDIO_NUM_MELS {
+            // Sparse Mel filterbank projection + log(mel + 0.001)
+            for (m, (start_bin, weights)) in sparse_mel_filters.iter().enumerate() {
                 let mut mel_val = 0.0f32;
-                for b in 0..AUDIO_NUM_BINS {
-                    mel_val += mag_spec[b] * mel_filters[b * AUDIO_NUM_MELS + m];
+                let mag_slice = &mag_spec[*start_bin..*start_bin + weights.len()];
+                for (&mag, &w) in mag_slice.iter().zip(weights.iter()) {
+                    mel_val += mag * w;
                 }
                 frame_features[m] = (mel_val + AUDIO_MEL_FLOOR).ln();
             }

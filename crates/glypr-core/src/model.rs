@@ -44,22 +44,7 @@ fn load_gguf_linear_op<R: std::io::Read + std::io::Seek>(
     device: &Device,
     dtype: DType,
 ) -> Result<LinearOp> {
-    let qt = content.tensor(reader, name, device)?;
-    let info = content.tensor_infos.get(name).ok_or_else(|| {
-        candle_core::Error::Msg(format!("Missing tensor info for {}", name))
-    })?;
-    match info.ggml_dtype {
-        candle_core::quantized::GgmlDType::F32
-        | candle_core::quantized::GgmlDType::F16
-        | candle_core::quantized::GgmlDType::BF16 => {
-            let t = qt.dequantize(device)?.to_dtype(dtype)?;
-            Ok(LinearOp::new_standard(Linear::new(t, None)))
-        }
-        _ => {
-            let qm = candle_core::quantized::QMatMul::from_qtensor(qt)?;
-            Ok(LinearOp::new_quantized(qm))
-        }
-    }
+    LinearOp::from_gguf_tensor(content, reader, name, device, dtype)
 }
 
 impl EmbeddingGemma2Model {
