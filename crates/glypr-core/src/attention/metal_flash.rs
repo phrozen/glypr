@@ -209,7 +209,7 @@ impl AttentionBackend for MetalFlashAttention {
             None
         };
 
-        let use_m5 = crate::metal_kernels::MetalCapabilities::detect(mdev.metal_device()).use_m5_tensor_ops();
+        let use_m5 = crate::metal_kernels::MetalCapabilities::detect(mdev.metal_device()).use_m5_tensor_ops() && (s % 64 == 0);
 
         let (bq, bk, wm, wn) = if use_m5 {
             (64, 32, 4, 1)
@@ -224,7 +224,7 @@ impl AttentionBackend for MetalFlashAttention {
 
         let pipeline = get_or_compile_pipeline(mdev.metal_device(), d, align_q, align_k, has_mask, use_m5)?;
 
-        let out_tensor = Tensor::zeros((b, h, s, d), DType::BF16, q.device())?;
+        let out_tensor = unsafe { Tensor::empty((b, h, s, d), DType::BF16, q.device()) }?;
 
         {
             let (q_storage, q_layout) = q.storage_and_layout();

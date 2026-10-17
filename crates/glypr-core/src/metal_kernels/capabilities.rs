@@ -110,37 +110,39 @@ impl MetalCapabilities {
     }
 
     fn probe_device(dev: &MtlDevice) -> Self {
-        let raw = dev.as_ref();
-        let device_name = raw.name().to_string();
-        let architecture = dev.architecture_name();
+        crate::util::with_autorelease_pool(|| {
+            let raw = dev.as_ref();
+            let device_name = raw.name().to_string();
+            let architecture = dev.architecture_name();
 
-        let has_native_bfloat16 = raw.supportsFamily(MTLGPUFamily::Apple9);
-        let has_apple10_m5 = raw.supportsFamily(MTLGPUFamily::Apple10);
-        let has_metal4_family = raw.supportsFamily(MTLGPUFamily::Metal4);
-        let max_threadgroup_memory = raw.maxThreadgroupMemoryLength();
-        let recommended_max_working_set_size = dev.recommended_max_working_set_size();
+            let has_native_bfloat16 = raw.supportsFamily(MTLGPUFamily::Apple9);
+            let has_apple10_m5 = raw.supportsFamily(MTLGPUFamily::Apple10);
+            let has_metal4_family = raw.supportsFamily(MTLGPUFamily::Metal4);
+            let max_threadgroup_memory = raw.maxThreadgroupMemoryLength();
+            let recommended_max_working_set_size = dev.recommended_max_working_set_size();
 
-        let has_tensor_ops_compiler = if has_apple10_m5 || has_metal4_family {
-            compile_metal4_library(dev, M5_TENSOR_OPS_PROBE_SRC)
-                .and_then(|lib| {
-                    let f = lib.get_function("glypr_m5_tensor_ops_probe", None)?;
-                    dev.new_compute_pipeline_state_with_function(&f)
-                })
-                .is_ok()
-        } else {
-            false
-        };
+            let has_tensor_ops_compiler = if has_apple10_m5 || has_metal4_family {
+                compile_metal4_library(dev, M5_TENSOR_OPS_PROBE_SRC)
+                    .and_then(|lib| {
+                        let f = lib.get_function("glypr_m5_tensor_ops_probe", None)?;
+                        dev.new_compute_pipeline_state_with_function(&f)
+                    })
+                    .is_ok()
+            } else {
+                false
+            };
 
-        Self {
-            device_name,
-            architecture,
-            has_native_bfloat16,
-            has_apple10_m5,
-            has_metal4_family,
-            has_tensor_ops_compiler,
-            max_threadgroup_memory,
-            recommended_max_working_set_size,
-        }
+            Self {
+                device_name,
+                architecture,
+                has_native_bfloat16,
+                has_apple10_m5,
+                has_metal4_family,
+                has_tensor_ops_compiler,
+                max_threadgroup_memory,
+                recommended_max_working_set_size,
+            }
+        })
     }
 
     /// Returns `true` if M5 Neural Accelerator (`mpp::tensor_ops`) kernels should be used

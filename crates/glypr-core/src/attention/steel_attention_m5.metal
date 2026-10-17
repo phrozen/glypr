@@ -228,7 +228,7 @@ void steel_attention_m5(
                 const float m_old = max_score[i];
                 const float m_cur = metal::max(m_old, new_max[i]);
                 new_max[i] = m_cur;
-                factor[i] = (m_old == neg_inf) ? 0.0f : fast::exp2(m_old - m_cur);
+                factor[i] = (m_old == neg_inf || m_cur == neg_inf) ? 0.0f : fast::exp2(m_old - m_cur);
                 max_score[i] = m_cur;
             }
         }
@@ -239,7 +239,8 @@ void steel_attention_m5(
             if (it.is_valid_element()) {
                 auto max_it = new_max.map_iterator(it);
                 const float m_cur = *max_it;
-                const float p_val = (m_cur == neg_inf) ? 0.0f : fast::exp2(*it - m_cur);
+                const float s_val = *it;
+                const float p_val = (m_cur == neg_inf || s_val <= -1e20f) ? 0.0f : fast::exp2(s_val - m_cur);
                 *it = p_val;
             } else {
                 *it = 0.0f;
