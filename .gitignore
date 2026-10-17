@@ -18,3 +18,5 @@ target/
 # Test fixture data (copyrighted/local assets)
 tests/cards/
 
+# Local optimization plan handoff
+OPTIMIZATION_PLAN.md

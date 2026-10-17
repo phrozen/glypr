@@ -63,6 +63,32 @@ impl TextPLE {
         let reshaped = self.project(inputs_embeds)?;
         self.norm.forward(&reshaped)
     }
+
+    /// Single-pass 4D PLE projection, scaling, RMSNorm, and permutation into `[num_layers, batch, seq_len, d]`.
+    /// Each layer's `.get(i)` slice is already normalized and 100% contiguous.
+    pub fn project_and_norm_per_layer(&self, inputs_embeds: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "metal")]
+        if inputs_embeds.device().is_metal()
+            && inputs_embeds.dtype() == candle_core::DType::BF16
+            && self.norm.weight().is_some()
+        {
+            let (batch, seq_len, _) = inputs_embeds.dims3()?;
+            let proj = self.projection.forward(inputs_embeds)?;
+            return crate::metal_kernels::fused_metal_ple_scale_rmsnorm_transpose(
+                &proj,
+                self.norm.weight().unwrap(),
+                self.scale,
+                self.norm.eps(),
+                batch,
+                seq_len,
+                self.num_layers,
+                self.hidden_size_per_layer_input,
+            );
+        }
+
+        let normed = self.forward(inputs_embeds)?;
+        normed.permute((2, 0, 1, 3))?.contiguous()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,11 +107,35 @@ impl TextPLEBlock {
     /// hidden_states: [batch, seq_len, hidden_size]
     /// per_layer_input: [batch, seq_len, hidden_size]
     pub fn forward(&self, hidden_states: &Tensor, per_layer_input: &Tensor) -> Result<Tensor> {
+        self.forward_with_scalar(hidden_states, per_layer_input, None)
+    }
+
+    /// Forward pass with optional fused layer_scalar multiplication on the residual output.
+    pub fn forward_with_scalar(
+        &self,
+        hidden_states: &Tensor,
+        per_layer_input: &Tensor,
+        layer_scalar: Option<&Tensor>,
+    ) -> Result<Tensor> {
         let h = self.gate.forward(hidden_states)?;
-        let h = gelu_tanh(&h)?;
-        let h = h.broadcast_mul(per_layer_input)?;
+
+        #[cfg(feature = "metal")]
+        let h = if h.device().is_metal() && h.dtype() == candle_core::DType::BF16 {
+            crate::metal_kernels::fused_metal_ple_geglu(&h, per_layer_input)?
+        } else if h.device().is_cpu() {
+            crate::cpu_simd::cpu_geglu(&h, per_layer_input)?
+        } else {
+            gelu_tanh(&h)?.broadcast_mul(per_layer_input)?
+        };
+
+        #[cfg(not(feature = "metal"))]
+        let h = if h.device().is_cpu() {
+            crate::cpu_simd::cpu_geglu(&h, per_layer_input)?
+        } else {
+            gelu_tanh(&h)?.broadcast_mul(per_layer_input)?
+        };
+
         let h = self.projection.forward(&h)?;
-        let normed = self.norm.forward(&h)?;
-        hidden_states.add(&normed)
+        self.norm.forward_residual_add(&h, hidden_states, layer_scalar)
     }
 }

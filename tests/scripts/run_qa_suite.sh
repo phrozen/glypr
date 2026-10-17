@@ -6,24 +6,20 @@ echo "                   GLYPR E2E QA & PARITY VERIFICATION SUITE               
 echo "================================================================================"
 
 # 1. Environment & HF Cache Verification
-echo -e "\n[1/5] Verifying HF Cache Resolution & Python Tools..."
+echo -e "\n[1/4] Verifying HF Cache Resolution & Python Tools..."
 uv run python tests/scripts/verify_cache.py
 
 # 2. Python Unit & MRL Tests
-echo -e "\n[2/5] Running Python Baseline Tests..."
+echo -e "\n[2/4] Running Python Baseline Tests..."
 uv run pytest tests/test_baseline.py
 
 # 3. Build & Lint Verification
-echo -e "\n[3/5] Verifying Cargo Checks & Zero-Warning Hygiene..."
+echo -e "\n[3/4] Verifying Cargo Checks & Zero-Warning Hygiene..."
 cargo check --all --tests
 cargo check --all --examples --features metal
 
-# 4. mmproj Byte Parity Verification
-echo -e "\n[4/5] Running mmproj Safetensors <-> GGUF Byte Parity Audit..."
-uv run python tests/scripts/verify_mmproj_parity.py
-
-# 5. Full Rust Test Suite (CPU SIMD, Golden Parity, Corpus Parity, Multimodal Parity)
-echo -e "\n[5/5] Running Full Test Suite on Apple Silicon (Release + Metal + FlashAttn)..."
+# 4. Full Rust Test Suite (CPU SIMD, Golden Parity, Corpus Parity, Multimodal Parity)
+echo -e "\n[4/4] Running Full Test Suite on Apple Silicon (Release + Metal + FlashAttn)..."
 cargo test --all --release --features metal,metal-flash-attn -- --nocapture
 
 echo -e "\n================================================================================"

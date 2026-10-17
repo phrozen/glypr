@@ -11,6 +11,14 @@ impl RMSNorm {
         Self { weight, eps }
     }
 
+    pub fn weight(&self) -> Option<&Tensor> {
+        self.weight.as_ref()
+    }
+
+    pub fn eps(&self) -> f64 {
+        self.eps
+    }
+
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         #[cfg(feature = "metal")]
         if x.device().is_metal() && x.dtype() == DType::BF16 {
@@ -51,6 +59,37 @@ impl RMSNorm {
             out_f32.to_dtype(orig_dtype)
         } else {
             Ok(out_f32)
+        }
+    }
+
+    pub fn forward_residual_add(
+        &self,
+        x: &Tensor,
+        residual: &Tensor,
+        layer_scalar: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        #[cfg(feature = "metal")]
+        if x.device().is_metal() && x.dtype() == DType::BF16 {
+            return crate::metal_kernels::fused_metal_rmsnorm_residual_add(
+                x,
+                residual,
+                self.weight.as_ref(),
+                layer_scalar,
+                self.eps,
+            );
+        }
+
+        let normed = self.forward(x)?;
+        let sum = residual.add(&normed)?;
+        if let Some(scalar) = layer_scalar {
+            let s = if scalar.dtype() != sum.dtype() {
+                scalar.to_dtype(sum.dtype())?
+            } else {
+                scalar.clone()
+            };
+            sum.broadcast_mul(&s)
+        } else {
+            Ok(sum)
         }
     }
 }

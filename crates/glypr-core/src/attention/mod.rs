@@ -94,28 +94,88 @@ impl SelfAttention {
         let k = self.k_proj.forward(hidden_states)?;
         let v = self.v_proj.forward(hidden_states)?;
 
-        // Reshape to [batch, num_heads, seq_len, head_dim]
-        let q = q
-            .reshape((batch, seq_len, self.num_attention_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let k = k
-            .reshape((batch, seq_len, self.num_key_value_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let v = v
-            .reshape((batch, seq_len, self.num_key_value_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
+        // Fused Q/K RMSNorm + RoPE + Transpose and V RMSNorm + Transpose on Metal BF16
+        #[cfg(feature = "metal")]
+        let (q, k, v) = if q.device().is_metal()
+            && q.dtype() == candle_core::DType::BF16
+            && self.q_norm.weight().is_some()
+            && self.k_norm.weight().is_some()
+        {
+            let q = crate::metal_kernels::fused_metal_qk_rmsnorm_rope_transpose(
+                &q,
+                self.q_norm.weight().unwrap(),
+                cos,
+                sin,
+                batch,
+                seq_len,
+                self.num_attention_heads,
+                self.head_dim,
+                self.q_norm.eps(),
+            )?;
+            let k = crate::metal_kernels::fused_metal_qk_rmsnorm_rope_transpose(
+                &k,
+                self.k_norm.weight().unwrap(),
+                cos,
+                sin,
+                batch,
+                seq_len,
+                self.num_key_value_heads,
+                self.head_dim,
+                self.k_norm.eps(),
+            )?;
+            let v = crate::metal_kernels::fused_metal_v_rmsnorm_transpose(
+                &v,
+                self.v_norm.weight(),
+                batch,
+                seq_len,
+                self.num_key_value_heads,
+                self.head_dim,
+                self.v_norm.eps(),
+            )?;
+            (q, k, v)
+        } else {
+            // Normalize while [batch, seq_len, num_heads, head_dim] is still contiguous, then transpose
+            let q = self
+                .q_norm
+                .forward(&q.reshape((batch, seq_len, self.num_attention_heads, self.head_dim))?)?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let k = self
+                .k_norm
+                .forward(&k.reshape((batch, seq_len, self.num_key_value_heads, self.head_dim))?)?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let v = self
+                .v_norm
+                .forward(&v.reshape((batch, seq_len, self.num_key_value_heads, self.head_dim))?)?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let q = apply_rotary_pos_emb(&q, cos, sin)?;
+            let k = apply_rotary_pos_emb(&k, cos, sin)?;
+            (q, k, v)
+        };
 
-        // Normalization on Q, K, V
-        let q = self.q_norm.forward(&q)?;
-        let k = self.k_norm.forward(&k)?;
-        let v = self.v_norm.forward(&v)?;
-
-        // Apply RoPE
-        let q = apply_rotary_pos_emb(&q, cos, sin)?;
-        let k = apply_rotary_pos_emb(&k, cos, sin)?;
+        #[cfg(not(feature = "metal"))]
+        let (q, k, v) = {
+            let q = self
+                .q_norm
+                .forward(&q.reshape((batch, seq_len, self.num_attention_heads, self.head_dim))?)?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let k = self
+                .k_norm
+                .forward(&k.reshape((batch, seq_len, self.num_key_value_heads, self.head_dim))?)?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let v = self
+                .v_norm
+                .forward(&v.reshape((batch, seq_len, self.num_key_value_heads, self.head_dim))?)?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let q = apply_rotary_pos_emb(&q, cos, sin)?;
+            let k = apply_rotary_pos_emb(&k, cos, sin)?;
+            (q, k, v)
+        };
 
         // Pluggable Attention Computation
         let context = match self.attention_mode {

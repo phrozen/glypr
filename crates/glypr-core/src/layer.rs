@@ -29,21 +29,23 @@ impl EncoderLayer {
         let residual = hidden_states;
         let normed = self.input_layernorm.forward(hidden_states)?;
         let attn_out = self.self_attn.forward(&normed, attention_mask, cos, sin)?;
-        let post_attn = self.post_attention_layernorm.forward(&attn_out)?;
-        let hidden_states = residual.add(&post_attn)?;
+        let hidden_states = self
+            .post_attention_layernorm
+            .forward_residual_add(&attn_out, residual, None)?;
 
         // 2. Feedforward Block
         let residual = &hidden_states;
         let pre_ffn = self.pre_feedforward_layernorm.forward(&hidden_states)?;
         let mlp_out = self.mlp.forward(&pre_ffn)?;
-        let post_ffn = self.post_feedforward_layernorm.forward(&mlp_out)?;
-        let hidden_states = residual.add(&post_ffn)?;
+        let hidden_states = self
+            .post_feedforward_layernorm
+            .forward_residual_add(&mlp_out, residual, None)?;
 
-        // 3. Per-Layer Embeddings (PLE) Block
-        let hidden_states = self.ple_block.forward(&hidden_states, per_layer_input)?;
-
-        // 4. Layer scalar multiplication
-        let scalar = self.layer_scalar.to_dtype(hidden_states.dtype())?;
-        hidden_states.broadcast_mul(&scalar)
+        // 3. Per-Layer Embeddings (PLE) Block + Layer scalar multiplication
+        self.ple_block.forward_with_scalar(
+            &hidden_states,
+            per_layer_input,
+            Some(&self.layer_scalar),
+        )
     }
 }

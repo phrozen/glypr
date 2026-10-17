@@ -2014,7 +2014,8 @@ template <
   VBlockLoader loader_v(
       V_start, params->V_strides[2], Vs, simd_group_id, simd_lane_id);
 
-  TransformScale<T> ts(static_cast<T>(params->scale * 1.44269504089));
+  const AccumType score_scale =
+      static_cast<AccumType>(params->scale) * static_cast<AccumType>(1.44269504089f);
 
   // Prepare MMA tiles
   constexpr short kFragSize = 8; // MMAFrag size
@@ -2057,13 +2058,12 @@ template <
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  // Load Q blocks apply scale
+  // Load Q blocks
   if (!align_Q && int(tid.x) == (params->NQ_aligned)) {
     loader_q.load_safe(short2(BD, params->qL_rem));
   } else {
     loader_q.load_unsafe();
   }
-  loader_q.apply_inplace_op(ts);
 
   // Init row reduction variables
   constexpr short kRowsPT = decltype(Stile)::kRowsPerThread;
@@ -2079,7 +2079,7 @@ template <
 
   // Loop over KV seq length (tile-skipped for sliding window)
   for (int kb = kb_start; kb < kb_lim; kb++) {
-    // Load K block and apply scale
+    // Load K block
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (!align_K && kb == (params->NK_aligned)) {
       loader_k.load_safe(short2(BD, params->kL_rem));
@@ -2104,6 +2104,17 @@ template <
       simdgroup_barrier(mem_flags::mem_none);
 
       tile_matmad(Stile, Qtile, Ktile, Stile);
+    }
+
+    STEEL_PRAGMA_UNROLL
+    for (short i = 0; i < decltype(Stile)::kTileRows; i++) {
+      STEEL_PRAGMA_UNROLL
+      for (short j = 0; j < decltype(Stile)::kTileCols; j++) {
+        STEEL_PRAGMA_UNROLL
+        for (short jj = 0; jj < decltype(Stile)::MMAFrag_t::kElemsPerFrag; jj++) {
+          Stile.frag_at(i, j)[jj] *= score_scale;
+        }
+      }
     }
 
     // Mask out length sequence

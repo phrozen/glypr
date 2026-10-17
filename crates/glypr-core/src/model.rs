@@ -425,10 +425,10 @@ impl EmbeddingGemma2Model {
             );
         }
 
-        // 2. Per-layer embeddings: [batch, seq_len, 24, 512]
-        // Compute unnormalized projections in BF16, then normalize slice on demand in layer loop
-        // to avoid allocating gigabytes of intermediate float32 tensors during 4D RMSNorm.
-        let per_layer_projections = self.ple.project(inputs_embeds)?;
+        // 2. Per-layer embeddings: [24, batch, seq_len, 512]
+        // Single-pass 4D PLE projection, scaling, RMSNorm, and permutation so each layer's
+        // .get(i) slice is already normalized and 100% contiguous.
+        let per_layer_inputs = self.ple.project_and_norm_per_layer(inputs_embeds)?;
 
         // 3. Precompute RoPE (cos, sin)
         let (cos_sliding, sin_sliding) = self.rope_sliding.get_cos_sin(seq_len, &self.device, self.dtype)?;
@@ -451,9 +451,8 @@ impl EmbeddingGemma2Model {
             let layer = &self.layers[i];
             let layer_type = self.config.layer_types[i];
 
-            // Slice per_layer_projections for layer i: [batch, seq_len, 512] and normalize on-demand
-            let per_layer_raw = per_layer_projections.narrow(2, i, 1)?.squeeze(2)?;
-            let per_layer_slice = self.ple.norm.forward(&per_layer_raw)?;
+            // Contiguous zero-copy slice for layer i: [batch, seq_len, 512]
+            let per_layer_slice = per_layer_inputs.get(i)?;
 
             let (cos, sin, mask) = match layer_type {
                 LayerType::SlidingAttention => (&cos_sliding, &sin_sliding, sliding_mask.as_ref()),

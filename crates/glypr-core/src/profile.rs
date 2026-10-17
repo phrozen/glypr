@@ -5,7 +5,6 @@ use std::time::Instant;
 use crate::attention::repeat_kv;
 use crate::config::LayerType;
 use crate::model::EmbeddingGemma2Model;
-use crate::ple::gelu_tanh;
 use crate::rope::apply_rotary_pos_emb;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,10 +75,10 @@ impl EmbeddingGemma2Model {
         sync(&inputs_embeds)?;
         let embed_tokens_ms = elapsed_ms(t0);
 
-        // 2. Per-layer embeddings: [batch, seq_len, 24, 512]
+        // 2. Per-layer embeddings: [24, batch, seq_len, 512]
         let t0 = Instant::now();
-        let per_layer_projections = self.ple.project(&inputs_embeds)?;
-        sync(&per_layer_projections)?;
+        let per_layer_inputs = self.ple.project_and_norm_per_layer(&inputs_embeds)?;
+        sync(&per_layer_inputs)?;
         let ple_input_ms = elapsed_ms(t0);
 
         // 3. Precompute RoPE (cos, sin)
@@ -115,8 +114,7 @@ impl EmbeddingGemma2Model {
             let layer_type = self.config.layer_types[i];
             let is_sliding = layer_type == LayerType::SlidingAttention;
 
-            let p_raw = per_layer_projections.narrow(2, i, 1)?.squeeze(2)?;
-            let per_layer_slice = self.ple.norm.forward(&p_raw)?;
+            let per_layer_slice = per_layer_inputs.get(i)?;
             let (cos, sin, mask) = match layer_type {
                 LayerType::SlidingAttention => (&cos_sliding, &sin_sliding, sliding_mask.as_ref()),
                 LayerType::FullAttention => (&cos_full, &sin_full, full_mask.as_ref()),
@@ -134,28 +132,96 @@ impl EmbeddingGemma2Model {
             let q = layer.self_attn.q_proj.forward(&normed)?;
             let k = layer.self_attn.k_proj.forward(&normed)?;
             let v = layer.self_attn.v_proj.forward(&normed)?;
-            let q = q
-                .reshape((batch, seq_len, layer.self_attn.num_attention_heads, layer.self_attn.head_dim))?
-                .transpose(1, 2)?
-                .contiguous()?;
-            let k = k
-                .reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?
-                .transpose(1, 2)?
-                .contiguous()?;
-            let v = v
-                .reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?
-                .transpose(1, 2)?
-                .contiguous()?;
             sync(&v)?;
             let qkv_proj_ms = elapsed_ms(t0);
 
-            // QK Norm + RoPE
+            // QK Norm + RoPE + Transpose
             let t0 = Instant::now();
-            let q = layer.self_attn.q_norm.forward(&q)?;
-            let k = layer.self_attn.k_norm.forward(&k)?;
-            let v = layer.self_attn.v_norm.forward(&v)?;
-            let q = apply_rotary_pos_emb(&q, cos, sin)?;
-            let k = apply_rotary_pos_emb(&k, cos, sin)?;
+            #[cfg(feature = "metal")]
+            let (q, k, v) = if q.device().is_metal()
+                && q.dtype() == candle_core::DType::BF16
+                && layer.self_attn.q_norm.weight().is_some()
+                && layer.self_attn.k_norm.weight().is_some()
+            {
+                let q = crate::metal_kernels::fused_metal_qk_rmsnorm_rope_transpose(
+                    &q,
+                    layer.self_attn.q_norm.weight().unwrap(),
+                    cos,
+                    sin,
+                    batch,
+                    seq_len,
+                    layer.self_attn.num_attention_heads,
+                    layer.self_attn.head_dim,
+                    layer.self_attn.q_norm.eps(),
+                )?;
+                let k = crate::metal_kernels::fused_metal_qk_rmsnorm_rope_transpose(
+                    &k,
+                    layer.self_attn.k_norm.weight().unwrap(),
+                    cos,
+                    sin,
+                    batch,
+                    seq_len,
+                    layer.self_attn.num_key_value_heads,
+                    layer.self_attn.head_dim,
+                    layer.self_attn.k_norm.eps(),
+                )?;
+                let v = crate::metal_kernels::fused_metal_v_rmsnorm_transpose(
+                    &v,
+                    layer.self_attn.v_norm.weight(),
+                    batch,
+                    seq_len,
+                    layer.self_attn.num_key_value_heads,
+                    layer.self_attn.head_dim,
+                    layer.self_attn.v_norm.eps(),
+                )?;
+                (q, k, v)
+            } else {
+                let q = layer
+                    .self_attn
+                    .q_norm
+                    .forward(&q.reshape((batch, seq_len, layer.self_attn.num_attention_heads, layer.self_attn.head_dim))?)?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                let k = layer
+                    .self_attn
+                    .k_norm
+                    .forward(&k.reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?)?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                let v = layer
+                    .self_attn
+                    .v_norm
+                    .forward(&v.reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?)?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                let q = apply_rotary_pos_emb(&q, cos, sin)?;
+                let k = apply_rotary_pos_emb(&k, cos, sin)?;
+                (q, k, v)
+            };
+            #[cfg(not(feature = "metal"))]
+            let (q, k, v) = {
+                let q = layer
+                    .self_attn
+                    .q_norm
+                    .forward(&q.reshape((batch, seq_len, layer.self_attn.num_attention_heads, layer.self_attn.head_dim))?)?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                let k = layer
+                    .self_attn
+                    .k_norm
+                    .forward(&k.reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?)?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                let v = layer
+                    .self_attn
+                    .v_norm
+                    .forward(&v.reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?)?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                let q = apply_rotary_pos_emb(&q, cos, sin)?;
+                let k = apply_rotary_pos_emb(&k, cos, sin)?;
+                (q, k, v)
+            };
             sync(&k)?;
             let qk_norm_rope_ms = elapsed_ms(t0);
 
@@ -207,8 +273,9 @@ impl EmbeddingGemma2Model {
 
             // Post-attn norm + residual add
             let t0 = Instant::now();
-            let post_attn = layer.post_attention_layernorm.forward(&attn_out)?;
-            let hidden_states_next = residual.add(&post_attn)?;
+            let hidden_states_next = layer
+                .post_attention_layernorm
+                .forward_residual_add(&attn_out, &residual, None)?;
             sync(&hidden_states_next)?;
             let post_attn_norm_ms = elapsed_ms(t0);
 
@@ -221,26 +288,25 @@ impl EmbeddingGemma2Model {
 
             // MLP
             let t0 = Instant::now();
-            let gate = layer.mlp.gate_proj.forward(&pre_ffn)?;
-            let gate_act = gelu_tanh(&gate)?;
-            let up = layer.mlp.up_proj.forward(&pre_ffn)?;
-            let gated = gate_act.broadcast_mul(&up)?;
-            let mlp_out = layer.mlp.down_proj.forward(&gated)?;
+            let mlp_out = layer.mlp.forward(&pre_ffn)?;
             sync(&mlp_out)?;
             let mlp_ms = elapsed_ms(t0);
 
             // Post FFN norm + residual add
             let t0 = Instant::now();
-            let post_ffn = layer.post_feedforward_layernorm.forward(&mlp_out)?;
-            let hidden_states_next = residual.add(&post_ffn)?;
+            let hidden_states_next = layer
+                .post_feedforward_layernorm
+                .forward_residual_add(&mlp_out, &residual, None)?;
             sync(&hidden_states_next)?;
             let post_ffn_norm_ms = elapsed_ms(t0);
 
             // PLE Block + Layer scalar
             let t0 = Instant::now();
-            let ple_out = layer.ple_block.forward(&hidden_states_next, &per_layer_slice)?;
-            let scalar = layer.layer_scalar.to_dtype(ple_out.dtype())?;
-            hidden_states = ple_out.broadcast_mul(&scalar)?;
+            hidden_states = layer.ple_block.forward_with_scalar(
+                &hidden_states_next,
+                &per_layer_slice,
+                Some(&layer.layer_scalar),
+            )?;
             sync(&hidden_states)?;
             let ple_block_ms = elapsed_ms(t0);
 
