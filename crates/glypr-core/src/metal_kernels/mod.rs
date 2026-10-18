@@ -620,7 +620,6 @@ pub fn fused_metal_geglu_gate_up(gate_up: &Tensor) -> Result<Tensor> {
     let total_elements = gate_up.elem_count() / 2;
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "geglu_gate_up_bf16")?;
     let out = Tensor::zeros(out_dims, DType::BF16, gate_up.device())?;
-    let total_i32 = total_elements as i32;
     let d_i32 = d as i32;
 
     {
@@ -646,12 +645,12 @@ pub fn fused_metal_geglu_gate_up(gate_up: &Tensor) -> Result<Tensor> {
 
         enc_ref.set_input_buffer(0, Some(gu_buf), gu_offset);
         enc_ref.set_output_buffer(1, Some(out_buf), out_offset);
-        enc_ref.set_bytes(2, &total_i32);
-        enc_ref.set_bytes(3, &d_i32);
+        enc_ref.set_bytes(2, &d_i32);
 
         let thread_group_size = 256;
-        let num_groups = (total_elements + thread_group_size - 1) / thread_group_size;
-        let grid_dims = MTLSize { width: num_groups, height: 1, depth: 1 };
+        let num_rows = total_elements / d;
+        let num_groups_x = (d + thread_group_size - 1) / thread_group_size;
+        let grid_dims = MTLSize { width: num_groups_x, height: num_rows, depth: 1 };
         let group_dims = MTLSize { width: thread_group_size, height: 1, depth: 1 };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
     }

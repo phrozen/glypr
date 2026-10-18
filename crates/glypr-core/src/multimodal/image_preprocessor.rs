@@ -135,6 +135,19 @@ pub fn compute_image_total_tokens(
     Ok(soft_tokens + 2)
 }
 
+/// Precomputed 256-entry lookup table for bit-exact pixel normalization: 2 * (px / 255.0 - 0.5)
+const fn make_pixel_norm_lut() -> [f32; 256] {
+    let mut lut = [0.0f32; 256];
+    let mut i = 0;
+    while i < 256 {
+        lut[i] = 2.0 * ((i as f32) / 255.0 - 0.5);
+        i += 1;
+    }
+    lut
+}
+
+pub const PIXEL_NORM_LUT: [f32; 256] = make_pixel_norm_lut();
+
 /// Preprocess image matching Google Gemma 4 Vision Image Processor
 pub fn preprocess_image(
     img: &DynamicImage,
@@ -170,21 +183,19 @@ pub fn preprocess_image(
     let num_soft_tokens = num_patches / k_squared;
 
     // 3. Extract patches and normalize pixels: 2 * (px / 255.0 - 0.5)
-    // Precompute 256-entry lookup table for bit-exact pixel normalization in L1 cache
-    let mut lut = [0.0f32; 256];
-    for i in 0..256 {
-        lut[i] = 2.0 * ((i as f32) / 255.0 - 0.5);
-    }
-
+    // Extract patch rows in parallel directly into preallocated buffer without intermediate allocations
+    let total_pixels = num_patches * patch_size * patch_size * 3;
+    let mut pixel_values = vec![0.0f32; total_pixels];
+    let patch_row_len = patch_width * patch_size * patch_size * 3;
     let row_stride = target_width * 3;
     let raw = rgb.as_raw();
 
-    // Extract patch rows in parallel across CPU threads using Rayon
-    let patch_rows_data: Vec<Vec<f32>> = (0..patch_height)
-        .into_par_iter()
-        .map(|py| {
-            let mut row_pixels = Vec::with_capacity(patch_width * patch_size * patch_size * 3);
+    pixel_values
+        .par_chunks_exact_mut(patch_row_len)
+        .enumerate()
+        .for_each(|(py, row_pixels)| {
             let start_y = py * patch_size;
+            let mut out_idx = 0;
 
             for px in 0..patch_width {
                 let start_x_bytes = px * patch_size * 3;
@@ -193,18 +204,12 @@ pub fn preprocess_image(
                     let row_offset = img_y * row_stride + start_x_bytes;
                     let slice = &raw[row_offset..row_offset + patch_size * 3];
                     for &b in slice {
-                        row_pixels.push(lut[b as usize]);
+                        row_pixels[out_idx] = PIXEL_NORM_LUT[b as usize];
+                        out_idx += 1;
                     }
                 }
             }
-            row_pixels
-        })
-        .collect();
-
-    let mut pixel_values = Vec::with_capacity(num_patches * patch_size * patch_size * 3);
-    for mut row in patch_rows_data {
-        pixel_values.append(&mut row);
-    }
+        });
 
     let mut position_ids = Vec::with_capacity(num_patches * 2);
     for py in 0..patch_height {
