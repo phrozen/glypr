@@ -118,18 +118,10 @@ fn get_fft_512_twiddles() -> &'static [(f32, f32); 511] {
         let mut offset = 0;
         while len <= 512 {
             let half = len / 2;
-            let angle = -std::f32::consts::PI / (half as f32);
-            let w_step_re = angle.cos();
-            let w_step_im = angle.sin();
-
-            let mut w_re = 1.0f32;
-            let mut w_im = 0.0f32;
+            let step_angle = -std::f64::consts::PI / (half as f64);
             for k in 0..half {
-                table[offset + k] = (w_re, w_im);
-                let next_w_re = w_re * w_step_re - w_im * w_step_im;
-                let next_w_im = w_re * w_step_im + w_im * w_step_re;
-                w_re = next_w_re;
-                w_im = next_w_im;
+                let angle = step_angle * (k as f64);
+                table[offset + k] = (angle.cos() as f32, angle.sin() as f32);
             }
             offset += half;
             len <<= 1;
@@ -485,10 +477,9 @@ mod tests {
                 max_err = err;
             }
         }
-        println!("Current FFT-512 twiddle max magnitude error: {:e}", max_err);
-        // Under Phase 2, this will be hardened to < 1e-6 via direct 64-bit trigonometry.
-        // For Phase 0 baseline characterization, verify error is bounded.
-        assert!(max_err < 1e-3, "Twiddle drift exceeded bound: {:e}", max_err);
+        println!("Phase 2 FFT-512 twiddle max magnitude error: {:e}", max_err);
+        // Phase 2: Direct 64-bit trigonometry guarantees max magnitude error < 1e-6 (near single-float epsilon)
+        assert!(max_err < 1e-6, "Twiddle drift exceeded bound: {:e}", max_err);
     }
 }
 

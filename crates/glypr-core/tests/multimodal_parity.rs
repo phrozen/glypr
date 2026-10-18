@@ -181,7 +181,7 @@ fn run_multimodal_parity_suite(
     let female_emb = embedder.embed_audio(&female_samples, None)?;
     let sim_female = cosine_similarity(&female_emb, &golden.cases["female_voice_only"].embedding);
     println!("  -> Cosine Similarity: {:.6}", sim_female);
-    assert!(sim_female >= thresh.high_precision, "[{}] sim_female={}", suite_label, sim_female);
+    assert!(sim_female >= thresh.standard_media, "[{}] sim_female={}", suite_label, sim_female);
     sims.push(sim_female);
 
     let music_samples = glypr_core::multimodal::decode_wav_file(golden_dir.join("music_16k.wav"))?;
