@@ -110,23 +110,27 @@ for (uint i = lane_id; i < dim; i += 32) {
 ```
 
 
-#### 2. Fused GeGLU with Numerical Clamping (`geglu_bf16`)
+#### 2. Fused GeGLU with 2D Grid Dispatch & Numerical Clamping (`geglu_gate_up_bf16`)
 EmbeddingGemma 2 utilizes the gated activation:
 $$\text{GeGLU}(gate, up) = \text{GELU}(gate) \odot up$$
 
 Standard execution materializes 10 intermediate tensor allocations across Candle operations (`mul`, `pow`, `add`, `tanh`, `mul`, `mul`). In Glypr, the gate and up projections are read concurrently from GPU memory, activated, and multiplied directly into the output buffer:
 
 ```metal
-float g = float(gate_row[i]);
-float u = float(up_row[i]);
+float g = float(gate_up[base]);
+float u = float(gate_up[base + size_t(D)]);
 
 // Numerical stability clamp preventing float overflow in deep layers
 float g_clamped = clamp(g, -10.0f, 10.0f);
 float inner = 0.79788456f * (g_clamped + 0.044715f * g_clamped * g_clamped * g_clamped);
 float gelu = 0.5f * g_clamped * (1.0f + metal::tanh(inner));
 
-out_row[i] = bfloat(gelu * u);
+out[out_idx] = bfloat(gelu * u);
 ```
+
+**2D Grid Dispatch (v0.2.1):** Rather than dispatching a flattened 1D thread grid that forces every thread to compute `row = id / D` and `col = id % D` (16–32 ALU cycles per thread), `geglu_gate_up_bf16` is dispatched as a 2D grid:
+$$\text{grid} = \left(\frac{D + 255}{256}, \text{num\_rows}, 1\right), \quad \text{group} = (256, 1, 1)$$
+Threads map directly to `col = id.x` and `row = id.y` in hardware registers, eliminating over 245 million integer division and modulo operations per 8K sequence.
 
 ---
 
@@ -171,8 +175,15 @@ For batch tokens ($M > 1$), `crates/glypr-core/src/metal_kernels/m5_ops.metal` e
 - **Single SIMD-Group Scoped Reductions:** Metal 4's `mpp::tensor_ops::reduce_rows` requires `execution_simdgroup`. Launching `WM=4` SIMD groups per threadgroup and partitioning query rows into `BQ_SG = 16` gives each SIMD group an isolated row slice, executing online softmax max/sum reductions directly in hardware without threadgroup memory barriers.
 - **Left-Input Cooperative Tensors:** Chaining $S = Q \times K^T$ into $O += P \times V$ utilizes `pv_op.template get_left_input_cooperative_tensor<bfloat, bfloat, float>(sT_bf16)` directly in registers.
 - **Dual-Tile Column Slicing for $d_{\text{head}}=512$:** To satisfy Metal 4's $N \le 256$ cooperative tensor limit, the kernel splits $P \times V$ into dual 256-column tiles (`oT0` and `oT1`), preserving four-9s cosine parity ($> 0.99986$) without clamping.
+- **Hardware Tile Alignment & NaN Fast-Math Hardening (v0.2.1):** M5 NAX operations require static $16 \times 32$ cooperative tensor tiles. Inputs with unaligned sequence lengths ($s \pmod{64} \neq 0$) are cleanly routed to `steel_attention_sliding` while power-of-two lengths (64, 128, ..., 8192) execute on NAX, preventing out-of-bounds cooperative tensor loads. Fast-math evaluation in online softmax subtraction is protected with `isinf` guards against `-inf - (-inf) = NaN`.
 
 **M5 Empirical Impact:** 8,192-token Q8_0 latency dropped from **$814.97\text{ ms} \to 627.20\text{ ms}$** (**$1.30\times$ speedup**), while full 292-vector suite time dropped to **$3.50\text{ s}$** (**$1.64\times$ faster than Python PyTorch MPS**).
+
+---
+
+### F. Device-Level MTLLibrary Caching & Startup Hygiene (v0.2.1)
+
+In v0.2.1, `glypr-core` caches compiled `metal::Library` instances keyed by device pointer in a thread-safe `LIBRARY_CACHE`. Instead of compiling the 818-line fused kernel source 15 times on cache misses for each pipeline function, compilation occurs exactly once per device. Subsequent pipeline requests query `library.get_function(...)` directly, dropping iteration 0 cold-start latency 100x from **7,060 ms $\to$ 66.7 ms**. All device capability probing is additionally wrapped in `with_autorelease_pool` to guarantee clean release of Objective-C reflection metadata.
 
 ---
 
