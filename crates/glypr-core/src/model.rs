@@ -535,30 +535,31 @@ impl EmbeddingGemma2Model {
         truncate_dim: Option<usize>,
     ) -> Result<Tensor> {
         let (_batch, _seq_len, hidden_dim) = token_embeddings.dims3()?;
+        let orig_dtype = token_embeddings.dtype();
 
-        let pooled = if let Some(mask) = attention_mask {
-            // mask: [batch, seq_len] -> [batch, seq_len, 1]
-            let mask_typed = mask.to_dtype(token_embeddings.dtype())?.unsqueeze(2)?;
-            let masked = token_embeddings.broadcast_mul(&mask_typed)?;
-            let sum_embeds = masked.sum(1)?; // [batch, hidden_dim]
-            let sum_mask = mask_typed.sum(1)?; // [batch, 1]
+        // Accumulate in F32 to preserve numerical precision across long sequences (up to 8,192 tokens)
+        // avoiding BF16 7-bit mantissa swamping during summation.
+        let embeds_f32 = if orig_dtype != DType::F32 {
+            token_embeddings.to_dtype(DType::F32)?
+        } else {
+            token_embeddings.clone()
+        };
+
+        let pooled_f32 = if let Some(mask) = attention_mask {
+            // mask: [batch, seq_len] -> [batch, seq_len, 1] in F32
+            let mask_f32 = mask.to_dtype(DType::F32)?.unsqueeze(2)?;
+            let masked = embeds_f32.broadcast_mul(&mask_f32)?;
+            let sum_embeds = masked.sum(1)?; // [batch, hidden_dim] in F32
+            let sum_mask = mask_f32.sum(1)?; // [batch, 1] in F32
 
             // Ensure non-zero denominator
-            let sum_mask = sum_mask.to_dtype(DType::F32)?;
-            let sum_mask = Tensor::clamp(&sum_mask, 1e-9f32, f32::MAX)?.to_dtype(token_embeddings.dtype())?;
+            let sum_mask = Tensor::clamp(&sum_mask, 1e-9f32, f32::MAX)?;
             sum_embeds.broadcast_div(&sum_mask)?
         } else {
-            token_embeddings.mean(1)?
+            embeds_f32.mean(1)?
         };
 
         // L2 Normalization in F32
-        let orig_dtype = pooled.dtype();
-        let pooled_f32 = if orig_dtype != DType::F32 {
-            pooled.to_dtype(DType::F32)?
-        } else {
-            pooled
-        };
-
         let norm_f32 = pooled_f32.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?;
         let norm_clamped = Tensor::clamp(&norm_f32, 1e-12f32, f32::MAX)?;
         let mut normalized_f32 = pooled_f32.broadcast_div(&norm_clamped)?;
