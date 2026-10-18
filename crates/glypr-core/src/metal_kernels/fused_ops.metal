@@ -323,15 +323,15 @@ kernel void ple_scale_rms_norm_transpose_bf16(
 kernel void geglu_gate_up_bf16(
     device const MLX_BF16* gate_up [[buffer(0)]],
     device MLX_BF16* out [[buffer(1)]],
-    constant int& total_elements [[buffer(2)]],
-    constant int& D [[buffer(3)]],
-    uint id [[thread_position_in_grid]]
+    constant int& D [[buffer(2)]],
+    uint2 id [[thread_position_in_grid]]
 ) {
-    if (int(id) >= total_elements) return;
+    uint col = id.x;
+    uint row = id.y;
+    if (col >= uint(D)) return;
 
-    int row = int(id) / D;
-    int col = int(id) % D;
     size_t base = size_t(row) * size_t(2 * D) + size_t(col);
+    size_t out_idx = size_t(row) * size_t(D) + size_t(col);
 
     float g = float(gate_up[base]);
     float u = float(gate_up[base + size_t(D)]);
@@ -342,7 +342,7 @@ kernel void geglu_gate_up_bf16(
     float tanh_val = metal::tanh(inner);
     float act = 0.5f * g * (1.0f + tanh_val);
 
-    out[id] = MLX_BF16(act * u);
+    out[out_idx] = MLX_BF16(act * u);
 }
 
 // =========================================================================
