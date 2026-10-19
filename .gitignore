@@ -20,3 +20,6 @@ tests/cards/
 
 # Local optimization plan handoff
 OPTIMIZATION_PLAN.md
+
+# Exported Core ML and local model artifacts
+models/

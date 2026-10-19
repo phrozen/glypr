@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "av>=19.0.1",
+    "coremltools>=9.0",
     "numpy>=2.5.3",
     "pillow>=12.3.0",
     "pytest>=9.1.1",
