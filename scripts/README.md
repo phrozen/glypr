@@ -33,12 +33,14 @@ Standard HuggingFace model classes (`Gemma4VisionModel`, `EmbeddingGemma2Model`)
 
 | Model | Architecture | Static Input Shape | Output Shape | Weights Size (`.mlmodelc`) | Parity vs PyTorch FP32 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Vision Tower** | 170M SigLIP / Gemma-4 ViT (16 layers, 12 heads) | `pixel_values: [1, 1134, 768]` (in `[-1.0, 1.0]`) | `[1, 126, 512]` | **147 MB** | **`0.999106` Cosine Sim** |
+| **Vision Tower (Budget 140)** | 170M SigLIP / Gemma-4 ViT (16 layers, 12 heads) | `pixel_values: [1, 1134, 768]` (in `[-1.0, 1.0]`) | `[1, 126, 512]` | **147 MB** | **`0.999106` Cosine Sim** |
+| **Vision Tower (Budget 280)** | 170M SigLIP / Gemma-4 ViT (16 layers, 12 heads) | `pixel_values: [1, 2394, 768]` (in `[-1.0, 1.0]`) | `[1, 266, 512]` | **148 MB** | **`0.999306` Cosine Sim** |
 | **Text Backbone** | 270M Gemma 2 (24 layers, 4 Q heads, 1-2 KV heads) | `input_ids: [1, 512]` (int32), `attention_mask: [1, 512]` (fp32) | `[1, 768]` | **261 MB** | **`0.999684` Cosine Sim** |
 | **Combined** | Resident Dual-Engine | — | — | **408 MB total** | **`> 0.999` Cosine Sim** |
 
 > [!NOTE]
-> The Vision Tower input preset `140-mtg` ($42 \times 27 = 1,134$ patches) exactly corresponds to Glypr's aspect-ratio-preserving preprocessor on $480 \times 680$ MTG card images ($672 \times 432$ px), outputting $14 \times 9 = 126$ soft tokens.
+> - `140-mtg` ($42 \times 27 = 1,134$ patches) corresponds to $480 \times 680$ MTG card images ($672 \times 432$ px), outputting $14 \times 9 = 126$ soft tokens.
+> - `280-mtg` ($57 \times 42 = 2,394$ patches) corresponds to $480 \times 680$ MTG card images ($912 \times 672$ px), outputting $19 \times 14 = 266$ soft tokens.
 
 ---
 
@@ -55,13 +57,17 @@ uv add coremltools
 uv run python scripts/export_coreml.py --target all --output-dir models/coreml
 ```
 
-### Vision Tower Only (MTG Preset vs Standard Preset)
+### Vision Tower (Budget 140 vs Budget 280 Presets)
 ```bash
-# MTG Card 480x680 optimized preset (1134 patches -> 126 soft tokens)
+# Budget 140: MTG Card 480x680 optimized preset (1134 patches -> 126 soft tokens)
 uv run python scripts/export_coreml.py --target vision --vision-preset 140-mtg --output-dir models/coreml
 
-# Standard 140 budget preset (1260 patches -> 140 soft tokens)
+# Budget 280: MTG Card 480x680 higher resolution preset (2394 patches -> 266 soft tokens)
+uv run python scripts/export_coreml.py --target vision --vision-preset 280-mtg --output-dir models/coreml
+
+# Standard budget presets
 uv run python scripts/export_coreml.py --target vision --vision-preset 140-std --output-dir models/coreml
+uv run python scripts/export_coreml.py --target vision --vision-preset 280-std --output-dir models/coreml
 ```
 
 ### Text Backbone Only (Static 512 Tokens)
