@@ -151,3 +151,30 @@ Evaluated on multi-core CPU using auto-dispatched SIMD (ARM NEON / x86 AVX2/AVX-
 | **2,048 tokens** | GGUF BF16 | **$2,815.3\text{ ms}$** | **$727\text{ tok/s}$** | $1,763.6\text{ MB}$ |
 | **4,096 tokens** | GGUF Q8_0 | $7,086.9\text{ ms}$ | $578\text{ tok/s}$ | **$2,054.6\text{ MB}$** |
 | **4,096 tokens** | GGUF BF16 | **$6,222.3\text{ ms}$** | **$658\text{ tok/s}$** | $2,273.1\text{ MB}$ |
+
+---
+
+## 6. Apple Neural Engine (ANE) Hardware Scorecard & Mathematical Parity
+
+Introduced in **v0.3.0**, `glypr` measures dedicated hardware acceleration for portrait vision encoding and 512-token resident text retrieval on the Apple Neural Engine (ANE) vs Apple Silicon Metal GPU:
+
+### A. Vision Tower Execution (Single Image)
+| Modality / Budget | Input Patches | Soft Tokens | Apple Neural Engine (ANE) | Apple Silicon Metal GPU (ViT) | ANE Speedup | Parity vs GPU mmproj |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Budget 140 Portrait** | 1,134 patches | 126 tokens | **11.17 ms (89.5 img/s)** | 24.03 ms (41.6 img/s) | **2.2× faster** | **`0.999928` Cosine Sim** |
+| **Budget 280 Portrait** | 2,394 patches | 266 tokens | **23.19 ms (43.1 img/s)** | 55.30 ms (18.1 img/s) | **2.4× faster** | **`0.999928` Cosine Sim** |
+
+### B. Resident Text Backbone (Static 512 Tokens)
+| Sequence Length | Hardware Engine | Compute Units | Latency | Throughput | Relative Speedup |
+| :--- | :--- | :--- | :---: | :---: | :---: |
+| **16 tokens** | Apple Silicon Metal GPU | GPU | $4.21\text{ ms}$ | $237.5\text{ q/s}$ | 1.96× |
+| **16 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | $8.24\text{ ms}$ | $121.3\text{ q/s}$ | 1.00× (ref) |
+| **128 tokens** | Apple Silicon Metal GPU | GPU | $7.85\text{ ms}$ | $127.4\text{ q/s}$ | 1.05× |
+| **128 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | **$8.24\text{ ms}$** | **$121.3\text{ q/s}$** | 1.00× |
+| **512 tokens (RAG chunk)** | Apple Silicon Metal GPU | GPU | $21.81\text{ ms}$ | $45.8\text{ q/s}$ | 1.00× (ref) |
+| **512 tokens (RAG chunk)** | **Apple Neural Engine (ANE)** | **ANE (W8A16)** | **$8.24\text{ ms}$** 🚀 | **$121.3\text{ q/s}$** | **2.6× faster** |
+
+### C. End-to-End Mathematical Parity
+Across golden test vectors and realistic multimodal inputs:
+- Hybrid execution (ANE Vision Tower + GPU Metal Text Backbone) achieves **`0.999928`** cosine similarity against the pure GPU Metal reference.
+- Standalone Core ML text backbone produces zero NaNs and exact $1.0$ unit norm vectors.

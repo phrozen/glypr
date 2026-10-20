@@ -1,6 +1,6 @@
-# Dual-Track Hardware Acceleration Architecture
+# Tri-Track Hardware Acceleration Architecture
 
-This document provides a comprehensive technical guide to the **Dual-Track Hardware Acceleration** subsystem in Glypr (`glypr-core`). It covers the design, mathematical formulation, numerical stability hardening, and implementation details for both **Apple Silicon Metal GPU** and **Universal Cross-Platform CPU SIMD**.
+This document provides a comprehensive technical guide to the **Hardware Acceleration Subsystems** in Glypr (`glypr-core`). It covers the design, mathematical formulation, numerical stability hardening, and implementation details for **Apple Silicon Metal GPU**, **Apple Neural Engine (ANE)**, and **Universal Cross-Platform CPU SIMD**.
 
 ---
 
@@ -13,20 +13,20 @@ Glypr is designed around a unified, pluggable acceleration abstraction that deco
                                │           GlyprEmbedder Engine          │
                                └────────────────────┬────────────────────┘
                                                     │
-                                     AttentionBackend Dispatch
+                                     Hardware Routing & Policy Dispatch
                                                     │
-                     ┌──────────────────────────────┴──────────────────────────────┐
-                     ▼                                                             ▼
-     ┌───────────────────────────────┐                             ┌───────────────────────────────┐
-     │       Track 1: Metal GPU      │                             │     Track 2: Universal CPU    │
-     │      (Apple Silicon M-Series) │                             │       (ARM64 & x86_64)        │
-     ├───────────────────────────────┤                             ├───────────────────────────────┤
-     │ • Zero-Copy GQA Multi-Head    │                             │ • pulp Vectorized Kernels     │
-     │ • MSL Tile-Skipping SDPA      │                             │ • Dynamic Arch CPU Dispatch   │
-     │ • Fused RMSNorm (simd_sum)    │                             │ • Rayon Multi-Core Streaming  │
-     │ • Fused GeGLU (In-Register)   │                             │ • Zero Intermediate Allocs    │
-     │ • NaN Clamping Protection     │                             │ • Single-File Memory Safety   │
-     └───────────────────────────────┘                             └───────────────────────────────┘
+                 ┌──────────────────────────────────┼──────────────────────────────────┐
+                 ▼                                  ▼                                  ▼
+ ┌───────────────────────────────┐  ┌───────────────────────────────┐  ┌───────────────────────────────┐
+ │       Track 1: Metal GPU      │  │ Track 2: Neural Engine (ANE)  │  │     Track 3: Universal CPU    │
+ │    (Apple Silicon M-Series)   │  │    (CoreML Native Runtime)    │  │       (ARM64 & x86_64)        │
+ ├───────────────────────────────┤  ├───────────────────────────────┤  ├───────────────────────────────┤
+ │ • Zero-Copy GQA Multi-Head    │  │ • Native CoreML In-Memory     │  │ • pulp Vectorized Kernels     │
+ │ • MSL Tile-Skipping SDPA      │  │ • W8A16 Linear Quantization   │  │ • Dynamic Arch CPU Dispatch   │
+ │ • Fused RMSNorm (simd_sum)    │  │ • Zero-Copy BorrowedTensor    │  │ • Rayon Multi-Core Streaming  │
+ │ • Fused GeGLU (In-Register)   │  │ • 11.17 ms Vision Tower (2.2x)│  │ • Zero Intermediate Allocs    │
+ │ • NaN Clamping Protection     │  │ • 8.24 ms Text Backbone (2.6x)│  │ • Single-File Memory Safety   │
+ └───────────────────────────────┘  └───────────────────────────────┘  └───────────────────────────────┘
 ```
 
 ---
@@ -324,4 +324,66 @@ Building upon the multimodal projector architecture, `glypr-core` accelerates th
 > [!TIP]
 > **Real-Time Factor (RTF):**
 > Embedding a 12.3-second spoken sentence takes **$< 100\text{ ms}$** end-to-end ($\text{RTF} = 0.008\text{x}$), processing auditory inputs over **$125\times$ faster than real-time speech**.
+
+---
+
+## 7. Track 3: Apple Neural Engine (ANE) Acceleration Subsystem
+
+Introduced in **v0.3.0**, Glypr integrates native Apple Neural Engine execution for both the 170M SigLIP Vision Tower and the 270M resident Text Backbone via `coreml-native` (under optional `coreml` / `ane` Cargo features).
+
+### A. Architectural Rationale: Why ANE?
+While Apple Silicon Metal GPUs deliver massive throughput at long sequence lengths (e.g. 23,000+ tok/s at 2K tokens), GPU invocation incurs non-trivial dispatch latency and unified memory power overhead. For visual feature extraction (e.g., fixed-grid image patches) and resident low-latency text embeddings (e.g. 512-token RAG retrieval queries), the Apple Neural Engine provides:
+1. **Ultra-Low Latency:** Dedicated fixed-function systolic array ALUs operating independently from the GPU.
+2. **Zero Unified Memory Contention:** Keeps GPU execution pipelines completely free for concurrent LLM generation or large text context processing.
+3. **Thermal & Energy Efficiency:** Enables persistent background embedding pipelines in local search services and mobile applications without degrading GPU thermal envelopes.
+
+---
+
+### B. Clean Module Exporter & W8A16 Quantization (`scripts/export_coreml.py`)
+Standard HuggingFace classes fail Core ML conversion due to dynamic TorchScript graphs. Glypr resolves this with pure PyTorch clean modules:
+- **Direct Safetensors Extraction:** Model parameters are extracted directly from `model.safetensors`.
+- **Static Shape Guarantee:** Compiles models for deterministic hardware shapes ($1,134$ patches for Budget 140 portrait, $2,394$ patches for Budget 280 portrait, $512$ tokens for Text Backbone).
+- **Hardware Pooling & Trigonometry:** Replaces runtime loops with native Core ML `AvgPool2d` layers and precomputed 2D/1D RoPE buffers.
+- **W8A16 Linear Symmetric Quantization:** Weights are quantized to INT8 with per-tensor scales while compute activations remain in native Apple Silicon FP16. This strictly avoids BF16 (which is unsupported by ANE ALUs).
+
+---
+
+### C. Native Rust Core ML Runtime (`crates/glypr-core/src/coreml/`)
+1. **Zero C++ Interop / Pure Objective-C Runtime:**
+   Implemented via `coreml-native = "0.2.0"`, binding directly into Apple's Objective-C runtime via `objc2 v0.3.2`. This eliminates third-party C++ libraries, static toolchain dependencies, and linking hazards.
+2. **Zero-Copy MultiArray Interop:**
+   Input tensors are wrapped into `BorrowedTensor` directly from raw pixel slices (`image.pixel_values`), avoiding intermediate heap allocations.
+3. **Automatic DType Alignment for Splicing:**
+   Core ML outputs FP32 float buffers. `CoreMLVisionTower::encode_to_tensor_dtype` automatically casts the tensor to the active model `DType` (e.g. BF16 on Metal) before concatenation into the multimodal token stream.
+
+---
+
+### D. Transparent Vision Routing Policy (`VisionBackendPolicy`)
+The embedder manages vision execution through an explicit gating policy:
+- **`Auto` (default):** Automatically routes matching portrait image patch counts (e.g., $1,134$ and $2,394$) to the Apple Neural Engine. If an image produces an unsupported patch count (such as custom budgets or landscape aspect ratios), it seamlessly falls back to the GPU Metal `mmproj` projector.
+- **`AneStrict`:** Enforces execution strictly on ANE, failing fast with descriptive diagnostics if an image dimension cannot run on the Neural Engine.
+- **`Metal`:** Enforces all image encoding to execute on the GPU Metal `mmproj` projector.
+- **Zero-`mmproj` Standalone Image Embedding:** When `--ane` is enabled, images matching compiled dimensions can be embedded directly without downloading or attaching any GGUF `mmproj` file.
+
+---
+
+### E. Empirical Benchmarks: Apple Neural Engine vs Metal GPU
+
+Tested in native release mode on Apple Silicon:
+
+#### 1. Vision Tower Execution (Single Image)
+| Modality / Budget | Input Patches | Soft Tokens | Apple Neural Engine (ANE) | Apple Silicon Metal GPU (ViT) | ANE Speedup | Parity vs GPU mmproj |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Budget 140 Portrait** | 1,134 patches | 126 tokens | **11.17 ms (89.5 img/s)** | 24.03 ms (41.6 img/s) | **2.2× faster** | **`0.999928` Cosine Sim** |
+| **Budget 280 Portrait** | 2,394 patches | 266 tokens | **23.19 ms (43.1 img/s)** | 55.30 ms (18.1 img/s) | **2.4× faster** | **`0.999928` Cosine Sim** |
+
+#### 2. Resident Text Backbone (Static 512 Tokens)
+| Sequence Length | Hardware Engine | Compute Units | Latency | Throughput | Relative Speedup |
+| :--- | :--- | :--- | :---: | :---: | :---: |
+| **16 tokens** | Apple Silicon Metal GPU | GPU | $4.21\text{ ms}$ | $237.5\text{ q/s}$ | 1.96× |
+| **16 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | $8.24\text{ ms}$ | $121.3\text{ q/s}$ | 1.00× (ref) |
+| **128 tokens** | Apple Silicon Metal GPU | GPU | $7.85\text{ ms}$ | $127.4\text{ q/s}$ | 1.05× |
+| **128 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | **$8.24\text{ ms}$** | **$121.3\text{ q/s}$** | 1.00× |
+| **512 tokens (RAG chunk)** | Apple Silicon Metal GPU | GPU | $21.81\text{ ms}$ | $45.8\text{ q/s}$ | 1.00× (ref) |
+| **512 tokens (RAG chunk)** | **Apple Neural Engine (ANE)** | **ANE (W8A16)** | **$8.24\text{ ms}$** 🚀 | **$121.3\text{ q/s}$** | **2.6× faster** |
 

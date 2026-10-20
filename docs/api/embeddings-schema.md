@@ -181,3 +181,53 @@ curl -X POST http://127.0.0.1:8080/v1/embeddings \
     "encoding_format": "binary"
   }'
 ```
+
+---
+
+## 6. Model & Health Introspection Endpoints
+
+### A. Model Metadata (`GET /v1/models`)
+Exposes active model properties, context boundaries, hardware device, and Apple Neural Engine (ANE) configuration:
+
+```bash
+curl http://127.0.0.1:8080/v1/models
+```
+
+#### Response Example
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "embeddinggemma-2",
+      "object": "model",
+      "created": 1729123200,
+      "owned_by": "glypr",
+      "device": "metal",
+      "quantization": "BF16",
+      "has_multimodal": true,
+      "max_context": 8192,
+      "ane_enabled": true,
+      "vision_backend": "auto",
+      "ane_supported_patches": [1134, 2394]
+    }
+  ]
+}
+```
+
+### B. Health Status (`GET /health`)
+Lightweight liveness probe for Kubernetes and load balancers:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+#### Response Example
+```json
+{
+  "status": "healthy",
+  "device": "metal",
+  "has_multimodal": true,
+  "ane_enabled": true
+}
+```

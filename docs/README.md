@@ -27,20 +27,20 @@ docs/
 ├── architecture/
 │   ├── specifications.md                  # Layer dimensions, heads, GQA, pooling, projection
 │   ├── modularity.md                      # Selective encoder loading (270M, 440M, 570M, 740M)
-│   └── hardware-acceleration.md           # [NEW] Metal GPU fusion, zero-copy GQA, and pulp CPU SIMD
+│   └── hardware-acceleration.md           # Metal GPU fusion, Apple Neural Engine (ANE), and pulp CPU SIMD
 ├── deployment/
-│   └── quantization-and-runtimes.md       # QAT INT4/INT8, LiteRT, GGUF/llama.cpp, vLLM, precision rules
+│   └── quantization-and-runtimes.md       # QAT INT4/INT8, CoreML / ANE W8A16, LiteRT, GGUF, vLLM
 ├── benchmarks/
-│   ├── leaderboards.md                    # MTEB/MMEB scores, competitor comparison, golden parity scorecard
-│   └── memory-and-vram.md                 # [NEW] Metal VRAM profiling, transient churn, Pareto trade-offs
+│   ├── leaderboards.md                    # MTEB/MMEB scores, competitor comparison, ANE vs Metal GPU benchmarks
+│   └── memory-and-vram.md                 # Metal VRAM profiling, transient churn, Pareto trade-offs
 ├── vector-optimization/
 │   ├── matryoshka-mrl.md                  # MRL dimension truncation (768d, 512d, 256d, 128d), L2 normalization
-│   └── quantization.md                    # [NEW] Static INT8, Binary 1-bit, 2-pass KNN, Turso BSQ8 blueprint
+│   └── quantization.md                    # Static INT8, Binary 1-bit, 2-pass KNN, Turso BSQ8 blueprint
 ├── prompts/
 │   └── task-instructions.md               # Asymmetric & symmetric task prefixes, title formatting
 └── multimodal/
     ├── inputs-and-budgeting.md            # Vision token budget (70-1120), audio (16kHz), interleaving
-    ├── mmproj-architecture.md             # SigLIP ViT and Conformer Audio dynamic projector towers
+    ├── mmproj-architecture.md             # SigLIP ViT, CoreML Vision Tower, and Conformer Audio dynamic projector towers
     └── gguf-nuances-and-conversions.md    # GGUF tensor naming, weight conversions, and alignment
 ```
 
@@ -58,7 +58,7 @@ docs/
 | **Vocab Size** | **262,144** | Shared Gemma 4 vocabulary |
 | **Attention Mechanism** | Sliding Window (512) | 5:1 hybrid (20 sliding GQA 4:2 + 4 global MQA 4:1) |
 | **Pooling Type** | Mean Pooling | Computed over active token sequence before projection |
-| **Precision Support** | **BF16, FP32, QAT INT4/INT8, GGUF Q8_0** | ❌ **Do NOT use FP16** (activations exceed FP16 dynamic range) |
+| **Precision Support** | **BF16, FP32, QAT INT4/INT8, GGUF Q8_0, CoreML W8A16 (ANE)** | ❌ **Do NOT use FP16 in PyTorch** (activations exceed FP16 dynamic range) |
 | **License** | **Apache 2.0** | Full commercial and open-source use |
 
 ---

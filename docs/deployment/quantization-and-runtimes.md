@@ -265,3 +265,42 @@ For server deployments without discrete GPUs or edge machines running Linux/macO
 * **x86_64 AVX2 / AVX-512:** Dynamically detected at process launch on Intel Xeon and AMD EPYC servers.
 * **Rayon Multi-Threading:** Batches sequence chunks across available CPU hardware cores.
 * **Memory Flatness:** Slashes intermediate CPU heap allocations from ~30 GB per forward pass down to zero, maintaining process RSS at **1.0–1.2 GB** across sequence lengths.
+
+---
+
+## 10. Apple Neural Engine (ANE) & Core ML Runtime Deployment
+
+Starting in **v0.3.0**, Glypr provides native Apple Neural Engine (ANE) acceleration via `coreml-native` (features: `coreml`, `ane`).
+
+### A. Core ML Model Compilation Pipeline
+The offline export tool [`scripts/export_coreml.py`](../../scripts/export_coreml.py) converts raw Hugging Face safetensors into compiled `.mlmodelc` bundles with **W8A16 linear symmetric INT8 quantization**:
+
+```bash
+# 1. Export both Vision Tower and Text Backbone
+uv run python scripts/export_coreml.py --target all --output-dir models/coreml
+
+# 2. Export Vision Tower only (Budget 140 portrait preset)
+uv run python scripts/export_coreml.py --target vision --vision-preset 140-portrait --output-dir models/coreml
+
+# 3. Export Text Backbone only (512-token static RAG sequence)
+uv run python scripts/export_coreml.py --target text --text-seq-len 512 --output-dir models/coreml
+```
+
+### B. Supported Compiled Models
+| Compiled Bundle | Size | Compute Target | Input Dimensions | Performance |
+| :--- | :---: | :---: | :---: | :---: |
+| `gemma2_vision_tower_p1134_t126_w8a16.mlmodelc` | **147 MB** | ANE (W8A16) | `pixel_values: [1, 1134, 768]` | **11.17 ms (89.5 img/s)** (2.2× vs Metal ViT) |
+| `gemma2_vision_tower_p2394_t266_w8a16.mlmodelc` | **148 MB** | ANE (W8A16) | `pixel_values: [1, 2394, 768]` | **23.19 ms (43.1 img/s)** (2.4× vs Metal ViT) |
+| `gemma2_text_backbone_s512_w8a16.mlmodelc` | **261 MB** | ANE (W8A16) | `input_ids: [1, 512]` | **8.24 ms (121.3 q/s)** (2.6× vs Metal GPU) |
+
+### C. CLI & Server Deployment
+```bash
+# Install binary with Metal + ANE acceleration
+cargo install --path crates/glypr --features metal,ane --force
+
+# Run hybrid embedding (Vision on ANE, Text on Metal GPU)
+glypr --ane embed ./portrait.png
+
+# Run HTTP server with ANE acceleration
+glypr --ane serve --port 8080
+```

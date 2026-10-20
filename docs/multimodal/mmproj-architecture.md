@@ -176,3 +176,41 @@ glypr --bf16-mmproj embed "Acoustic instruments:" ./acoustic_guitar.wav --dim 25
 # 4. Custom vision budget (e.g. 140 tokens for native 480x680 card images, 280 default, 560 high-detail)
 glypr --bf16-mmproj embed ./card.png --image-token-budget 140
 ```
+
+---
+
+## 7. Apple Neural Engine (ANE) Vision Tower & Zero-mmproj Mode
+
+In addition to GGUF `mmproj` files, `glypr` v0.3.0 supports hardware vision acceleration on Apple Silicon via the **Apple Neural Engine (ANE)** and native Core ML runtime (`crates/glypr-core/src/coreml/`):
+
+### Dual-Engine Vision Architecture:
+```mermaid
+graph TD
+    IMG[Image Input: .png / .jpg / .webp] --> PRE[Rayon Preprocessor]
+    PRE -->|Patches: 1134 or 2394| GATE{VisionBackendPolicy}
+    
+    GATE -->|Auto / AneStrict| ANE[CoreML Vision Tower: Apple Neural Engine]
+    GATE -->|Auto Fallback / Metal| GPU[GGUF mmproj Vision Tower: Metal GPU ViT]
+    
+    ANE -->|11.17 ms / 23.19 ms Zero-Copy| SPLICER[Token Splicer with DType Cast F32 -> BF16]
+    GPU -->|24.03 ms / 55.30 ms| SPLICER
+    
+    SPLICER --> LM[EmbeddingGemma 2 Text Backbone on Metal GPU]
+```
+
+### Key Capabilities:
+1. **Zero-mmproj Standalone Image Embedding:**
+   Because the Core ML vision model contains the complete 170M SigLIP vision tower and pooling projector compiled directly from source weights, images matching compiled presets can be embedded **without needing any GGUF `mmproj` file**:
+   ```bash
+   # Runs image embedding on Apple Neural Engine without downloading mmproj GGUF!
+   glypr --ane embed ./portrait.png
+   ```
+2. **Deterministic Portrait Presets:**
+   - **Budget 140 Portrait:** $42 \times 27 = 1,134$ patches ($672 \times 432\text{ px}$) $\to 126$ soft tokens (**11.17 ms, 89.5 img/s on ANE vs 24.03 ms on GPU Metal**).
+   - **Budget 280 Portrait:** $57 \times 42 = 2,394$ patches ($912 \times 672\text{ px}$) $\to 266$ soft tokens (**23.19 ms, 43.1 img/s on ANE vs 55.30 ms on GPU Metal**).
+3. **Execution Policy Control (`--vision-backend <auto|ane|metal>`):**
+   - `auto` (default): Routes matching portrait counts to ANE; gracefully falls back to GPU Metal `mmproj` for other budgets or aspect ratios.
+   - `ane`: Strict ANE execution; fails fast with a descriptive error if the patch count is unsupported.
+   - `metal`: Forces GPU Metal `mmproj` execution.
+4. **Verified Mathematical Parity:**
+   Hybrid execution (ANE Vision Tower + GPU Metal Text Backbone) achieves **`0.999928`** cosine similarity against the pure GPU Metal GGUF reference pipeline.
