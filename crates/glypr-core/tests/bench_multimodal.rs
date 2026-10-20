@@ -27,7 +27,7 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
         .join("tests/golden_vectors/multimodal_test_image.png");
 
     let img = image::open(&test_img_path)?;
-    // Create an exact 480x680 card image to mirror MTG card dimensions
+    // Create an exact 480x680 card image to mirror standard portrait document dimensions
     let card_img = img.resize_exact(480, 680, image::imageops::FilterType::Nearest);
 
     // Warmup run

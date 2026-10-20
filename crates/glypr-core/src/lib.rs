@@ -25,7 +25,7 @@ pub use coreml::{CoreMLComputeUnits, CoreMLTextBackbone, CoreMLVisionTower};
 pub use linear::LinearOp;
 pub use model::EmbeddingGemma2Model;
 pub use multimodal::{
-    ModalityPart, MultimodalProjector, VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH,
+    ModalityPart, MultimodalProjector, VisionBackendPolicy, VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH,
     VISION_BUDGET_LOW, VISION_BUDGET_MAX, VISION_BUDGET_MEDIUM, VISION_BUDGET_MIN,
     VISION_BUDGET_ULTRA, validate_vision_budget,
 };
@@ -56,6 +56,9 @@ pub struct GlyprEmbedder {
     pub dtype: DType,
     pub multimodal: Option<MultimodalProjector>,
     pub max_seq_len: usize,
+    #[cfg(feature = "coreml")]
+    pub coreml_vision: Option<CoreMLVisionTower>,
+    pub vision_backend: VisionBackendPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +168,9 @@ impl GlyprEmbedder {
             dtype,
             multimodal: None,
             max_seq_len: DEFAULT_MAX_SEQ_LEN,
+            #[cfg(feature = "coreml")]
+            coreml_vision: None,
+            vision_backend: VisionBackendPolicy::Auto,
         })
     }
 
@@ -197,6 +203,9 @@ impl GlyprEmbedder {
             dtype,
             multimodal: None,
             max_seq_len: DEFAULT_MAX_SEQ_LEN,
+            #[cfg(feature = "coreml")]
+            coreml_vision: None,
+            vision_backend: VisionBackendPolicy::Auto,
         })
     }
 
@@ -225,6 +234,34 @@ impl GlyprEmbedder {
         Ok(())
     }
 
+    #[cfg(feature = "coreml")]
+    /// Dynamically attach a compiled CoreML Vision Tower (`.mlmodelc`) for Apple Neural Engine (ANE) acceleration.
+    pub fn attach_coreml_vision(&mut self, vision_tower: CoreMLVisionTower) {
+        self.coreml_vision = Some(vision_tower);
+    }
+
+    #[cfg(feature = "coreml")]
+    /// Dynamically attach CoreML Vision Tower models discovered in a directory (e.g. `models/coreml`).
+    pub fn attach_coreml_vision_dir<P: AsRef<Path>>(
+        &mut self,
+        dir: P,
+        compute_units: coreml::CoreMLComputeUnits,
+    ) -> Result<()> {
+        let tower = CoreMLVisionTower::from_dir(dir, compute_units)?;
+        self.coreml_vision = Some(tower);
+        Ok(())
+    }
+
+    /// Set routing policy for vision execution (Auto, AneStrict, Metal).
+    pub fn set_vision_backend(&mut self, policy: VisionBackendPolicy) {
+        self.vision_backend = policy;
+    }
+
+    pub fn with_vision_backend(mut self, policy: VisionBackendPolicy) -> Self {
+        self.vision_backend = policy;
+        self
+    }
+
     pub fn set_max_seq_len(&mut self, len: usize) {
         self.max_seq_len = len;
     }
@@ -232,6 +269,53 @@ impl GlyprEmbedder {
     pub fn with_max_seq_len(mut self, len: usize) -> Self {
         self.max_seq_len = len;
         self
+    }
+
+    /// Encode a single image item using the routed vision engine (ANE CoreML or Metal/CPU GGUF).
+    pub fn encode_image_part(&self, image: &image::DynamicImage, budget: usize) -> Result<Tensor> {
+        let processed = crate::multimodal::preprocess_image(image, budget, 16, 3)?;
+
+        #[cfg(feature = "coreml")]
+        {
+            let use_coreml = match self.vision_backend {
+                VisionBackendPolicy::Auto => self
+                    .coreml_vision
+                    .as_ref()
+                    .map_or(false, |cv| cv.supports_patches(processed.num_patches)),
+                VisionBackendPolicy::AneStrict => {
+                    let cv = self.coreml_vision.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("AneStrict vision backend requested, but no CoreML vision tower attached")
+                    })?;
+                    if !cv.supports_patches(processed.num_patches) {
+                        anyhow::bail!(
+                            "AneStrict vision routing failed: image produced {} patches, but loaded CoreML models only support {:?}",
+                            processed.num_patches,
+                            cv.supported_patch_counts()
+                        );
+                    }
+                    true
+                }
+                VisionBackendPolicy::Metal => false,
+            };
+
+            if use_coreml {
+                if let Some(cv) = &self.coreml_vision {
+                    return cv.encode_to_tensor_dtype(&processed, &self.device, self.dtype);
+                }
+            }
+        }
+
+        // Standard Candle / GGUF path
+        let projector = self.multimodal.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No vision engine available for image (CoreML model does not support {} patches and no GGUF mmproj attached)",
+                processed.num_patches
+            )
+        })?;
+        let tower = projector.vision_tower.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Vision Tower is not available in attached multimodal projector")
+        })?;
+        Ok(tower.encode(&processed)?)
     }
 
     /// Encode an arbitrary composite sequence: text + multiple images + audio + video frames
@@ -250,9 +334,16 @@ impl GlyprEmbedder {
         items: &[MediaItem],
         truncate_dim: Option<usize>,
     ) -> Result<Vec<f32>> {
-        let projector = self.multimodal.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Multimodal projector not attached. Call embedder.attach_multimodal_projector() first.")
-        })?;
+        let has_coreml_vision = {
+            #[cfg(feature = "coreml")]
+            { self.coreml_vision.is_some() }
+            #[cfg(not(feature = "coreml"))]
+            { false }
+        };
+
+        if self.multimodal.is_none() && !has_coreml_vision {
+            anyhow::bail!("Multimodal engine not attached. Call embedder.attach_multimodal_projector() or embedder.attach_coreml_vision() first.");
+        }
 
         // =========================================================================
         // PHASE 1: Zero-Overhead Preflight Check (< 10 µs, 0 neural forwards)
@@ -323,17 +414,20 @@ impl GlyprEmbedder {
             match item {
                 MediaItem::Image { image, budget } => {
                     let b = budget.unwrap_or(280);
-                    let (soft_toks, _) = projector.encode_image_with_budget(image, b)?;
+                    let soft_toks = self.encode_image_part(image, b)?;
                     soft_tensors.push(soft_toks);
                 }
                 MediaItem::Audio { samples } => {
+                    let projector = self.multimodal.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("Audio encoding requires attached GGUF mmproj")
+                    })?;
                     let (soft_toks, _) = projector.encode_audio(samples)?;
                     soft_tensors.push(soft_toks);
                 }
                 MediaItem::VideoFrames { frames, budget_per_frame } => {
                     let b = budget_per_frame.unwrap_or(140);
                     for frame in frames.iter() {
-                        let (soft_toks, _) = projector.encode_image_with_budget(frame, b)?;
+                        let soft_toks = self.encode_image_part(frame, b)?;
                         soft_tensors.push(soft_toks);
                     }
                 }
@@ -410,8 +504,14 @@ impl GlyprEmbedder {
         task: Task,
     ) -> Result<Vec<f32>> {
         let has_media = parts.iter().any(|p| !matches!(p, ModalityPart::Text(_)));
-        if has_media && self.multimodal.is_none() {
-            anyhow::bail!("Multimodal projector not attached. Call embedder.attach_multimodal_projector() first.");
+        let has_coreml_vision = {
+            #[cfg(feature = "coreml")]
+            { self.coreml_vision.is_some() }
+            #[cfg(not(feature = "coreml"))]
+            { false }
+        };
+        if has_media && self.multimodal.is_none() && !has_coreml_vision {
+            anyhow::bail!("Multimodal engine not attached. Call embedder.attach_multimodal_projector() or embedder.attach_coreml_vision() first.");
         }
 
         // 1. Tokenize sequence and validate context window preflight (< 10 µs, 0 neural forwards)
@@ -430,24 +530,25 @@ impl GlyprEmbedder {
 
         // 2. Neural tower execution for media parts
         let mut soft_tensors = Vec::new();
-        if let Some(projector) = self.multimodal.as_ref() {
-            for part in parts {
-                match part {
-                    ModalityPart::Text(_) => {}
-                    ModalityPart::Image { image, budget } => {
-                        let b = budget.unwrap_or(multimodal::VISION_BUDGET_DEFAULT);
-                        let (soft_toks, _) = projector.encode_image_with_budget(image, b)?;
-                        soft_tensors.push(soft_toks);
-                    }
-                    ModalityPart::Audio { samples } => {
-                        let (soft_toks, _) = projector.encode_audio(samples)?;
-                        soft_tensors.push(soft_toks);
-                    }
-                    ModalityPart::VideoFrame { frame, budget } => {
-                        let b = budget.unwrap_or(multimodal::VISION_BUDGET_MEDIUM);
-                        let (soft_toks, _) = projector.encode_image_with_budget(frame, b)?;
-                        soft_tensors.push(soft_toks);
-                    }
+        for part in parts {
+            match part {
+                ModalityPart::Text(_) => {}
+                ModalityPart::Image { image, budget } => {
+                    let b = budget.unwrap_or(multimodal::VISION_BUDGET_DEFAULT);
+                    let soft_toks = self.encode_image_part(image, b)?;
+                    soft_tensors.push(soft_toks);
+                }
+                ModalityPart::Audio { samples } => {
+                    let projector = self.multimodal.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("Audio encoding requires attached GGUF mmproj")
+                    })?;
+                    let (soft_toks, _) = projector.encode_audio(samples)?;
+                    soft_tensors.push(soft_toks);
+                }
+                ModalityPart::VideoFrame { frame, budget } => {
+                    let b = budget.unwrap_or(multimodal::VISION_BUDGET_MEDIUM);
+                    let soft_toks = self.encode_image_part(frame, b)?;
+                    soft_tensors.push(soft_toks);
                 }
             }
         }
@@ -618,8 +719,14 @@ impl GlyprEmbedder {
         let has_any_media = inputs.iter().any(|inp| {
             inp.parts.iter().any(|p| !matches!(p, ModalityPart::Text(_)))
         });
-        if has_any_media && self.multimodal.is_none() {
-            anyhow::bail!("Multimodal input received in batch, but multimodal projector is not attached.");
+        let has_coreml_vision = {
+            #[cfg(feature = "coreml")]
+            { self.coreml_vision.is_some() }
+            #[cfg(not(feature = "coreml"))]
+            { false }
+        };
+        if has_any_media && self.multimodal.is_none() && !has_coreml_vision {
+            anyhow::bail!("Multimodal input received in batch, but multimodal engine is not attached.");
         }
 
         // 2. Pre-extract and batch-encode all images across all items
@@ -633,13 +740,31 @@ impl GlyprEmbedder {
             }
         }
 
-        let encoded_images: Vec<(Tensor, usize)> = if !image_requests.is_empty() {
-            let projector = self.multimodal.as_ref().unwrap();
-            let images_and_budgets: Vec<(&image::DynamicImage, usize)> = image_requests
-                .iter()
-                .map(|(_, _, img, b)| (*img, *b))
-                .collect();
-            projector.encode_images_batch(&images_and_budgets)?
+        let encoded_images: Vec<Tensor> = if !image_requests.is_empty() {
+            let use_coreml = {
+                #[cfg(feature = "coreml")]
+                { self.coreml_vision.is_some() && self.vision_backend != VisionBackendPolicy::Metal }
+                #[cfg(not(feature = "coreml"))]
+                { false }
+            };
+
+            if use_coreml {
+                let mut res = Vec::with_capacity(image_requests.len());
+                for (_, _, img, b) in &image_requests {
+                    res.push(self.encode_image_part(img, *b)?);
+                }
+                res
+            } else {
+                let projector = self.multimodal.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Multimodal engine not attached.")
+                })?;
+                let images_and_budgets: Vec<(&image::DynamicImage, usize)> = image_requests
+                    .iter()
+                    .map(|(_, _, img, b)| (*img, *b))
+                    .collect();
+                let batch_out = projector.encode_images_batch(&images_and_budgets)?;
+                batch_out.into_iter().map(|(t, _)| t).collect()
+            }
         } else {
             Vec::new()
         };
@@ -665,23 +790,24 @@ impl GlyprEmbedder {
             seq_lens.push(seq_len);
 
             let mut soft_tensors = Vec::new();
-            if let Some(projector) = self.multimodal.as_ref() {
-                for part in inp.parts.iter() {
-                    match part {
-                        ModalityPart::Text(_) => {}
-                        ModalityPart::Image { .. } => {
-                            let (soft_toks, _) = image_iter.next().expect("Image count mismatch");
-                            soft_tensors.push(soft_toks);
-                        }
-                        ModalityPart::Audio { samples } => {
-                            let (soft_toks, _) = projector.encode_audio(samples)?;
-                            soft_tensors.push(soft_toks);
-                        }
-                        ModalityPart::VideoFrame { frame, budget } => {
-                            let b = budget.unwrap_or(multimodal::VISION_BUDGET_MEDIUM);
-                            let (soft_toks, _) = projector.encode_image_with_budget(frame, b)?;
-                            soft_tensors.push(soft_toks);
-                        }
+            for part in inp.parts.iter() {
+                match part {
+                    ModalityPart::Text(_) => {}
+                    ModalityPart::Image { .. } => {
+                        let soft_toks = image_iter.next().expect("Image count mismatch");
+                        soft_tensors.push(soft_toks);
+                    }
+                    ModalityPart::Audio { samples } => {
+                        let projector = self.multimodal.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("Audio encoding requires attached GGUF mmproj")
+                        })?;
+                        let (soft_toks, _) = projector.encode_audio(samples)?;
+                        soft_tensors.push(soft_toks);
+                    }
+                    ModalityPart::VideoFrame { frame, budget } => {
+                        let b = budget.unwrap_or(multimodal::VISION_BUDGET_MEDIUM);
+                        let soft_toks = self.encode_image_part(frame, b)?;
+                        soft_tensors.push(soft_toks);
                     }
                 }
             }

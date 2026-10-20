@@ -10,6 +10,8 @@ description = "Native Rust CLI and embedding tool for EmbeddingGemma 2"
 default = []
 metal = ["glypr-core/metal", "glypr-server/metal"]
 accelerate = ["glypr-core/accelerate", "glypr-server/accelerate"]
+coreml = ["glypr-core/coreml", "glypr-server/coreml"]
+ane = ["coreml"]
 
 [dependencies]
 glypr-core = { path = "../glypr-core" }

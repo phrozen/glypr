@@ -34,4 +34,17 @@ pub enum ModalityPart<'a> {
     },
 }
 
+/// Routing policy for multimodal vision execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionBackendPolicy {
+    /// Prefer ANE via CoreML when a matching model is loaded for the image patches, fallback to GPU/CPU.
+    #[default]
+    Auto,
+    /// Strictly require execution on Apple Neural Engine via CoreML. Fail if no matching model is loaded.
+    AneStrict,
+    /// Force execution on Candle Metal / CPU mmproj, bypassing CoreML even if models are present.
+    Metal,
+}
+
 

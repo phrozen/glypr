@@ -184,6 +184,16 @@ impl CoreMLVisionTower {
     /// Copies the output buffer ($126 \times 512 \times 4\text{ bytes} \approx 258\text{ KB}$) into
     /// device memory ready for splicing into the multimodal prompt sequence.
     pub fn encode_to_tensor(&self, image: &ProcessedImage, device: &Device) -> Result<Tensor> {
+        self.encode_to_tensor_dtype(image, device, candle_core::DType::F32)
+    }
+
+    /// Encode a `ProcessedImage` directly into a Candle `Tensor` with the requested data type.
+    pub fn encode_to_tensor_dtype(
+        &self,
+        image: &ProcessedImage,
+        device: &Device,
+        dtype: candle_core::DType,
+    ) -> Result<Tensor> {
         let (data, shape) = self.encode_raw(image)?;
         let num_tokens = if shape.len() >= 2 {
             shape[1]
@@ -194,7 +204,12 @@ impl CoreMLVisionTower {
         let tensor = Tensor::from_vec(data, (1, num_tokens, 512), device)
             .context("Failed to create Candle Tensor from CoreML vision output")?;
 
-        Ok(tensor.squeeze(0)?)
+        let squeezed = tensor.squeeze(0)?;
+        if squeezed.dtype() != dtype {
+            Ok(squeezed.to_dtype(dtype)?)
+        } else {
+            Ok(squeezed)
+        }
     }
 
     pub fn compute_units(&self) -> CoreMLComputeUnits {

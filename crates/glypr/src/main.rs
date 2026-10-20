@@ -45,6 +45,14 @@ enum AttentionArg {
     Standard,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+enum VisionBackendArg {
+    #[default]
+    Auto,
+    Ane,
+    Metal,
+}
+
 #[derive(Parser)]
 #[command(
     name = "glypr",
@@ -83,6 +91,18 @@ struct Cli {
     /// Attention kernel: auto (default), flash, chunked, standard
     #[arg(long, global = true, value_enum, default_value_t = AttentionArg::Auto)]
     attention: AttentionArg,
+
+    /// Enable Apple Neural Engine (ANE) CoreML acceleration for vision models
+    #[arg(long, global = true)]
+    ane: bool,
+
+    /// Vision execution backend: auto (default), ane, metal
+    #[arg(long, global = true, value_enum, default_value_t = VisionBackendArg::Auto)]
+    vision_backend: VisionBackendArg,
+
+    /// Path to compiled CoreML models directory (.mlmodelc) [default: models/coreml]
+    #[arg(long, global = true, value_name = "DIR")]
+    coreml_dir: Option<PathBuf>,
 
     /// Legacy flag for Metal acceleration (alias for --device metal)
     #[arg(long, global = true, hide = true)]
@@ -464,6 +484,29 @@ fn main() -> Result<()> {
         embedder.attach_multimodal_projector(p)?;
     }
 
+    #[cfg(feature = "coreml")]
+    {
+        let policy = match cli.vision_backend {
+            VisionBackendArg::Auto => glypr_core::VisionBackendPolicy::Auto,
+            VisionBackendArg::Ane => glypr_core::VisionBackendPolicy::AneStrict,
+            VisionBackendArg::Metal => glypr_core::VisionBackendPolicy::Metal,
+        };
+        embedder.set_vision_backend(policy);
+
+        if cli.ane || cli.vision_backend != VisionBackendArg::Metal {
+            let coreml_dir = cli.coreml_dir.unwrap_or_else(|| PathBuf::from("models/coreml"));
+            if coreml_dir.is_dir() {
+                if let Err(e) = embedder.attach_coreml_vision_dir(&coreml_dir, glypr_core::coreml::CoreMLComputeUnits::CpuAndNeuralEngine) {
+                    if cli.ane || cli.vision_backend == VisionBackendArg::Ane {
+                        anyhow::bail!("Failed to load CoreML vision models from {}: {}", coreml_dir.display(), e);
+                    }
+                }
+            } else if cli.ane || cli.vision_backend == VisionBackendArg::Ane {
+                anyhow::bail!("CoreML models directory not found at: {}", coreml_dir.display());
+            }
+        }
+    }
+
     match cli.command {
         Commands::Embed {
             inputs,
@@ -476,11 +519,18 @@ fn main() -> Result<()> {
         } => {
             let (owned_parts, has_media) = parse_interleaved_inputs(inputs)?;
 
-            // Reject media if no multimodal projector was attached
-            if has_media && embedder.multimodal.is_none() {
+            // Reject media if no multimodal engine is attached
+            let has_coreml = {
+                #[cfg(feature = "coreml")]
+                { embedder.coreml_vision.is_some() }
+                #[cfg(not(feature = "coreml"))]
+                { false }
+            };
+
+            if has_media && embedder.multimodal.is_none() && !has_coreml {
                 anyhow::bail!(
-                    "Media input detected in arguments, but no multimodal projector was attached.\n\
-                    Tip: Add --bf16-mmproj, --q8-mmproj, or --mmproj-file <FILE> to enable image/audio embeddings."
+                    "Media input detected in arguments, but neither multimodal projector nor CoreML vision model is attached.\n\
+                    Tip: Add --ane to enable Apple Neural Engine vision, or add --bf16-mmproj / --q8-mmproj / --mmproj-file <FILE>."
                 );
             }
 

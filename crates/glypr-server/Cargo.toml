@@ -10,6 +10,8 @@ description = "High-performance OpenAI-compatible HTTP serving engine for Embedd
 default = []
 metal = ["glypr-core/metal"]
 accelerate = ["glypr-core/accelerate"]
+coreml = ["glypr-core/coreml"]
+ane = ["coreml"]
 
 [dependencies]
 glypr-core = { path = "../glypr-core" }

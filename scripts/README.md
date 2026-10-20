@@ -39,8 +39,8 @@ Standard HuggingFace model classes (`Gemma4VisionModel`, `EmbeddingGemma2Model`)
 | **Combined** | Resident Dual-Engine | — | — | **408 MB total** | **`> 0.999` Cosine Sim** |
 
 > [!NOTE]
-> - `140-mtg` ($42 \times 27 = 1,134$ patches) corresponds to $480 \times 680$ MTG card images ($672 \times 432$ px), outputting $14 \times 9 = 126$ soft tokens.
-> - `280-mtg` ($57 \times 42 = 2,394$ patches) corresponds to $480 \times 680$ MTG card images ($912 \times 672$ px), outputting $19 \times 14 = 266$ soft tokens.
+> - `140-portrait` ($42 \times 27 = 1,134$ patches) corresponds to $480 \times 680$ portrait images ($672 \times 432$ px), outputting $14 \times 9 = 126$ soft tokens.
+> - `280-portrait` ($57 \times 42 = 2,394$ patches) corresponds to $480 \times 680$ portrait images ($912 \times 672$ px), outputting $19 \times 14 = 266$ soft tokens.
 
 ---
 
@@ -59,11 +59,11 @@ uv run python scripts/export_coreml.py --target all --output-dir models/coreml
 
 ### Vision Tower (Budget 140 vs Budget 280 Presets)
 ```bash
-# Budget 140: MTG Card 480x680 optimized preset (1134 patches -> 126 soft tokens)
-uv run python scripts/export_coreml.py --target vision --vision-preset 140-mtg --output-dir models/coreml
+# Budget 140: Portrait 480x680 optimized preset (1134 patches -> 126 soft tokens)
+uv run python scripts/export_coreml.py --target vision --vision-preset 140-portrait --output-dir models/coreml
 
-# Budget 280: MTG Card 480x680 higher resolution preset (2394 patches -> 266 soft tokens)
-uv run python scripts/export_coreml.py --target vision --vision-preset 280-mtg --output-dir models/coreml
+# Budget 280: Portrait 480x680 higher resolution preset (2394 patches -> 266 soft tokens)
+uv run python scripts/export_coreml.py --target vision --vision-preset 280-portrait --output-dir models/coreml
 
 # Standard budget presets
 uv run python scripts/export_coreml.py --target vision --vision-preset 140-std --output-dir models/coreml
@@ -79,7 +79,7 @@ uv run python scripts/export_coreml.py --target text --text-seq-len 512 --output
 - `--model-id`: Hugging Face repo ID or local path (default: `google/embeddinggemma-2`). Auto-detects local HF cache.
 - `--output-dir`: Output directory for `.mlpackage` and `.mlmodelc` (default: `models/coreml`).
 - `--target`: `all`, `vision`, or `text` (default: `all`).
-- `--vision-preset`: `140-mtg` or `140-std` (default: `140-mtg`).
+- `--vision-preset`: `140-portrait`, `140-std`, `280-portrait`, or `280-std` (default: `140-portrait`).
 - `--text-seq-len`: Text sequence length (default: `512`).
 - `--quantize`: `w8a16` (INT8 weights + FP16 compute) or `fp16` (default: `w8a16`).
 - `--no-compile`: Skip compilation to `.mlmodelc`.

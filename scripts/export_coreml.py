@@ -723,17 +723,20 @@ def export_text_backbone(
 def main():
     parser = argparse.ArgumentParser(description="Export EmbeddingGemma 2 Subsystems to Core ML for Apple Neural Engine (ANE)")
     PRESETS = {
-        "140-mtg": (42, 27),  # 1134 patches -> 126 soft tokens (672x432 px for 480x680 MTG cards)
-        "140-std": (42, 30),  # 1260 patches -> 140 soft tokens (672x480 px)
-        "280-mtg": (57, 42),  # 2394 patches -> 266 soft tokens (912x672 px for 480x680 MTG cards)
-        "280-std": (60, 42),  # 2520 patches -> 280 soft tokens (960x672 px)
+        "140-portrait": (42, 27),  # 1134 patches -> 126 soft tokens (672x432 px for standard portrait documents)
+        "140-std": (42, 30),       # 1260 patches -> 140 soft tokens (672x480 px)
+        "280-portrait": (57, 42),  # 2394 patches -> 266 soft tokens (912x672 px for standard portrait documents)
+        "280-std": (60, 42),       # 2520 patches -> 280 soft tokens (960x672 px)
+        # Compatibility aliases
+        "140-mtg": (42, 27),
+        "280-mtg": (57, 42),
     }
 
     parser.add_argument("--model-id", type=str, default="google/embeddinggemma-2", help="Hugging Face model ID or path to safetensors")
     parser.add_argument("--output-dir", type=Path, default=Path("models/coreml"), help="Directory for exported .mlpackage and .mlmodelc")
     parser.add_argument("--target", choices=["all", "vision", "text"], default="all", help="Subsystems to export")
-    parser.add_argument("--vision-preset", choices=list(PRESETS.keys()), default="140-mtg",
-                        help="Vision patch grid preset: '140-mtg' (42x27=1134 patches), '140-std' (42x30=1260 patches), '280-mtg' (57x42=2394 patches), '280-std' (60x42=2520 patches)")
+    parser.add_argument("--vision-preset", choices=list(PRESETS.keys()), default="140-portrait",
+                        help="Vision patch grid preset: '140-portrait' (42x27=1134 patches), '140-std' (42x30=1260 patches), '280-portrait' (57x42=2394 patches), '280-std' (60x42=2520 patches)")
     parser.add_argument("--text-seq-len", type=int, default=512, help="Static sequence length for resident RAG text model (default: 512)")
     parser.add_argument("--quantize", choices=["w8a16", "fp16"], default="w8a16", help="Linear quantization mode (w8a16 recommended for ANE)")
     parser.add_argument("--no-compile", action="store_true", help="Skip compilation to .mlmodelc")
