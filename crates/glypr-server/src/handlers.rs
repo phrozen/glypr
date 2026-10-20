@@ -104,8 +104,8 @@ pub async fn handle_embeddings(
         });
         if has_media {
             return Err(bad_request(
-                "Multimodal input received, but server was started without a multimodal projector. \
-                Restart the server with --bf16-mmproj, --q8-mmproj, or --mmproj-file.",
+                "Multimodal input received, but server was started without multimodal capabilities. \
+                Restart the server with --ane, --bf16-mmproj, --q8-mmproj, or --mmproj-file.",
             )
             .into_response());
         }

@@ -159,7 +159,7 @@ pub fn spawn_inference_engine(
     let (tx, mut rx) = mpsc::channel::<InferenceRequest>(1024);
 
     let device_name = format!("{:?}", embedder.device);
-    let has_multimodal = embedder.multimodal.is_some();
+    let has_multimodal = embedder.has_multimodal();
     let meta = Arc::new(ModelMeta {
         id: model_id,
         device: device_name,

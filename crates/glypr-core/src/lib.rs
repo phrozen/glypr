@@ -271,6 +271,19 @@ impl GlyprEmbedder {
         self
     }
 
+    /// Whether this embedder has any multimodal capabilities (GGUF mmproj or CoreML vision).
+    pub fn has_multimodal(&self) -> bool {
+        self.multimodal.is_some() || self.has_coreml_vision()
+    }
+
+    /// Whether CoreML Vision models are attached.
+    pub fn has_coreml_vision(&self) -> bool {
+        #[cfg(feature = "coreml")]
+        { self.coreml_vision.is_some() }
+        #[cfg(not(feature = "coreml"))]
+        { false }
+    }
+
     /// Encode a single image item using the routed vision engine (ANE CoreML or Metal/CPU GGUF).
     pub fn encode_image_part(&self, image: &image::DynamicImage, budget: usize) -> Result<Tensor> {
         let processed = crate::multimodal::preprocess_image(image, budget, 16, 3)?;
