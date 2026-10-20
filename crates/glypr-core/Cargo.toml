@@ -68,3 +68,7 @@ required-features = ["coreml"]
 name = "bench_ane_vs_metal"
 required-features = ["metal", "coreml"]
 
+[[example]]
+name = "bench_text_ane_vs_metal"
+required-features = ["metal", "coreml"]
+
