@@ -444,6 +444,20 @@ fn main() -> Result<()> {
             println!("  Device:             CPU SIMD (FP32)");
         }
         println!("  Context Window:     8,192 tokens");
+        #[cfg(feature = "coreml")]
+        {
+            println!("  Neural Engine (ANE): Supported (CoreML native runtime)");
+            let coreml_dir = cli.coreml_dir.as_deref().unwrap_or(std::path::Path::new("models/coreml"));
+            if coreml_dir.is_dir() {
+                if let Ok(tower) = glypr_core::coreml::CoreMLVisionTower::from_dir(coreml_dir, glypr_core::coreml::CoreMLComputeUnits::CpuAndNeuralEngine) {
+                    println!("  ANE Vision Models:  Loaded from {} (patches: {:?})", coreml_dir.display(), tower.supported_patch_counts());
+                } else {
+                    println!("  ANE Vision Models:  Directory {} present (no compiled models)", coreml_dir.display());
+                }
+            } else {
+                println!("  ANE Vision Models:  None (run scripts/export_coreml.py to export)");
+            }
+        }
         println!();
         println!("Attention Kernels (--attention):");
         if metal_avail {
@@ -454,6 +468,14 @@ fn main() -> Result<()> {
             println!("  chunked             : Sliding-window banded attention (default)");
             println!("  standard            : Full dense NxN attention");
             println!("  flash               : Fused hardware FlashAttention (Requires Metal GPU)");
+        }
+        #[cfg(feature = "coreml")]
+        {
+            println!();
+            println!("Vision Backends (--vision-backend):");
+            println!("  auto                : Apple Neural Engine for portrait, Metal mmproj fallback (default)");
+            println!("  ane                 : Strict Apple Neural Engine execution");
+            println!("  metal               : GPU Metal multimodal projector");
         }
         println!();
         println!("Output Dimensions (--dim):");
