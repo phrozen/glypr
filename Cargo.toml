@@ -28,6 +28,7 @@ half = "2.3"
 ahash = "0.8.12"
 candle-metal-kernels = { version = "0.11.0", default-features = false }
 objc2-metal = { version = "0.3.2", default-features = false }
+coreml-native = { version = "0.2.0", default-features = false }
 pulp = { version = "0.22.3", features = ["macro"] }
 libc = "0.2"
 rayon = "1.12"

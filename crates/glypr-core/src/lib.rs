@@ -16,8 +16,12 @@ pub mod task;
 pub mod util;
 #[cfg(feature = "metal")]
 pub mod metal_kernels;
+#[cfg(feature = "coreml")]
+pub mod coreml;
 
 pub use attention::AttentionMode;
+#[cfg(feature = "coreml")]
+pub use coreml::{CoreMLComputeUnits, CoreMLTextBackbone, CoreMLVisionTower};
 pub use linear::LinearOp;
 pub use model::EmbeddingGemma2Model;
 pub use multimodal::{
