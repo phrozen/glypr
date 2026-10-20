@@ -119,6 +119,12 @@ pub struct ModelObject {
     pub object: String,
     pub created: u64,
     pub owned_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ane_enabled: Option<bool>,
 }
 
 /// OpenAI-compatible `GET /v1/models` response body.
@@ -135,4 +141,8 @@ pub struct HealthResponse {
     pub model: String,
     pub device: String,
     pub multimodal: bool,
+    pub vision_backend: String,
+    pub ane_enabled: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub ane_supported_patches: Vec<usize>,
 }

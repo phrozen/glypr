@@ -206,6 +206,9 @@ pub async fn handle_models(State(state): State<Arc<AppState>>) -> Json<ModelList
             object: "model".to_string(),
             created: state.engine.meta.created_at,
             owned_by: "glypr".to_string(),
+            device: Some(state.engine.meta.device.clone()),
+            vision_backend: Some(state.engine.meta.vision_backend.clone()),
+            ane_enabled: Some(state.engine.meta.ane_enabled),
         }],
     })
 }
@@ -217,5 +220,8 @@ pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<HealthRes
         model: state.engine.meta.id.clone(),
         device: state.engine.meta.device.clone(),
         multimodal: state.engine.meta.has_multimodal,
+        vision_backend: state.engine.meta.vision_backend.clone(),
+        ane_enabled: state.engine.meta.ane_enabled,
+        ane_supported_patches: state.engine.meta.ane_supported_patches.clone(),
     })
 }

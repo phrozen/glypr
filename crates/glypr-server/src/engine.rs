@@ -108,12 +108,15 @@ pub struct InferenceRequest {
     pub sender: oneshot::Sender<Result<(Vec<f32>, usize)>>,
 }
 
-/// Metadata describing the loaded model.
+/// Metadata describing the loaded model and runtime capabilities.
 #[derive(Debug, Clone)]
 pub struct ModelMeta {
     pub id: String,
     pub device: String,
     pub has_multimodal: bool,
+    pub vision_backend: String,
+    pub ane_enabled: bool,
+    pub ane_supported_patches: Vec<usize>,
     pub created_at: u64,
 }
 
@@ -158,12 +161,52 @@ pub fn spawn_inference_engine(
 ) -> EngineHandle {
     let (tx, mut rx) = mpsc::channel::<InferenceRequest>(1024);
 
-    let device_name = format!("{:?}", embedder.device);
+    let device_name = match &embedder.device {
+        candle_core::Device::Metal(_) => "metal".to_string(),
+        candle_core::Device::Cpu => "cpu".to_string(),
+        candle_core::Device::Cuda(_) => "cuda".to_string(),
+    };
+
+    let (ane_enabled, ane_patches) = {
+        #[cfg(feature = "coreml")]
+        {
+            if let Some(cv) = &embedder.coreml_vision {
+                (true, cv.supported_patch_counts())
+            } else {
+                (false, Vec::new())
+            }
+        }
+        #[cfg(not(feature = "coreml"))]
+        {
+            (false, Vec::new())
+        }
+    };
+
+    let vision_backend = match embedder.vision_backend {
+        glypr_core::VisionBackendPolicy::Auto => {
+            if ane_enabled && embedder.multimodal.is_some() {
+                "hybrid (ane + metal)"
+            } else if ane_enabled {
+                "ane"
+            } else if embedder.multimodal.is_some() {
+                "metal"
+            } else {
+                "none"
+            }
+        }
+        glypr_core::VisionBackendPolicy::AneStrict => "ane_strict",
+        glypr_core::VisionBackendPolicy::Metal => "metal",
+    }
+    .to_string();
+
     let has_multimodal = embedder.has_multimodal();
     let meta = Arc::new(ModelMeta {
         id: model_id,
         device: device_name,
         has_multimodal,
+        vision_backend,
+        ane_enabled,
+        ane_supported_patches: ane_patches,
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
