@@ -60,13 +60,11 @@ impl CoreMLVisionTower {
             let path = entry.path();
             if path.is_dir() && path.extension().and_then(|s| s.to_str()) == Some("mlmodelc") {
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                if stem.contains("vision_tower") {
-                    if let Ok(model) = Model::load(&path, compute_units.into()) {
-                        if let Ok(v_entry) = Self::inspect_and_build_entry(model, &path) {
+                if stem.contains("vision_tower")
+                    && let Ok(model) = Model::load(&path, compute_units.into())
+                        && let Ok(v_entry) = Self::inspect_and_build_entry(model, &path) {
                             models.insert(v_entry.num_patches, v_entry);
                         }
-                    }
-                }
             }
         }
 

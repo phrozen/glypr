@@ -11,6 +11,7 @@ It deploys from a **single self-contained `.gguf` file**—extracting all model 
 ## Key Highlights
 
 - **100% Self-Contained Single-File Deployment:** Point `glypr` to a single `.gguf` file (`embeddinggemma-2-BF16.gguf` or `embeddinggemma-2-Q8_0.gguf`). Model architecture and the complete 262,144-token BPE tokenizer are reconstructed in-memory in milliseconds.
+- **Apple Neural Engine (ANE) Acceleration & Hybrid Execution:** Native integration of Core ML via `coreml-native` (`--features metal,ane`). Transparently routes vision tower execution for portrait documents (1,134 patches / 2,394 patches) directly to the Apple Neural Engine, achieving **11.17 ms (89.5 img/s)**—a **2.2× to 2.4× speedup over GPU Metal ViT**—while splicing output soft tokens directly into the GPU text backbone with **`0.999928`** cosine parity. Standalone resident text backbone executes 512-token RAG queries in **8.24 ms on pure ANE (2.6× faster than GPU Metal)** with zero GPU power consumption.
 - **Apple M5 & Metal 4 Neural Accelerators:** Runtime detection (`MTLGPUFamilyMetal4` / `Apple10`) activating cooperative `mpp::tensor_ops::matmul2d` FlashAttention with SIMD-group hardware `reduce_rows`, native `bfloat` ALU, and M5 INT8 GEMM.
 - **Beating PyTorch MPS at 8K Tokens:** Drops 8,192-token latency to **615.30 ms** (Q8_0) / **670.79 ms** (BF16) (outperforming PyTorch MPS's **875.00 ms** by up to 260 ms / 1.42x) with peak throughput reaching **23,359 tok/s** at 2K context.
 - **Ultra-Efficient Metal VRAM Footprint:** Through zero-copy GQA, native $d_{\text{head}}=512$ full-context kernels, fused backbone MSL operations, and zero-overhead weight concatenation views, peak Metal VRAM at 8,192 tokens dropped from **14.59 GB $\to$ 1.47 GB (BF16) / 1.58 GB (Q8_0)**, slashing transient VRAM by **86.6%** down to **688 MB** and saving **over $5.1\text{ GB}$ vs PyTorch MPS (6.59 GB)**.
@@ -28,14 +29,17 @@ It deploys from a **single self-contained `.gguf` file**—extracting all model 
 
 ### Installation / Build
 ```bash
-# 1. Install globally to ~/.cargo/bin with Metal GPU acceleration (recommended):
+# 1. Install globally to ~/.cargo/bin with Metal GPU + Apple Neural Engine (ANE) acceleration (recommended for macOS):
+cargo install --path crates/glypr --features metal,ane
+
+# Or install with Metal GPU only:
 cargo install --path crates/glypr --features metal
 
 # Or install with universal CPU SIMD:
 cargo install --path crates/glypr
 
 # 2. Or build locally in-tree:
-cargo build --release -p glypr --features metal
+cargo build --release -p glypr --features metal,ane
 ```
 
 The CLI defaults to `--device auto` (Metal GPU on Apple Silicon, falling back to CPU SIMD), **BF16** precision, and `--attention auto` (automatically utilizing fused **Metal Flash Attention** on Apple Silicon GPU, falling back to **Chunked Sliding Attention** on CPU SIMD). Canonical models are resolved and cached automatically from `ggml-org/embeddinggemma-2-GGUF` respecting standard Hugging Face cache paths (`$HF_HOME`, `$HF_HUB_CACHE`).
@@ -92,6 +96,26 @@ Multimodal projector loading is explicit and opt-in (defaulting to text-only wit
 ./target/release/glypr --bf16-mmproj embed ./card.png --image-token-budget 140
 ```
 
+#### Apple Neural Engine (ANE) Acceleration (`--ane`)
+Enable the Apple Neural Engine to offload vision encoding and achieve **2.2×–2.4× faster throughput** with near-zero GPU power consumption:
+```bash
+# 1. Hybrid Mode: Vision Tower on ANE + Text Backbone on Metal GPU
+./target/release/glypr --ane embed "Card illustration:" ./portrait.png "and description."
+
+# 2. Zero-mmproj Standalone Image Embedding
+# When --ane is enabled, portrait images can be embedded directly without downloading or attaching a GGUF mmproj!
+./target/release/glypr --ane embed ./portrait.png
+
+# 3. Explicit Vision Backend Routing (--vision-backend auto|ane|metal)
+# auto (default): Dispatches matching portrait patch counts to ANE; falls back to Metal mmproj for other budgets
+# ane: Strict ANE execution; fails fast if patch count is uncompiled
+# metal: Dispatches all image encoding to GPU Metal mmproj
+./target/release/glypr --ane --vision-backend ane embed ./portrait.png
+
+# 4. Custom Core ML models directory override
+./target/release/glypr --ane --coreml-dir ./models/coreml embed ./portrait.png
+```
+
 #### Vector Encodings & Raw Binary Streaming
 ```bash
 # Zero-metadata INT8 quantization (values in [-127, 127]) formatted as JSON array
@@ -118,6 +142,9 @@ Launch a high-performance HTTP server with adaptive dynamic batching, MRL trunca
 
 # Or serve with Q8_0 base weights and Q8_0 multimodal projector:
 ./target/release/glypr --q8 --q8-mmproj serve --port 8080
+
+# Or serve with Apple Neural Engine (ANE) hardware vision acceleration:
+./target/release/glypr --ane serve --port 8080
 ```
 
 Query with standard OpenAI API clients or `curl`:
@@ -254,6 +281,26 @@ Tested on Apple Silicon Metal GPU across sequence lengths up to 8,192 tokens:
 | **8,192t** | `glypr-core` BF16 (Opt) | Chunked Sliding | $785.0\text{ MB}$ | **$2,880.0\text{ MB}$** | **$2,095.0\text{ MB}$** | $2,038.5\text{ MB}$ | $1,118.50\text{ ms}$ | $7,324\text{ tok/s}$ |
 | **8,192t** | **`glypr-core` BF16 (Flash)** | **Metal Flash (Fused)** | **$785.0\text{ MB}$** | **$1,473.5\text{ MB}$** | **$688.4\text{ MB}$** | $2,038.5\text{ MB}$ | **$670.79\text{ ms}$** | **$12,212\text{ tok/s}$** |
 | **8,192t** | **`glypr-core` Q8_0 (Flash)** | **Metal Flash (Fused)** | **$606.3\text{ MB}$** | **$1,582.7\text{ MB}$** | **$976.4\text{ MB}$** | **$1,678.5\text{ MB}$** | **$615.30\text{ ms}$** 🏆 | **$13,314\text{ tok/s}$** |
+
+### Apple Neural Engine (ANE) vs Metal GPU Scorecard
+
+Empirical benchmarks measured on Apple Silicon in native release profile:
+
+#### 1. Vision Tower Execution (Single Image)
+| Modality / Budget | Input Patches | Soft Tokens | Apple Neural Engine (ANE) | Apple Silicon Metal GPU (ViT) | ANE Speedup | Parity vs GPU mmproj |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Budget 140 Portrait** | 1,134 patches | 126 tokens | **11.17 ms (89.5 img/s)** | 24.03 ms (41.6 img/s) | **2.2× faster** | **`0.999928` Cosine Sim** |
+| **Budget 280 Portrait** | 2,394 patches | 266 tokens | **23.19 ms (43.1 img/s)** | 55.30 ms (18.1 img/s) | **2.4× faster** | **`0.999928` Cosine Sim** |
+
+#### 2. Resident Text Backbone (Static 512 Tokens)
+| Sequence Length | Hardware Engine | Compute Units | Latency | Throughput | Relative Speedup |
+| :--- | :--- | :--- | :---: | :---: | :---: |
+| **16 tokens** | Apple Silicon Metal GPU | GPU | $4.21\text{ ms}$ | $237.5\text{ q/s}$ | 1.96× |
+| **16 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | $8.24\text{ ms}$ | $121.3\text{ q/s}$ | 1.00× (ref) |
+| **128 tokens** | Apple Silicon Metal GPU | GPU | $7.85\text{ ms}$ | $127.4\text{ q/s}$ | 1.05× |
+| **128 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | **$8.24\text{ ms}$** | **$121.3\text{ q/s}$** | 1.00× |
+| **512 tokens (RAG chunk)** | Apple Silicon Metal GPU | GPU | $21.81\text{ ms}$ | $45.8\text{ q/s}$ | 1.00× (ref) |
+| **512 tokens (RAG chunk)** | **Apple Neural Engine (ANE)** | **ANE (W8A16)** | **$8.24\text{ ms}$** 🚀 | **$121.3\text{ q/s}$** | **2.6× faster** |
 
 ---
 

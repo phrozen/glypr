@@ -13,7 +13,7 @@ fn get_static_chunk_masks(
     let mut mask_first_vec = vec![0.0f32; window * 2 * window];
     for i in 0..window {
         for j in 0..(2 * window) {
-            let diff = if j >= i { j - i } else { i - j };
+            let diff = j.abs_diff(i);
             if diff > window {
                 mask_first_vec[i * 2 * window + j] = -1e9f32;
             }
@@ -27,7 +27,7 @@ fn get_static_chunk_masks(
     let mut mask_middle_vec = vec![0.0f32; window * 3 * window];
     for i in 0..window {
         for j in 0..(3 * window) {
-            let diff = if (window + i) >= j { (window + i) - j } else { j - (window + i) };
+            let diff = (window + i).abs_diff(j);
             if diff > window {
                 mask_middle_vec[i * 3 * window + j] = -1e9f32;
             }
@@ -41,7 +41,7 @@ fn get_static_chunk_masks(
     let mut mask_last_vec = vec![0.0f32; window * 2 * window];
     for i in 0..window {
         for j in 0..(2 * window) {
-            let diff = if (window + i) >= j { (window + i) - j } else { j - (window + i) };
+            let diff = (window + i).abs_diff(j);
             if diff > window {
                 mask_last_vec[i * 2 * window + j] = -1e9f32;
             }
@@ -81,7 +81,7 @@ impl AttentionBackend for ChunkedSlidingAttention {
         let device = q.device();
         let orig_dtype = q.dtype();
         let chunk_size = window;
-        let num_chunks = (s + chunk_size - 1) / chunk_size;
+        let num_chunks = s.div_ceil(chunk_size);
 
         // Precompute static mask tensors once outside the chunk loop
         let static_masks = if attention_mask.is_none() {

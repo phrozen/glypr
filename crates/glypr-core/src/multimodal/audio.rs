@@ -32,13 +32,11 @@ fn load_optional_f32_scalar<R: std::io::Read + std::io::Seek>(
     reader: &mut R,
     name: &str,
 ) -> Option<f32> {
-    if let Ok(qt) = content.tensor(reader, name, &Device::Cpu) {
-        if let Ok(t) = qt.dequantize(&Device::Cpu) {
-            if let Ok(vec) = t.to_vec1::<f32>() {
+    if let Ok(qt) = content.tensor(reader, name, &Device::Cpu)
+        && let Ok(t) = qt.dequantize(&Device::Cpu)
+            && let Ok(vec) = t.to_vec1::<f32>() {
                 return vec.first().copied();
             }
-        }
-    }
     None
 }
 
@@ -227,7 +225,7 @@ impl AudioAttention {
         let k_scaled = (k * self.k_scale)?;
 
         let chunk_size = 12;
-        let num_blocks = (seq_len + chunk_size - 1) / chunk_size;
+        let num_blocks = seq_len.div_ceil(chunk_size);
         let pad_amount = num_blocks * chunk_size - seq_len;
 
         // 1. Blocked queries: [batch, num_heads, num_blocks, chunk_size, head_dim]
@@ -274,7 +272,7 @@ impl AudioAttention {
         // 6. Combine and softcap
         let mut attn_weights = (matrix_ac + matrix_bd)?;
         if self.softcap > 0.0 {
-            let sc = self.softcap as f64;
+            let sc = self.softcap;
             attn_weights = ((attn_weights / sc)?.tanh()? * sc)?;
         }
 
@@ -466,7 +464,7 @@ impl AudioTower {
         // 2. Precompute causal sliding window attention mask ONCE for all 12 Conformer layers
         let seq_len = hidden_states.dim(1)?;
         let chunk_size = 12;
-        let num_blocks = (seq_len + chunk_size - 1) / chunk_size;
+        let num_blocks = seq_len.div_ceil(chunk_size);
 
         let mut mask_vec = vec![-1e9f32; num_blocks * chunk_size * 24];
         for b in 0..num_blocks {

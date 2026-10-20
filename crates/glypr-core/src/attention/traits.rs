@@ -19,6 +19,7 @@ pub enum AttentionMode {
     CudaFlash,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for AttentionMode {
     fn default() -> Self {
         #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
@@ -31,6 +32,7 @@ impl Default for AttentionMode {
         }
     }
 }
+
 
 /// Pluggable attention backend trait
 pub trait AttentionBackend: std::fmt::Debug + Send + Sync {

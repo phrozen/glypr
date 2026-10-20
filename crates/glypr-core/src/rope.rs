@@ -30,13 +30,12 @@ impl RotaryEmbedding {
     pub fn get_cos_sin(&self, seq_len: usize, device: &Device, dtype: DType) -> Result<(Tensor, Tensor)> {
         {
             let guard = self.cache.read().unwrap();
-            if let Some((cached_len, cached_dtype, ref cos_2d, ref sin_2d)) = *guard {
-                if seq_len <= cached_len && cached_dtype == dtype && cos_2d.device().same_device(device) {
+            if let Some((cached_len, cached_dtype, ref cos_2d, ref sin_2d)) = *guard
+                && seq_len <= cached_len && cached_dtype == dtype && cos_2d.device().same_device(device) {
                     let cos = cos_2d.narrow(0, 0, seq_len)?.unsqueeze(0)?.unsqueeze(0)?;
                     let sin = sin_2d.narrow(0, 0, seq_len)?.unsqueeze(0)?.unsqueeze(0)?;
                     return Ok((cos, sin));
                 }
-            }
         }
 
         let target_len = seq_len.max(crate::DEFAULT_MAX_SEQ_LEN);

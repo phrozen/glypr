@@ -2,17 +2,26 @@
 
 use glypr_core::coreml::{CoreMLComputeUnits, CoreMLTextBackbone, CoreMLVisionTower};
 use glypr_core::multimodal::ProcessedImage;
-use std::path::Path;
+
+fn resolve_model_path(name: &str) -> Option<std::path::PathBuf> {
+    for base in &["models/coreml", "../../models/coreml"] {
+        let p = std::path::PathBuf::from(base).join(name);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
 
 #[test]
 fn test_coreml_vision_tower_ane() -> anyhow::Result<()> {
-    let model_path = "models/coreml/gemma2_vision_tower_p1134_t126_w8a16.mlmodelc";
-    if !Path::new(model_path).exists() {
-        eprintln!("Skipping test: {} not found", model_path);
+    let name = "gemma2_vision_tower_p1134_t126_w8a16.mlmodelc";
+    let Some(model_path) = resolve_model_path(name) else {
+        eprintln!("Skipping test: {} not found", name);
         return Ok(());
-    }
+    };
 
-    let tower = CoreMLVisionTower::from_path(model_path, CoreMLComputeUnits::CpuAndNeuralEngine)?;
+    let tower = CoreMLVisionTower::from_path(&model_path, CoreMLComputeUnits::CpuAndNeuralEngine)?;
     assert!(tower.supports_patches(1134));
     assert_eq!(tower.num_soft_tokens_for_patches(1134), Some(126));
 
@@ -29,7 +38,7 @@ fn test_coreml_vision_tower_ane() -> anyhow::Result<()> {
 
     let (buf, shape) = tower.encode_raw(&dummy_image)?;
     assert_eq!(shape, vec![1, 126, 512]);
-    assert_eq!(buf.len(), 1 * 126 * 512);
+    assert_eq!(buf.len(), 126 * 512);
 
     let nan_count = buf.iter().filter(|x| x.is_nan()).count();
     assert_eq!(nan_count, 0, "Vision tower output contains NaNs");
@@ -44,13 +53,13 @@ fn test_coreml_vision_tower_ane() -> anyhow::Result<()> {
 
 #[test]
 fn test_coreml_text_backbone_ane() -> anyhow::Result<()> {
-    let model_path = "models/coreml/gemma2_text_backbone_s512_w8a16.mlmodelc";
-    if !Path::new(model_path).exists() {
-        eprintln!("Skipping test: {} not found", model_path);
+    let name = "gemma2_text_backbone_s512_w8a16.mlmodelc";
+    let Some(model_path) = resolve_model_path(name) else {
+        eprintln!("Skipping test: {} not found", name);
         return Ok(());
-    }
+    };
 
-    let backbone = CoreMLTextBackbone::from_path(model_path, CoreMLComputeUnits::CpuAndNeuralEngine)?;
+    let backbone = CoreMLTextBackbone::from_path(&model_path, CoreMLComputeUnits::CpuAndNeuralEngine)?;
     assert_eq!(backbone.seq_len(), 512);
 
     let sample_tokens = [2i32, 603, 235292, 1146, 235284, 1489, 235292, 235248, 1841, 6496, 573, 11956, 5028, 235336];

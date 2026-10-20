@@ -279,12 +279,11 @@ impl GlyprTokenizer {
                 let mut found_tag = "";
 
                 for tag in &tags {
-                    if let Some(pos) = remaining.find(tag) {
-                        if earliest_pos.map_or(true, |p| pos < p) {
+                    if let Some(pos) = remaining.find(tag)
+                        && earliest_pos.is_none_or(|p| pos < p) {
                             earliest_pos = Some(pos);
                             found_tag = tag;
                         }
-                    }
                 }
 
                 if let Some(pos) = earliest_pos {

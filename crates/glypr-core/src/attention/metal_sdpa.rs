@@ -39,7 +39,7 @@ impl AttentionBackend for MetalSdpaAttention {
                 mask.clone()
             };
 
-            if mask.dims() == &[b, h, s, s] {
+            if mask.dims() == [b, h, s, s] {
                 Some(mask)
             } else {
                 // Zero-copy strided view across attention heads: [b, 1, s, s] -> [b, h, s, s]

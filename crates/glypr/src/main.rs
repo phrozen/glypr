@@ -493,14 +493,13 @@ fn main() -> Result<()> {
         };
         embedder.set_vision_backend(policy);
 
-        if cli.ane || cli.vision_backend != VisionBackendArg::Metal {
+        if cli.ane || cli.coreml_dir.is_some() || cli.vision_backend == VisionBackendArg::Ane {
             let coreml_dir = cli.coreml_dir.unwrap_or_else(|| PathBuf::from("models/coreml"));
             if coreml_dir.is_dir() {
-                if let Err(e) = embedder.attach_coreml_vision_dir(&coreml_dir, glypr_core::coreml::CoreMLComputeUnits::CpuAndNeuralEngine) {
-                    if cli.ane || cli.vision_backend == VisionBackendArg::Ane {
+                if let Err(e) = embedder.attach_coreml_vision_dir(&coreml_dir, glypr_core::coreml::CoreMLComputeUnits::CpuAndNeuralEngine)
+                    && (cli.ane || cli.vision_backend == VisionBackendArg::Ane) {
                         anyhow::bail!("Failed to load CoreML vision models from {}: {}", coreml_dir.display(), e);
                     }
-                }
             } else if cli.ane || cli.vision_backend == VisionBackendArg::Ane {
                 anyhow::bail!("CoreML models directory not found at: {}", coreml_dir.display());
             }
@@ -529,8 +528,8 @@ fn main() -> Result<()> {
 
             if has_media && embedder.multimodal.is_none() && !has_coreml {
                 anyhow::bail!(
-                    "Media input detected in arguments, but neither multimodal projector nor CoreML vision model is attached.\n\
-                    Tip: Add --ane to enable Apple Neural Engine vision, or add --bf16-mmproj / --q8-mmproj / --mmproj-file <FILE>."
+                    "Media input detected in arguments, but no multimodal projector was attached.\n\
+                    Tip: Add --ane to enable Apple Neural Engine vision, or add --bf16-mmproj / --q8-mmproj / --mmproj-file <FILE> to enable image/audio embeddings."
                 );
             }
 

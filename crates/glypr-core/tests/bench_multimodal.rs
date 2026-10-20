@@ -167,11 +167,10 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
 #[test]
 fn bench_multimodal_pipeline() -> anyhow::Result<()> {
     #[cfg(feature = "metal")]
-    if candle_core::utils::metal_is_available() {
-        if let Ok(metal_dev) = Device::new_metal(0) {
+    if candle_core::utils::metal_is_available()
+        && let Ok(metal_dev) = Device::new_metal(0) {
             bench_device(metal_dev, DType::BF16, "Apple Silicon Metal GPU")?;
         }
-    }
 
     // Also benchmark CPU track if explicit or on non-metal runs
     if std::env::var("BENCH_CPU").is_ok() {

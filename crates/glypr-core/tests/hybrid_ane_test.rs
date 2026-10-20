@@ -20,11 +20,10 @@ fn setup_embedder() -> anyhow::Result<GlyprEmbedder> {
     let mut embedder = GlyprEmbedder::load_gguf(&base_gguf, &device, dtype)?;
 
     // Attach GGUF multimodal projector if available
-    if let Ok(mmproj) = hub::resolve_default_mmproj() {
-        if mmproj.exists() {
+    if let Ok(mmproj) = hub::resolve_default_mmproj()
+        && mmproj.exists() {
             let _ = embedder.attach_multimodal_projector(&mmproj);
         }
-    }
 
     // Attach CoreML Vision Tower
     let candidates = ["models/coreml", "../../models/coreml"];

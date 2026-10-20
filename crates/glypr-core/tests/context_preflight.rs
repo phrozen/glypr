@@ -13,11 +13,10 @@ fn setup_embedder() -> anyhow::Result<GlyprEmbedder> {
     let base_gguf = glypr_core::hub::resolve_default_gguf()?;
     let mut embedder = GlyprEmbedder::load_gguf(&base_gguf, &device, dtype)?;
 
-    if let Ok(mmproj_gguf) = glypr_core::hub::resolve_default_mmproj() {
-        if mmproj_gguf.exists() {
+    if let Ok(mmproj_gguf) = glypr_core::hub::resolve_default_mmproj()
+        && mmproj_gguf.exists() {
             embedder.attach_multimodal_projector(&mmproj_gguf)?;
         }
-    }
 
     Ok(embedder)
 }

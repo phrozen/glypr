@@ -23,7 +23,7 @@ impl AttentionBackend for StandardAttention {
         let chunk_size = 512;
         if s > chunk_size {
             let k_t = k.transpose(2, 3)?.contiguous()?;
-            let num_chunks = (s + chunk_size - 1) / chunk_size;
+            let num_chunks = s.div_ceil(chunk_size);
             let mut out_chunks = Vec::with_capacity(num_chunks);
             let orig_dtype = q.dtype();
 

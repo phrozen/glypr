@@ -43,8 +43,8 @@ fn bench_budget(budget: usize, model_file: &str) -> anyhow::Result<()> {
         println!("2. CoreML ALL (ANE + GPU, INT8):          {:6.2} ms  ({:4.1} img/s)", mean_all, 1000.0 / mean_all);
     }
 
-    if let Ok(mmproj_path) = glypr_core::hub::resolve_default_mmproj() {
-        if mmproj_path.exists() && candle_core::utils::metal_is_available() {
+    if let Ok(mmproj_path) = glypr_core::hub::resolve_default_mmproj()
+        && mmproj_path.exists() && candle_core::utils::metal_is_available() {
             let device = Device::new_metal(0)?;
             let projector = MultimodalProjector::from_gguf_file(&mmproj_path, &device, DType::BF16)?;
             if let Some(tower) = &projector.vision_tower {
@@ -60,10 +60,9 @@ fn bench_budget(budget: usize, model_file: &str) -> anyhow::Result<()> {
                 println!("3. Candle Metal ViT (GGUF BF16 on GPU):   {:6.2} ms  ({:4.1} img/s)", mean, 1000.0 / mean);
             }
         }
-    }
 
-    if let Ok(q8_mmproj_path) = glypr_core::hub::resolve_canonical_mmproj(true) {
-        if q8_mmproj_path.exists() && candle_core::utils::metal_is_available() {
+    if let Ok(q8_mmproj_path) = glypr_core::hub::resolve_canonical_mmproj(true)
+        && q8_mmproj_path.exists() && candle_core::utils::metal_is_available() {
             let device = Device::new_metal(0)?;
             let projector = MultimodalProjector::from_gguf_file(&q8_mmproj_path, &device, DType::BF16)?;
             if let Some(tower) = &projector.vision_tower {
@@ -79,7 +78,6 @@ fn bench_budget(budget: usize, model_file: &str) -> anyhow::Result<()> {
                 println!("4. Candle Metal ViT (GGUF Q8_0 on GPU):   {:6.2} ms  ({:4.1} img/s)", mean, 1000.0 / mean);
             }
         }
-    }
 
     Ok(())
 }

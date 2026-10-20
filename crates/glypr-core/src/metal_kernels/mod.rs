@@ -592,7 +592,7 @@ fn fused_metal_geglu_impl(gate: &Tensor, up: &Tensor, kernel_name: &'static str)
         enc_ref.set_bytes(3, &total_i32);
 
         let thread_group_size = 256;
-        let num_groups = (total_elements + thread_group_size - 1) / thread_group_size;
+        let num_groups = total_elements.div_ceil(thread_group_size);
         let grid_dims = MTLSize { width: num_groups, height: 1, depth: 1 };
         let group_dims = MTLSize { width: thread_group_size, height: 1, depth: 1 };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
@@ -649,7 +649,7 @@ pub fn fused_metal_geglu_gate_up(gate_up: &Tensor) -> Result<Tensor> {
 
         let thread_group_size = 256;
         let num_rows = total_elements / d;
-        let num_groups_x = (d + thread_group_size - 1) / thread_group_size;
+        let num_groups_x = d.div_ceil(thread_group_size);
         let grid_dims = MTLSize { width: num_groups_x, height: num_rows, depth: 1 };
         let group_dims = MTLSize { width: thread_group_size, height: 1, depth: 1 };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
@@ -945,7 +945,7 @@ pub fn fused_metal_audio_glu_causal_dwconv5(pw1: &Tensor, dw_weight: &Tensor) ->
         enc_ref.set_bytes(5, &c_i32);
 
         let thread_group_size = 256;
-        let num_groups = (total_elements + thread_group_size - 1) / thread_group_size;
+        let num_groups = total_elements.div_ceil(thread_group_size);
         let grid_dims = MTLSize { width: num_groups, height: 1, depth: 1 };
         let group_dims = MTLSize { width: thread_group_size, height: 1, depth: 1 };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);

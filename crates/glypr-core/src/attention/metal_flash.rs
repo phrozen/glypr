@@ -237,8 +237,8 @@ impl AttentionBackend for MetalFlashAttention {
             let v_buf = match &*v_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
             let out_buf = match &*out_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
 
-            let nq = (s + bq - 1) / bq;
-            let nk = (s + bk - 1) / bk;
+            let nq = s.div_ceil(bq);
+            let nk = s.div_ceil(bk);
             let nq_aligned = s / bq;
             let nk_aligned = s / bk;
 

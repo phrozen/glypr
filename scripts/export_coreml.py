@@ -727,9 +727,6 @@ def main():
         "140-std": (42, 30),       # 1260 patches -> 140 soft tokens (672x480 px)
         "280-portrait": (57, 42),  # 2394 patches -> 266 soft tokens (912x672 px for standard portrait documents)
         "280-std": (60, 42),       # 2520 patches -> 280 soft tokens (960x672 px)
-        # Compatibility aliases
-        "140-mtg": (42, 27),
-        "280-mtg": (57, 42),
     }
 
     parser.add_argument("--model-id", type=str, default="google/embeddinggemma-2", help="Hugging Face model ID or path to safetensors")

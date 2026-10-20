@@ -250,7 +250,6 @@ where
 }
 
 #[cfg(test)]
-
 mod tests {
     use super::*;
 
@@ -298,7 +297,7 @@ mod tests {
         let qb = quantize_int8(&b);
 
         let dot = int8_dot_product(&q, &qb);
-        let expected = 127 * 127 + (-127) * 127 + 0 + 64 * 64;
+        let expected = 64 * 64;
         assert_eq!(dot, expected);
 
         assert!((int8_cosine_similarity(&q, &q) - 1.0).abs() < 1e-5);

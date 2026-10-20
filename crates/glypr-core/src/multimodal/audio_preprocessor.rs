@@ -86,7 +86,7 @@ pub fn get_hann_window() -> &'static [f32; AUDIO_FRAME_LEN] {
     HANN_WINDOW.get_or_init(|| {
         let mut window = [0.0f32; AUDIO_FRAME_LEN];
         for n in 0..AUDIO_FRAME_LEN {
-            window[n] = 0.5 - 0.5 * ((2.0 * std::f32::consts::PI * (n as f32) / (AUDIO_FRAME_LEN as f32))).cos();
+            window[n] = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * (n as f32) / (AUDIO_FRAME_LEN as f32)).cos();
         }
         window
     })
@@ -304,8 +304,8 @@ pub fn compute_audio_soft_token_count(samples_len: usize) -> usize {
     let total_len = pad_left + samples_len;
     let len_padded = if total_len < 321 { 321 } else { total_len };
     let num_frames = (len_padded - 321) / AUDIO_HOP_LEN + 1;
-    let l1 = (num_frames + 1) / 2;
-    (l1 + 1) / 2
+    let l1 = num_frames.div_ceil(2);
+    l1.div_ceil(2)
 }
 
 /// Compute total tokens required for an audio input including framing tokens (<|audio> and <audio|>).

@@ -294,7 +294,7 @@ impl GlyprEmbedder {
                 VisionBackendPolicy::Auto => self
                     .coreml_vision
                     .as_ref()
-                    .map_or(false, |cv| cv.supports_patches(processed.num_patches)),
+                    .is_some_and(|cv| cv.supports_patches(processed.num_patches)),
                 VisionBackendPolicy::AneStrict => {
                     let cv = self.coreml_vision.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("AneStrict vision backend requested, but no CoreML vision tower attached")
@@ -311,11 +311,10 @@ impl GlyprEmbedder {
                 VisionBackendPolicy::Metal => false,
             };
 
-            if use_coreml {
-                if let Some(cv) = &self.coreml_vision {
+            if use_coreml
+                && let Some(cv) = &self.coreml_vision {
                     return cv.encode_to_tensor_dtype(&processed, &self.device, self.dtype);
                 }
-            }
         }
 
         // Standard Candle / GGUF path

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Apple Neural Engine (ANE) Acceleration Subsystem:**
+  - Integrated native Apple Neural Engine execution for EmbeddingGemma 2 via `coreml-native` (under optional `coreml` / `ane` Cargo features), reusing the existing `objc2 v0.3.2` ecosystem with zero conflicting C++ bindings.
+  - **CoreML Vision Tower (`CoreMLVisionTower`):** Automatically discovers and introspects compiled `.mlmodelc` vision models, routes matching patch counts (e.g. 1,134 patches for Budget 140, 2,394 patches for Budget 280), feeds inputs zero-copy via `BorrowedTensor`, and emits embeddings directly to Candle `Tensor` with automatic data type alignment (FP32 $\to$ BF16) for seamless prompt splicing.
+  - **Standalone CoreML Text Backbone (`CoreMLTextBackbone`):** Ultra-low-power, resident 512-token document and search query embedding engine executing in ~8.2 ms on pure ANE.
+  - **Transparent Vision Backend Routing Policy (`VisionBackendPolicy`):**
+    - `Auto`: Transparently dispatches matching portrait image dimensions to the Apple Neural Engine while gracefully falling back to GPU Metal `mmproj` for uncompiled dimensions or budgets.
+    - `AneStrict`: Enforces strict execution on the Apple Neural Engine, failing fast with descriptive diagnostics if an image dimension is unsupported.
+    - `Metal`: Enforces execution on the GPU Metal `mmproj` projector.
+  - **Zero-mmproj Standalone Image Embedding:** Allows running image embeddings on Apple Silicon without downloading or attaching any GGUF `mmproj` file when using `--ane`.
+  - **Offline PyTorch-to-CoreML Exporter (`scripts/export_coreml.py`):** Converts PyTorch safetensors into clean Core ML models with W8A16 linear symmetric INT8 weight quantization, strict macOS 14+ deployment target, and verified $>0.998$ cosine parity against PyTorch FP32 ground truth.
+- **CLI & Server Flags:**
+  - Added `--ane` flag to `glypr` CLI to enable Apple Neural Engine acceleration.
+  - Added `--vision-backend <auto|ane|metal>` flag for explicit routing policy control.
+  - Added `--coreml-dir <DIR>` to specify custom Core ML model search paths.
+- **Clean Server Health & Model Introspection:**
+  - Updated `/v1/models` and `/health` endpoints to sanitize device representations (e.g. clean canonical `"metal"` instead of debug string) and expose ANE metadata (`ane_enabled`, `vision_backend`, `ane_supported_patches`).
+- **Mathematical Parity Verification:**
+  - Rigorous end-to-end integration tests (`hybrid_ane_test.rs` and `coreml_parity.rs`) confirming **0.999928** cosine similarity between ANE Vision + Metal Text Backbone hybrid execution and pure GPU Metal GGUF reference inference.
+
+### Performance
+- **Vision Tower (Single Image):**
+  - Budget 140 portrait (1,134 patches $\to$ 126 soft tokens): **11.17 ms (89.5 img/s)** on ANE vs **24.03 ms (41.6 img/s)** on GPU Metal ViT (**2.2× faster on ANE**).
+  - Budget 280 portrait (2,394 patches $\to$ 266 soft tokens): **23.19 ms (43.1 img/s)** on ANE vs **55.30 ms (18.1 img/s)** on GPU Metal ViT (**2.4× faster on ANE**).
+- **Text Backbone:**
+  - Flat 8.24 ms execution curve (121.3 q/s) on ANE across 16 to 512 tokens.
+  - At 512 tokens (standard RAG chunk): **8.24 ms** on ANE vs **21.81 ms** on GPU Metal (**2.6× faster on ANE**).
+
+---
+
 ## [0.2.1] - 2026-10-17
 
 ### Performance & Architectural Refinements

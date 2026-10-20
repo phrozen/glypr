@@ -10,7 +10,7 @@ fn geglu_scalar_f32(g: f32, u: f32) -> f32 {
         g * u
     } else {
         let g3 = g * g * g;
-        let inner = 0.7978845608028654f32 * (g + 0.044715f32 * g3);
+        let inner = 0.797_884_6_f32 * (g + 0.044715f32 * g3);
         let tanh_val = inner.tanh();
         let act = 0.5f32 * g * (1.0f32 + tanh_val);
         act * u

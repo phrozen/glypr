@@ -14,7 +14,7 @@ pub const VISION_BUDGET_MAX: usize = 2048;
 
 /// Validate that a vision token budget is within supported bounds [16..2048]
 pub fn validate_vision_budget(budget: usize) -> Result<()> {
-    if budget < VISION_BUDGET_MIN || budget > VISION_BUDGET_MAX {
+    if !(VISION_BUDGET_MIN..=VISION_BUDGET_MAX).contains(&budget) {
         bail!(
             "Vision token budget {} is out of supported range [{}..{}]",
             budget,
@@ -259,7 +259,7 @@ mod tests {
 
         // Verify bounds [-1.0, 1.0]
         for &v in &processed.pixel_values {
-            assert!(v >= -1.0 && v <= 1.0);
+            assert!((-1.0..=1.0).contains(&v));
         }
 
         Ok(())
