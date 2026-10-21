@@ -1,12 +1,12 @@
-use std::sync::Arc;
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
+use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::handlers::{handle_embeddings, handle_health, handle_models, AppState};
+use crate::handlers::{AppState, handle_embeddings, handle_health, handle_models};
 
 /// Construct the Axum router configured with CORS, Tracing, and API endpoints.
 pub fn build_router(state: Arc<AppState>) -> Router {

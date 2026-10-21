@@ -8,7 +8,7 @@ use glypr_core::GlyprEmbedder;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-pub use engine::{spawn_inference_engine, EngineHandle, ModelMeta, OwnedTask};
+pub use engine::{EngineHandle, ModelMeta, OwnedTask, spawn_inference_engine};
 pub use handlers::AppState;
 pub use routes::build_router;
 pub use schema::*;
@@ -44,7 +44,10 @@ pub async fn run_server(config: ServerConfig, embedder: GlyprEmbedder) -> Result
         .map_err(|e| anyhow::anyhow!("Invalid host/port configuration: {}", e))?;
 
     println!("🚀 Starting glypr embedding server on http://{}", addr);
-    println!("   - POST http://{}/v1/embeddings (OpenAI Embeddings API)", addr);
+    println!(
+        "   - POST http://{}/v1/embeddings (OpenAI Embeddings API)",
+        addr
+    );
     println!("   - GET  http://{}/v1/models     (Model metadata)", addr);
     println!("   - GET  http://{}/health        (Health check)", addr);
 

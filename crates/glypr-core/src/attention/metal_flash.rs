@@ -1,11 +1,13 @@
 use candle_core::{DType, Device, Result, Tensor};
-use candle_metal_kernels::metal::{ComputePipeline, ConstantValues, Device as MtlDevice, Library, Value};
+use candle_metal_kernels::metal::{
+    ComputePipeline, ConstantValues, Device as MtlDevice, Library, Value,
+};
 use objc2_metal::MTLSize;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use super::traits::AttentionBackend;
 use super::chunked::ChunkedSlidingAttention;
+use super::traits::AttentionBackend;
 
 static SLIDING_SHADER_SRC: &str = include_str!("steel_attention_sliding.metal");
 static M5_SHADER_SRC: &str = include_str!("steel_attention_m5.metal");
@@ -91,16 +93,22 @@ fn get_or_compile_pipeline(
             _ => {
                 return Err(candle_core::Error::Msg(format!(
                     "Unsupported head_dim for M5 MetalFlashAttention: {head_dim}"
-                )))
+                )));
             }
         };
         let func = cache
             .library
             .get_function(func_name, Some(&cv))
-            .map_err(|e| candle_core::Error::Metal(format!("Failed to get function {func_name}: {e}").into()))?;
+            .map_err(|e| {
+                candle_core::Error::Metal(format!("Failed to get function {func_name}: {e}").into())
+            })?;
         let pipeline = device
             .new_compute_pipeline_state_with_function(&func)
-            .map_err(|e| candle_core::Error::Metal(format!("Failed to create M5 compute pipeline: {e}").into()))?;
+            .map_err(|e| {
+                candle_core::Error::Metal(
+                    format!("Failed to create M5 compute pipeline: {e}").into(),
+                )
+            })?;
 
         map.insert(key, pipeline.clone());
         return Ok(pipeline);
@@ -135,16 +143,20 @@ fn get_or_compile_pipeline(
         _ => {
             return Err(candle_core::Error::Msg(format!(
                 "Unsupported head_dim for MetalFlashAttention: {head_dim}"
-            )))
+            )));
         }
     };
     let func = cache
         .library
         .get_function(func_name, Some(&cv))
-        .map_err(|e| candle_core::Error::Metal(format!("Failed to get function {func_name}: {e}").into()))?;
+        .map_err(|e| {
+            candle_core::Error::Metal(format!("Failed to get function {func_name}: {e}").into())
+        })?;
     let pipeline = device
         .new_compute_pipeline_state_with_function(&func)
-        .map_err(|e| candle_core::Error::Metal(format!("Failed to create compute pipeline: {e}").into()))?;
+        .map_err(|e| {
+            candle_core::Error::Metal(format!("Failed to create compute pipeline: {e}").into())
+        })?;
 
     map.insert(key, pipeline.clone());
     Ok(pipeline)
@@ -180,9 +192,23 @@ impl AttentionBackend for MetalFlashAttention {
                 let (_b, h, _s, _d) = q.dims4()?;
                 let (_kb, kh, _ks, _kd) = k.dims4()?;
                 let gqa = h / kh;
-                let k_rep = if gqa > 1 { super::repeat_kv(k, gqa)? } else { k.clone() };
-                let v_rep = if gqa > 1 { super::repeat_kv(v, gqa)? } else { v.clone() };
-                return ChunkedSlidingAttention.compute_attention(q, &k_rep, &v_rep, attention_mask, sliding_window);
+                let k_rep = if gqa > 1 {
+                    super::repeat_kv(k, gqa)?
+                } else {
+                    k.clone()
+                };
+                let v_rep = if gqa > 1 {
+                    super::repeat_kv(v, gqa)?
+                } else {
+                    v.clone()
+                };
+                return ChunkedSlidingAttention.compute_attention(
+                    q,
+                    &k_rep,
+                    &v_rep,
+                    attention_mask,
+                    sliding_window,
+                );
             }
         };
 
@@ -192,24 +218,62 @@ impl AttentionBackend for MetalFlashAttention {
 
         // Metal Flash Kernel supports head_dim = 256 and 512 in BF16
         if (d != 256 && d != 512) || q.dtype() != DType::BF16 {
-            let k_rep = if gqa_factor > 1 { super::repeat_kv(k, gqa_factor as usize)? } else { k.clone() };
-            let v_rep = if gqa_factor > 1 { super::repeat_kv(v, gqa_factor as usize)? } else { v.clone() };
-            return ChunkedSlidingAttention.compute_attention(q, &k_rep, &v_rep, attention_mask, sliding_window);
+            let k_rep = if gqa_factor > 1 {
+                super::repeat_kv(k, gqa_factor as usize)?
+            } else {
+                k.clone()
+            };
+            let v_rep = if gqa_factor > 1 {
+                super::repeat_kv(v, gqa_factor as usize)?
+            } else {
+                v.clone()
+            };
+            return ChunkedSlidingAttention.compute_attention(
+                q,
+                &k_rep,
+                &v_rep,
+                attention_mask,
+                sliding_window,
+            );
         }
 
         // Validate optional additive mask ([B, 1, 1, S] or [B, H|1, S|1, S] in BF16 on Metal)
         let mask_contig = if let Some(m) = attention_mask {
-            if m.dtype() != DType::BF16 || !m.device().is_metal() || m.dims().len() != 4 || m.dim(3)? != s {
-                let k_rep = if gqa_factor > 1 { super::repeat_kv(k, gqa_factor as usize)? } else { k.clone() };
-                let v_rep = if gqa_factor > 1 { super::repeat_kv(v, gqa_factor as usize)? } else { v.clone() };
-                return super::metal_sdpa::MetalSdpaAttention.compute_attention(q, &k_rep, &v_rep, attention_mask, sliding_window);
+            if m.dtype() != DType::BF16
+                || !m.device().is_metal()
+                || m.dims().len() != 4
+                || m.dim(3)? != s
+            {
+                let k_rep = if gqa_factor > 1 {
+                    super::repeat_kv(k, gqa_factor as usize)?
+                } else {
+                    k.clone()
+                };
+                let v_rep = if gqa_factor > 1 {
+                    super::repeat_kv(v, gqa_factor as usize)?
+                } else {
+                    v.clone()
+                };
+                return super::metal_sdpa::MetalSdpaAttention.compute_attention(
+                    q,
+                    &k_rep,
+                    &v_rep,
+                    attention_mask,
+                    sliding_window,
+                );
             }
-            Some(if m.is_contiguous() { m.clone() } else { m.contiguous()? })
+            Some(if m.is_contiguous() {
+                m.clone()
+            } else {
+                m.contiguous()?
+            })
         } else {
             None
         };
 
-        let use_m5 = crate::metal_kernels::MetalCapabilities::detect(mdev.metal_device()).use_m5_tensor_ops() && (s % 64 == 0);
+        let use_m5 = crate::metal_kernels::MetalCapabilities::detect(mdev.metal_device())
+            .use_m5_tensor_ops()
+            && (s % 64 == 0);
 
         let (bq, bk, wm, wn) = if use_m5 {
             (64, 32, 4, 1)
@@ -222,7 +286,8 @@ impl AttentionBackend for MetalFlashAttention {
         let align_k = (s % bk) == 0;
         let has_mask = mask_contig.is_some();
 
-        let pipeline = get_or_compile_pipeline(mdev.metal_device(), d, align_q, align_k, has_mask, use_m5)?;
+        let pipeline =
+            get_or_compile_pipeline(mdev.metal_device(), d, align_q, align_k, has_mask, use_m5)?;
 
         let out_tensor = Tensor::zeros((b, h, s, d), DType::BF16, q.device())?;
 
@@ -232,10 +297,22 @@ impl AttentionBackend for MetalFlashAttention {
             let (v_storage, v_layout) = v.storage_and_layout();
             let (out_storage, out_layout) = out_tensor.storage_and_layout();
 
-            let q_buf = match &*q_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-            let k_buf = match &*k_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-            let v_buf = match &*v_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-            let out_buf = match &*out_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
+            let q_buf = match &*q_storage {
+                candle_core::Storage::Metal(m) => m.buffer(),
+                _ => unreachable!(),
+            };
+            let k_buf = match &*k_storage {
+                candle_core::Storage::Metal(m) => m.buffer(),
+                _ => unreachable!(),
+            };
+            let v_buf = match &*v_storage {
+                candle_core::Storage::Metal(m) => m.buffer(),
+                _ => unreachable!(),
+            };
+            let out_buf = match &*out_storage {
+                candle_core::Storage::Metal(m) => m.buffer(),
+                _ => unreachable!(),
+            };
 
             let nq = s.div_ceil(bq);
             let nk = s.div_ceil(bk);
@@ -261,10 +338,26 @@ impl AttentionBackend for MetalFlashAttention {
                 kl_rem: (s - nk_aligned * bk) as i32,
                 ql_off: 0,
                 window_size,
-                q_strides: [q_layout.stride()[0] as i64, q_layout.stride()[1] as i64, q_layout.stride()[2] as i64],
-                k_strides: [k_layout.stride()[0] as i64, k_layout.stride()[1] as i64, k_layout.stride()[2] as i64],
-                v_strides: [v_layout.stride()[0] as i64, v_layout.stride()[1] as i64, v_layout.stride()[2] as i64],
-                o_strides: [out_layout.stride()[0] as i64, out_layout.stride()[1] as i64, out_layout.stride()[2] as i64],
+                q_strides: [
+                    q_layout.stride()[0] as i64,
+                    q_layout.stride()[1] as i64,
+                    q_layout.stride()[2] as i64,
+                ],
+                k_strides: [
+                    k_layout.stride()[0] as i64,
+                    k_layout.stride()[1] as i64,
+                    k_layout.stride()[2] as i64,
+                ],
+                v_strides: [
+                    v_layout.stride()[0] as i64,
+                    v_layout.stride()[1] as i64,
+                    v_layout.stride()[2] as i64,
+                ],
+                o_strides: [
+                    out_layout.stride()[0] as i64,
+                    out_layout.stride()[1] as i64,
+                    out_layout.stride()[2] as i64,
+                ],
             };
 
             let elem_bytes = q.dtype().size_in_bytes();
@@ -285,7 +378,10 @@ impl AttentionBackend for MetalFlashAttention {
 
             if let Some(ref m_tensor) = mask_contig {
                 let (m_storage, m_layout) = m_tensor.storage_and_layout();
-                let m_buf = match &*m_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
+                let m_buf = match &*m_storage {
+                    candle_core::Storage::Metal(m) => m.buffer(),
+                    _ => unreachable!(),
+                };
                 let m_dims = m_layout.dims();
                 let m_str = m_layout.stride();
                 // Zero-stride broadcast across batch/head/query-row dimensions when dim == 1
@@ -300,8 +396,16 @@ impl AttentionBackend for MetalFlashAttention {
                 enc_ref.set_input_buffer(6, Some(m_buf), m_offset);
             }
 
-            let grid_dims = MTLSize { width: nq, height: h, depth: b };
-            let group_dims = MTLSize { width: 32, height: wm, depth: wn };
+            let grid_dims = MTLSize {
+                width: nq,
+                height: h,
+                depth: b,
+            };
+            let group_dims = MTLSize {
+                width: 32,
+                height: wm,
+                depth: wn,
+            };
             enc_ref.dispatch_thread_groups(grid_dims, group_dims);
         }
 
@@ -331,17 +435,23 @@ mod tests {
         for &(d, sliding) in &[(256usize, Some(16usize)), (512usize, None)] {
             for &s in &[19usize, 64usize, 145usize] {
                 let (b, h, kh) = (2, 4, if d == 256 { 2 } else { 1 });
-                let q_vec: Vec<f32> = (0..(b * h * s * d)).map(|i| ((i as f32) * 0.031).sin() * 0.5).collect();
-                let k_vec: Vec<f32> = (0..(b * kh * s * d)).map(|i| ((i as f32) * 0.017).cos() * 0.5).collect();
-                let v_vec: Vec<f32> = (0..(b * kh * s * d)).map(|i| ((i as f32) * 0.023).sin() * 0.5).collect();
+                let q_vec: Vec<f32> = (0..(b * h * s * d))
+                    .map(|i| ((i as f32) * 0.031).sin() * 0.5)
+                    .collect();
+                let k_vec: Vec<f32> = (0..(b * kh * s * d))
+                    .map(|i| ((i as f32) * 0.017).cos() * 0.5)
+                    .collect();
+                let v_vec: Vec<f32> = (0..(b * kh * s * d))
+                    .map(|i| ((i as f32) * 0.023).sin() * 0.5)
+                    .collect();
                 let q = Tensor::from_vec(q_vec, (b, h, s, d), &dev)?.to_dtype(DType::BF16)?;
                 let k = Tensor::from_vec(k_vec, (b, kh, s, d), &dev)?.to_dtype(DType::BF16)?;
                 let v = Tensor::from_vec(v_vec, (b, kh, s, d), &dev)?.to_dtype(DType::BF16)?;
 
                 // Test without mask and with additive padding mask [B, 1, 1, S]
                 let mut mask_vec = vec![0.0f32; b * s];
-                for j in (s - 5)..s {
-                    mask_vec[j] = f32::NEG_INFINITY;
+                for val in &mut mask_vec[(s - 5)..s] {
+                    *val = f32::NEG_INFINITY;
                 }
                 let mask = Tensor::from_vec(mask_vec, (b, 1, 1, s), &dev)?.to_dtype(DType::BF16)?;
 
@@ -349,21 +459,32 @@ mod tests {
                     unsafe {
                         std::env::set_var("GLYPR_METAL_TIER", "legacy");
                     }
-                    let ref_out = MetalFlashAttention.compute_attention(&q, &k, &v, mask_opt, sliding)?;
+                    let ref_out =
+                        MetalFlashAttention.compute_attention(&q, &k, &v, mask_opt, sliding)?;
                     unsafe {
                         std::env::set_var("GLYPR_METAL_TIER", "m5");
                     }
-                    let m5_out = MetalFlashAttention.compute_attention(&q, &k, &v, mask_opt, sliding)?;
+                    let m5_out =
+                        MetalFlashAttention.compute_attention(&q, &k, &v, mask_opt, sliding)?;
                     unsafe {
                         std::env::remove_var("GLYPR_METAL_TIER");
                     }
 
-                    let ref_v = ref_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-                    let m5_v = m5_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                    let ref_v = ref_out
+                        .to_dtype(DType::F32)?
+                        .flatten_all()?
+                        .to_vec1::<f32>()?;
+                    let m5_v = m5_out
+                        .to_dtype(DType::F32)?
+                        .flatten_all()?
+                        .to_vec1::<f32>()?;
                     let mut max_diff = 0.0f32;
                     for (i, (&a, &b_val)) in ref_v.iter().zip(m5_v.iter()).enumerate() {
                         if a.is_nan() || b_val.is_nan() {
-                            panic!("NaN at d={d} s={s} masked={} idx={i}: ref={a} m5={b_val}", mask_opt.is_some());
+                            panic!(
+                                "NaN at d={d} s={s} masked={} idx={i}: ref={a} m5={b_val}",
+                                mask_opt.is_some()
+                            );
                         }
                         let diff = (a - b_val).abs();
                         if diff > max_diff {
@@ -385,4 +506,3 @@ mod tests {
         Ok(())
     }
 }
-

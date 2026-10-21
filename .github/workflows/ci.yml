@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  format-and-lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check code formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy (warnings as errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  documentation:
+    name: Rustdoc Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify documentation builds without warnings
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+  test-linux-cpu:
+    name: Linux CPU (SIMD)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check workspace compilation
+        run: cargo check --workspace --all-targets
+
+      - name: Run unit tests (CPU SIMD)
+        run: cargo test --workspace --lib
+
+      - name: Run core logic tests
+        run: cargo test -p glypr-core --test context_preflight --test quantization --test test_cpu_simd
+
+  test-macos-apple-silicon:
+    name: macOS Apple Silicon (Metal & ANE)
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check compilation with Metal & ANE features
+        run: cargo check --workspace --all-targets --features metal,ane
+
+      - name: Run unit tests with Metal & ANE features
+        run: cargo test --workspace --lib --features metal,ane
+
+      - name: Run CLI tests
+        run: cargo test -p glypr --test cli_test

@@ -1,6 +1,6 @@
-use candle_core::{Result, Tensor, D};
 use crate::linear::LinearOp;
 use crate::ple::gelu_tanh;
+use candle_core::{D, Result, Tensor};
 
 #[derive(Debug, Clone)]
 pub struct MLP {
@@ -12,13 +12,14 @@ pub struct MLP {
 
 impl MLP {
     pub fn new(mut gate_proj: LinearOp, mut up_proj: LinearOp, down_proj: LinearOp) -> Self {
-        let fused_gate_up = if let Some((fused, mut views)) = LinearOp::try_concat(&[&gate_proj, &up_proj]) {
-            up_proj = views.pop().unwrap();
-            gate_proj = views.pop().unwrap();
-            Some(fused)
-        } else {
-            None
-        };
+        let fused_gate_up =
+            if let Some((fused, mut views)) = LinearOp::try_concat(&[&gate_proj, &up_proj]) {
+                up_proj = views.pop().unwrap();
+                gate_proj = views.pop().unwrap();
+                Some(fused)
+            } else {
+                None
+            };
         Self {
             gate_proj,
             up_proj,
@@ -68,4 +69,3 @@ impl MLP {
         self.down_proj.forward(&gated)
     }
 }
-

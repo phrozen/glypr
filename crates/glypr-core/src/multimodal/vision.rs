@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::{Embedding, Linear};
 
 use crate::config::VisionConfig;
@@ -65,7 +65,10 @@ pub struct VisionRotaryEmbedding {
 
 impl VisionRotaryEmbedding {
     pub fn new(head_dim: usize, rope_theta: f64) -> Self {
-        Self { head_dim, rope_theta }
+        Self {
+            head_dim,
+            rope_theta,
+        }
     }
 
     /// Precompute (cos, sin) tensors directly from CPU position_ids slice without GPU->CPU readback
@@ -110,8 +113,10 @@ impl VisionRotaryEmbedding {
             }
         }
 
-        let cos = Tensor::from_vec(cos_vec, (1, 1, num_patches, self.head_dim), device)?.to_dtype(dtype)?;
-        let sin = Tensor::from_vec(sin_vec, (1, 1, num_patches, self.head_dim), device)?.to_dtype(dtype)?;
+        let cos = Tensor::from_vec(cos_vec, (1, 1, num_patches, self.head_dim), device)?
+            .to_dtype(dtype)?;
+        let sin = Tensor::from_vec(sin_vec, (1, 1, num_patches, self.head_dim), device)?
+            .to_dtype(dtype)?;
         Ok((cos, sin))
     }
 
@@ -171,6 +176,7 @@ pub struct VisionAttention {
 }
 
 impl VisionAttention {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mut q_proj: LinearOp,
         mut k_proj: LinearOp,
@@ -182,16 +188,15 @@ impl VisionAttention {
         num_heads: usize,
         head_dim: usize,
     ) -> Self {
-        let fused_qkv = if let Some((fused, mut views)) =
-            LinearOp::try_concat(&[&q_proj, &k_proj, &v_proj])
-        {
-            v_proj = views.pop().unwrap();
-            k_proj = views.pop().unwrap();
-            q_proj = views.pop().unwrap();
-            Some(fused)
-        } else {
-            None
-        };
+        let fused_qkv =
+            if let Some((fused, mut views)) = LinearOp::try_concat(&[&q_proj, &k_proj, &v_proj]) {
+                v_proj = views.pop().unwrap();
+                k_proj = views.pop().unwrap();
+                q_proj = views.pop().unwrap();
+                Some(fused)
+            } else {
+                None
+            };
         Self {
             q_proj,
             k_proj,
@@ -216,17 +221,18 @@ impl VisionAttention {
         let (batch, seq_len, _hidden_size) = hidden_states.dims3()?;
 
         #[cfg(feature = "metal")]
-        let (q, k, v) = if hidden_states.device().is_metal()
-            && hidden_states.dtype() == DType::BF16
-            && self.fused_qkv.is_some()
-            && self.q_norm.weight().is_some()
-            && self.k_norm.weight().is_some()
-        {
-            let qkv = self.fused_qkv.as_ref().unwrap().forward(hidden_states)?;
+        let (q, k, v) = if let (true, true, Some(fused), Some(q_w), Some(k_w)) = (
+            hidden_states.device().is_metal(),
+            hidden_states.dtype() == DType::BF16,
+            self.fused_qkv.as_ref(),
+            self.q_norm.weight(),
+            self.k_norm.weight(),
+        ) {
+            let qkv = fused.forward(hidden_states)?;
             crate::metal_kernels::fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
                 &qkv,
-                self.q_norm.weight().unwrap(),
-                self.k_norm.weight().unwrap(),
+                q_w,
+                k_w,
                 self.v_norm.weight(),
                 cos,
                 sin,
@@ -245,9 +251,21 @@ impl VisionAttention {
             let k = k.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
             let v = v.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
 
-            let q = self.q_norm.forward(&q)?.permute((0, 2, 1, 3))?.contiguous()?;
-            let k = self.k_norm.forward(&k)?.permute((0, 2, 1, 3))?.contiguous()?;
-            let v = self.v_norm.forward(&v)?.permute((0, 2, 1, 3))?.contiguous()?;
+            let q = self
+                .q_norm
+                .forward(&q)?
+                .permute((0, 2, 1, 3))?
+                .contiguous()?;
+            let k = self
+                .k_norm
+                .forward(&k)?
+                .permute((0, 2, 1, 3))?
+                .contiguous()?;
+            let v = self
+                .v_norm
+                .forward(&v)?
+                .permute((0, 2, 1, 3))?
+                .contiguous()?;
 
             let q = rope.apply_precomputed(&q, cos, sin)?;
             let k = rope.apply_precomputed(&k, cos, sin)?;
@@ -264,9 +282,21 @@ impl VisionAttention {
             let k = k.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
             let v = v.reshape((batch, seq_len, self.num_heads, self.head_dim))?;
 
-            let q = self.q_norm.forward(&q)?.permute((0, 2, 1, 3))?.contiguous()?;
-            let k = self.k_norm.forward(&k)?.permute((0, 2, 1, 3))?.contiguous()?;
-            let v = self.v_norm.forward(&v)?.permute((0, 2, 1, 3))?.contiguous()?;
+            let q = self
+                .q_norm
+                .forward(&q)?
+                .permute((0, 2, 1, 3))?
+                .contiguous()?;
+            let k = self
+                .k_norm
+                .forward(&k)?
+                .permute((0, 2, 1, 3))?
+                .contiguous()?;
+            let v = self
+                .v_norm
+                .forward(&v)?
+                .permute((0, 2, 1, 3))?
+                .contiguous()?;
 
             let q = rope.apply_precomputed(&q, cos, sin)?;
             let k = rope.apply_precomputed(&k, cos, sin)?;
@@ -288,7 +318,11 @@ impl VisionAttention {
         };
 
         // Reshape back to [batch, seq_len, hidden_size]
-        let attn_output = attn_output.permute((0, 2, 1, 3))?.reshape((batch, seq_len, self.num_heads * self.head_dim))?;
+        let attn_output = attn_output.permute((0, 2, 1, 3))?.reshape((
+            batch,
+            seq_len,
+            self.num_heads * self.head_dim,
+        ))?;
         self.o_proj.forward(&attn_output)
     }
 }
@@ -314,12 +348,15 @@ impl VisionEncoderLayer {
         // Pre-attention layernorm + attention + fused post-norm residual add
         let normed = self.ln1.forward(hidden_states)?;
         let attn_out = self.self_attn.forward(&normed, rope, cos, sin)?;
-        let hidden_states = self.attn_post_norm.forward_residual_add(&attn_out, hidden_states, None)?;
+        let hidden_states =
+            self.attn_post_norm
+                .forward_residual_add(&attn_out, hidden_states, None)?;
 
         // Pre-feedforward layernorm + MLP + fused post-norm residual add
         let normed = self.ln2.forward(&hidden_states)?;
         let mlp_out = self.mlp.forward(&normed)?;
-        self.ffn_post_norm.forward_residual_add(&mlp_out, &hidden_states, None)
+        self.ffn_post_norm
+            .forward_residual_add(&mlp_out, &hidden_states, None)
     }
 }
 
@@ -353,9 +390,11 @@ impl VisionPooler {
         let orig_dtype = hidden_states.dtype();
         // Stage 1: Height pooling (Rank 3: [b * out_h, k, patch_width * hidden_size] -> [b * out_h, patch_width * hidden_size])
         // Candle Metal kernels natively support rank <= 4 with exact hardware striding.
-        let h_blocks = hidden_states
-            .to_dtype(DType::F32)?
-            .reshape((b * out_h, k, patch_width * hidden_size))?;
+        let h_blocks = hidden_states.to_dtype(DType::F32)?.reshape((
+            b * out_h,
+            k,
+            patch_width * hidden_size,
+        ))?;
         let h_sum = h_blocks.sum(1)?;
 
         // Stage 2: Width pooling (Rank 4: [b * out_h, out_w, k, hidden_size] -> [b * out_h, out_w, hidden_size])
@@ -428,12 +467,9 @@ impl VisionTower {
             all_pixels.extend_from_slice(&img.pixel_values);
         }
 
-        let pixel_tensor = Tensor::from_vec(
-            all_pixels,
-            (b, num_patches, patch_pixels),
-            &self.device,
-        )?
-        .to_dtype(self.dtype)?;
+        let pixel_tensor =
+            Tensor::from_vec(all_pixels, (b, num_patches, patch_pixels), &self.device)?
+                .to_dtype(self.dtype)?;
 
         let pos_tensor = Tensor::from_vec(
             batch[0].position_ids.clone(),
@@ -446,9 +482,12 @@ impl VisionTower {
         let mut hidden_states = self.patch_embedder.forward(&pixel_tensor, &pos_tensor)?;
 
         // 2. Precompute 2D Axial RoPE directly from CPU position_ids without GPU->CPU readback
-        let (cos, sin) = self
-            .rotary_emb
-            .precompute_from_slice(&batch[0].position_ids, num_patches, self.dtype, &self.device)?;
+        let (cos, sin) = self.rotary_emb.precompute_from_slice(
+            &batch[0].position_ids,
+            num_patches,
+            self.dtype,
+            &self.device,
+        )?;
 
         // 3. 16 Transformer layers (batched SDPA natively executes across [b, heads, patches, dim])
         for layer in &self.layers {
@@ -456,16 +495,13 @@ impl VisionTower {
         }
 
         // 4. Batched 2D Spatial pooling: [b, num_soft_tokens, 768]
-        let pooled = self.pooler.pool(
-            &hidden_states,
-            batch[0].patch_width,
-            batch[0].patch_height,
-        )?;
+        let pooled =
+            self.pooler
+                .pool(&hidden_states, batch[0].patch_width, batch[0].patch_height)?;
 
         // 5. Batched projection to 512 dimensions: [b, num_soft_tokens, 512]
         self.projector.forward(&pooled)
     }
-
 
     /// Load Vision Tower directly from GGUF file
     pub fn from_gguf<R: std::io::Read + std::io::Seek>(
@@ -476,11 +512,19 @@ impl VisionTower {
         dtype: DType,
     ) -> Result<Self> {
         // 1. Patch Embedder: permute GGUF [768, 3, 16, 16] -> [768, 16, 16, 3] -> [768, 768]
-        let patch_raw = content.tensor(reader, "v.patch_embd.weight", device)?.dequantize(device)?;
-        let patch_linear_w = patch_raw.permute((0, 2, 3, 1))?.reshape((768, 768))?.to_dtype(dtype)?;
+        let patch_raw = content
+            .tensor(reader, "v.patch_embd.weight", device)?
+            .dequantize(device)?;
+        let patch_linear_w = patch_raw
+            .permute((0, 2, 3, 1))?
+            .reshape((768, 768))?
+            .to_dtype(dtype)?;
         let input_proj = LinearOp::new_standard(Linear::new(patch_linear_w, None));
 
-        let pos_table = content.tensor(reader, "v.position_embd.weight", device)?.dequantize(device)?.to_dtype(dtype)?;
+        let pos_table = content
+            .tensor(reader, "v.position_embd.weight", device)?
+            .dequantize(device)?
+            .to_dtype(dtype)?;
         let patch_embedder = VisionPatchEmbedder {
             input_proj,
             position_embedding_table: pos_table,
@@ -495,16 +539,58 @@ impl VisionTower {
         for l in 0..config.num_hidden_layers {
             let prefix = format!("v.blk.{}", l);
 
-            let ln1_w = load_gguf_norm_tensor(content, reader, &format!("{}.ln1.weight", prefix), device, dtype)?;
+            let ln1_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.ln1.weight", prefix),
+                device,
+                dtype,
+            )?;
             let ln1 = RMSNorm::new(Some(ln1_w), config.rms_norm_eps);
 
-            let q_proj = load_gguf_linear_op(content, reader, &format!("{}.attn_q.weight", prefix), device, dtype)?;
-            let k_proj = load_gguf_linear_op(content, reader, &format!("{}.attn_k.weight", prefix), device, dtype)?;
-            let v_proj = load_gguf_linear_op(content, reader, &format!("{}.attn_v.weight", prefix), device, dtype)?;
-            let o_proj = load_gguf_linear_op(content, reader, &format!("{}.attn_out.weight", prefix), device, dtype)?;
+            let q_proj = load_gguf_linear_op(
+                content,
+                reader,
+                &format!("{}.attn_q.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let k_proj = load_gguf_linear_op(
+                content,
+                reader,
+                &format!("{}.attn_k.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let v_proj = load_gguf_linear_op(
+                content,
+                reader,
+                &format!("{}.attn_v.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let o_proj = load_gguf_linear_op(
+                content,
+                reader,
+                &format!("{}.attn_out.weight", prefix),
+                device,
+                dtype,
+            )?;
 
-            let q_norm_w = load_gguf_norm_tensor(content, reader, &format!("{}.attn_q_norm.weight", prefix), device, dtype)?;
-            let k_norm_w = load_gguf_norm_tensor(content, reader, &format!("{}.attn_k_norm.weight", prefix), device, dtype)?;
+            let q_norm_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.attn_q_norm.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let k_norm_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.attn_k_norm.weight", prefix),
+                device,
+                dtype,
+            )?;
 
             let q_norm = RMSNorm::new(Some(q_norm_w), config.rms_norm_eps);
             let k_norm = RMSNorm::new(Some(k_norm_w), config.rms_norm_eps);
@@ -522,18 +608,54 @@ impl VisionTower {
                 config.head_dim,
             );
 
-            let attn_post_norm_w = load_gguf_norm_tensor(content, reader, &format!("{}.attn_post_norm.weight", prefix), device, dtype)?;
+            let attn_post_norm_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.attn_post_norm.weight", prefix),
+                device,
+                dtype,
+            )?;
             let attn_post_norm = RMSNorm::new(Some(attn_post_norm_w), config.rms_norm_eps);
 
-            let ln2_w = load_gguf_norm_tensor(content, reader, &format!("{}.ln2.weight", prefix), device, dtype)?;
+            let ln2_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.ln2.weight", prefix),
+                device,
+                dtype,
+            )?;
             let ln2 = RMSNorm::new(Some(ln2_w), config.rms_norm_eps);
 
-            let gate_proj = load_gguf_linear_op(content, reader, &format!("{}.ffn_gate.weight", prefix), device, dtype)?;
-            let up_proj = load_gguf_linear_op(content, reader, &format!("{}.ffn_up.weight", prefix), device, dtype)?;
-            let down_proj = load_gguf_linear_op(content, reader, &format!("{}.ffn_down.weight", prefix), device, dtype)?;
+            let gate_proj = load_gguf_linear_op(
+                content,
+                reader,
+                &format!("{}.ffn_gate.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let up_proj = load_gguf_linear_op(
+                content,
+                reader,
+                &format!("{}.ffn_up.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let down_proj = load_gguf_linear_op(
+                content,
+                reader,
+                &format!("{}.ffn_down.weight", prefix),
+                device,
+                dtype,
+            )?;
             let mlp = MLP::new(gate_proj, up_proj, down_proj);
 
-            let ffn_post_norm_w = load_gguf_norm_tensor(content, reader, &format!("{}.ffn_post_norm.weight", prefix), device, dtype)?;
+            let ffn_post_norm_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.ffn_post_norm.weight", prefix),
+                device,
+                dtype,
+            )?;
             let ffn_post_norm = RMSNorm::new(Some(ffn_post_norm_w), config.rms_norm_eps);
 
             layers.push(VisionEncoderLayer {
@@ -551,7 +673,8 @@ impl VisionTower {
 
         // 5. Projector (unscaled RMSNorm + Linear 768 -> 512)
         let proj_norm = RMSNorm::new(None, config.rms_norm_eps); // unscaled
-        let proj_linear = load_gguf_linear_op(content, reader, "mm.input_projection.weight", device, dtype)?;
+        let proj_linear =
+            load_gguf_linear_op(content, reader, "mm.input_projection.weight", device, dtype)?;
         let projector = VisionProjector {
             norm: proj_norm,
             projection: proj_linear,
@@ -623,7 +746,10 @@ mod tests {
         for i in 0..old_pooled.len() {
             let diff = (old_pooled[i] - new_vec[i]).abs();
             if diff > 1e-4 {
-                panic!("Mismatch at idx {}: old={}, new={}, diff={}", i, old_pooled[i], new_vec[i], diff);
+                panic!(
+                    "Mismatch at idx {}: old={}, new={}, diff={}",
+                    i, old_pooled[i], new_vec[i], diff
+                );
             }
         }
         println!("Test passed successfully!");

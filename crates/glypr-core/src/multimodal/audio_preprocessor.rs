@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use rayon::prelude::*;
 use std::sync::OnceLock;
 
@@ -85,8 +85,9 @@ static HANN_WINDOW: OnceLock<[f32; AUDIO_FRAME_LEN]> = OnceLock::new();
 pub fn get_hann_window() -> &'static [f32; AUDIO_FRAME_LEN] {
     HANN_WINDOW.get_or_init(|| {
         let mut window = [0.0f32; AUDIO_FRAME_LEN];
-        for n in 0..AUDIO_FRAME_LEN {
-            window[n] = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * (n as f32) / (AUDIO_FRAME_LEN as f32)).cos();
+        for (n, w) in window.iter_mut().enumerate() {
+            *w = 0.5
+                - 0.5 * (2.0 * std::f32::consts::PI * (n as f32) / (AUDIO_FRAME_LEN as f32)).cos();
         }
         window
     })
@@ -295,7 +296,7 @@ pub fn preprocess_audio(samples: &[f32]) -> Result<ProcessedAudio> {
 /// 2. AudioSubsampleConv runs two Conv2D layers with kernel=3, stride=2, padding=1:
 ///    L1 = (num_frames + 1) / 2
 ///    L2 = (L1 + 1) / 2
-/// Output soft tokens = L2
+///    Output soft tokens = L2
 pub fn compute_audio_soft_token_count(samples_len: usize) -> usize {
     if samples_len == 0 {
         return 0;
@@ -341,14 +342,18 @@ pub fn decode_wav_reader<R: std::io::Read>(mut reader: hound::WavReader<R>) -> R
                     .samples::<i16>()
                     .map(|s| s.map(|v| (v as f32) / scale))
                     .collect::<std::result::Result<Vec<f32>, _>>()
-                    .map_err(|e| anyhow::anyhow!("Failed to read {bits}-bit PCM WAV samples: {e}"))?
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to read {bits}-bit PCM WAV samples: {e}")
+                    })?
             } else {
                 let scale = ((1i64 << (bits - 1)) - 1) as f32;
                 reader
                     .samples::<i32>()
                     .map(|s| s.map(|v| (v as f32) / scale))
                     .collect::<std::result::Result<Vec<f32>, _>>()
-                    .map_err(|e| anyhow::anyhow!("Failed to read {bits}-bit PCM WAV samples: {e}"))?
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to read {bits}-bit PCM WAV samples: {e}")
+                    })?
             }
         }
     };
@@ -433,7 +438,8 @@ mod tests {
         };
         let mut buf = Vec::new();
         {
-            let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buf), spec_f32).unwrap();
+            let mut writer =
+                hound::WavWriter::new(std::io::Cursor::new(&mut buf), spec_f32).unwrap();
             // L = 0.25, R = 0.75 -> Mono = 0.5
             writer.write_sample(0.25f32).unwrap();
             writer.write_sample(0.75f32).unwrap();
@@ -455,7 +461,8 @@ mod tests {
         };
         let mut buf24 = Vec::new();
         {
-            let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buf24), spec_i24).unwrap();
+            let mut writer =
+                hound::WavWriter::new(std::io::Cursor::new(&mut buf24), spec_i24).unwrap();
             let max_24 = (1i32 << 23) - 1;
             writer.write_sample(max_24).unwrap();
             writer.finalize().unwrap();
@@ -479,8 +486,10 @@ mod tests {
         }
         println!("Phase 2 FFT-512 twiddle max magnitude error: {:e}", max_err);
         // Phase 2: Direct 64-bit trigonometry guarantees max magnitude error < 1e-6 (near single-float epsilon)
-        assert!(max_err < 1e-6, "Twiddle drift exceeded bound: {:e}", max_err);
+        assert!(
+            max_err < 1e-6,
+            "Twiddle drift exceeded bound: {:e}",
+            max_err
+        );
     }
 }
-
-

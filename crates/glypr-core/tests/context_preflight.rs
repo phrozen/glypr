@@ -1,6 +1,6 @@
-use std::time::Instant;
 use candle_core::{DType, Device, Tensor};
-use glypr_core::{GlyprEmbedder, MediaItem, DEFAULT_MAX_SEQ_LEN};
+use glypr_core::{DEFAULT_MAX_SEQ_LEN, GlyprEmbedder, MediaItem};
+use std::time::Instant;
 
 fn setup_embedder() -> anyhow::Result<GlyprEmbedder> {
     let device = if candle_core::utils::metal_is_available() {
@@ -8,15 +8,20 @@ fn setup_embedder() -> anyhow::Result<GlyprEmbedder> {
     } else {
         Device::Cpu
     };
-    let dtype = if device.is_metal() { DType::BF16 } else { DType::F32 };
+    let dtype = if device.is_metal() {
+        DType::BF16
+    } else {
+        DType::F32
+    };
 
     let base_gguf = glypr_core::hub::resolve_default_gguf()?;
     let mut embedder = GlyprEmbedder::load_gguf(&base_gguf, &device, dtype)?;
 
     if let Ok(mmproj_gguf) = glypr_core::hub::resolve_default_mmproj()
-        && mmproj_gguf.exists() {
-            embedder.attach_multimodal_projector(&mmproj_gguf)?;
-        }
+        && mmproj_gguf.exists()
+    {
+        embedder.attach_multimodal_projector(&mmproj_gguf)?;
+    }
 
     Ok(embedder)
 }
@@ -42,7 +47,10 @@ fn test_text_exceeds_max_context() -> anyhow::Result<()> {
     let err_str = res.unwrap_err().to_string();
     println!("✓ Text exceeds context error: {}", err_str);
     assert!(err_str.contains("exceeds maximum context limit"));
-    assert!(elapsed.as_millis() < 500, "Should fail fast before running transformer backbone");
+    assert!(
+        elapsed.as_millis() < 500,
+        "Should fail fast before running transformer backbone"
+    );
 
     Ok(())
 }
@@ -58,7 +66,10 @@ fn test_batch_text_exceeds_max_context() -> anyhow::Result<()> {
     let oversized_text = "context ".repeat(9500);
 
     let res = embedder.embed_batch_queries(&[normal_text, &oversized_text], "SearchQuery", None);
-    assert!(res.is_err(), "Expected batch to fail due to oversized element");
+    assert!(
+        res.is_err(),
+        "Expected batch to fail due to oversized element"
+    );
     let err_str = res.unwrap_err().to_string();
     println!("✓ Batch item exceeds context error: {}", err_str);
     assert!(err_str.contains("Batch item 1"));
@@ -82,23 +93,53 @@ fn test_multimodal_multiple_images_burst_exceeds_budget() -> anyhow::Result<()> 
     // 8 images at 1,120 token budget = 8 * (1120 + 2) = 8,976 tokens (> 8,192)
     let img = image::DynamicImage::new_rgb8(224, 224);
     let items = vec![
-        MediaItem::Image { image: &img, budget: Some(1120) },
-        MediaItem::Image { image: &img, budget: Some(1120) },
-        MediaItem::Image { image: &img, budget: Some(1120) },
-        MediaItem::Image { image: &img, budget: Some(1120) },
-        MediaItem::Image { image: &img, budget: Some(1120) },
-        MediaItem::Image { image: &img, budget: Some(1120) },
-        MediaItem::Image { image: &img, budget: Some(1120) },
-        MediaItem::Image { image: &img, budget: Some(1120) },
+        MediaItem::Image {
+            image: &img,
+            budget: Some(1120),
+        },
+        MediaItem::Image {
+            image: &img,
+            budget: Some(1120),
+        },
+        MediaItem::Image {
+            image: &img,
+            budget: Some(1120),
+        },
+        MediaItem::Image {
+            image: &img,
+            budget: Some(1120),
+        },
+        MediaItem::Image {
+            image: &img,
+            budget: Some(1120),
+        },
+        MediaItem::Image {
+            image: &img,
+            budget: Some(1120),
+        },
+        MediaItem::Image {
+            image: &img,
+            budget: Some(1120),
+        },
+        MediaItem::Image {
+            image: &img,
+            budget: Some(1120),
+        },
     ];
 
     let start = Instant::now();
     let res = embedder.embed_composite(Some("Describe all 8 images"), &items, None);
     let elapsed = start.elapsed();
 
-    assert!(res.is_err(), "Expected error for multimodal burst exceeding context limit");
+    assert!(
+        res.is_err(),
+        "Expected error for multimodal burst exceeding context limit"
+    );
     let err_str = res.unwrap_err().to_string();
-    println!("✓ Multimodal multi-image error: {} (took {:?})", err_str, elapsed);
+    println!(
+        "✓ Multimodal multi-image error: {} (took {:?})",
+        err_str, elapsed
+    );
     assert!(err_str.contains("Multimodal sequence length"));
     assert!(err_str.contains("exceeds maximum context limit"));
 
@@ -128,15 +169,23 @@ fn test_multimodal_audio_plus_long_text_exceeds_budget() -> anyhow::Result<()> {
     // Long prompt with ~8,200 tokens
     let long_prompt = "audio description ".repeat(4500);
 
-    let items = vec![MediaItem::Audio { samples: &audio_samples }];
+    let items = vec![MediaItem::Audio {
+        samples: &audio_samples,
+    }];
 
     let start = Instant::now();
     let res = embedder.embed_composite(Some(&long_prompt), &items, None);
     let elapsed = start.elapsed();
 
-    assert!(res.is_err(), "Expected error for audio + oversized text prompt");
+    assert!(
+        res.is_err(),
+        "Expected error for audio + oversized text prompt"
+    );
     let err_str = res.unwrap_err().to_string();
-    println!("✓ Multimodal audio + text error: {} (took {:?})", err_str, elapsed);
+    println!(
+        "✓ Multimodal audio + text error: {} (took {:?})",
+        err_str, elapsed
+    );
     assert!(err_str.contains("Multimodal sequence length"));
     assert!(err_str.contains("exceeds maximum context limit"));
 
@@ -172,7 +221,10 @@ fn test_configurable_max_seq_len() -> anyhow::Result<()> {
     // Restore to standard 8,192 limit
     embedder.set_max_seq_len(DEFAULT_MAX_SEQ_LEN);
     let res_ok = embedder.embed_query(prompt, "SearchQuery", None);
-    assert!(res_ok.is_ok(), "Should succeed after restoring context limit");
+    assert!(
+        res_ok.is_ok(),
+        "Should succeed after restoring context limit"
+    );
 
     Ok(())
 }
@@ -190,7 +242,10 @@ fn test_model_level_defense_in_depth() -> anyhow::Result<()> {
     let dummy_ids = Tensor::zeros((1, oversized_len), DType::U32, &embedder.device)?;
 
     let res = embedder.model.forward(&dummy_ids, None);
-    assert!(res.is_err(), "Direct model forward must reject inputs larger than max_position_embeddings");
+    assert!(
+        res.is_err(),
+        "Direct model forward must reject inputs larger than max_position_embeddings"
+    );
     let err_str = res.unwrap_err().to_string();
     println!("✓ Model defense-in-depth error: {}", err_str);
     assert!(err_str.contains("exceeds model max_position_embeddings"));

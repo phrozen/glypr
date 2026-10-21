@@ -36,27 +36,43 @@ fn main() -> Result<()> {
     let mut embedder = GlyprEmbedder::load_gguf_bf16(&gguf_path, &device)?;
     embedder.set_attention_mode(AttentionMode::ChunkedSliding);
 
-    println!("Model Loaded. Metal VRAM: {:.2} MB", get_metal_allocated_bytes() as f64 / (1024.0 * 1024.0));
+    println!(
+        "Model Loaded. Metal VRAM: {:.2} MB",
+        get_metal_allocated_bytes() as f64 / (1024.0 * 1024.0)
+    );
 
     let corpus_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap().parent().unwrap()
-        .join("tests/golden_vectors").join("corpus_8k.json");
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/golden_vectors")
+        .join("corpus_8k.json");
     let corpus_bytes = fs::read(&corpus_path)?;
     let corpus: serde_json::Value = serde_json::from_slice(&corpus_bytes)?;
-    let entry = corpus["entries"].as_array().unwrap().iter().find(|e| e["id"] == "doc_physics_8192t").unwrap();
+    let entry = corpus["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "doc_physics_8192t")
+        .unwrap();
     let content = entry["content"].as_str().unwrap();
 
     let pool = unsafe { objc_autoreleasePoolPush() };
 
     let t0 = std::time::Instant::now();
     let _ = embedder.embed_document(content, None, Some(768))?;
-    println!("Embedded 8k doc in {:.2} ms. Metal VRAM before pool pop: {:.2} MB", 
+    println!(
+        "Embedded 8k doc in {:.2} ms. Metal VRAM before pool pop: {:.2} MB",
         t0.elapsed().as_secs_f64() * 1000.0,
         get_metal_allocated_bytes() as f64 / (1024.0 * 1024.0)
     );
 
     unsafe { objc_autoreleasePoolPop(pool) };
-    println!("Metal VRAM after pool pop: {:.2} MB", get_metal_allocated_bytes() as f64 / (1024.0 * 1024.0));
+    println!(
+        "Metal VRAM after pool pop: {:.2} MB",
+        get_metal_allocated_bytes() as f64 / (1024.0 * 1024.0)
+    );
 
     Ok(())
 }

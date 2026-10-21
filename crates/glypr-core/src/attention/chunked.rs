@@ -1,6 +1,6 @@
-use candle_core::{DType, Device, Result, Tensor, D};
-use super::traits::AttentionBackend;
 use super::standard::StandardAttention;
+use super::traits::AttentionBackend;
+use candle_core::{D, DType, Device, Result, Tensor};
 
 /// Precompute reusable static chunk masks for sliding window attention
 fn get_static_chunk_masks(
@@ -19,8 +19,8 @@ fn get_static_chunk_masks(
             }
         }
     }
-    let mask_first = Tensor::from_vec(mask_first_vec, (1, 1, window, 2 * window), device)?
-        .to_dtype(dtype)?;
+    let mask_first =
+        Tensor::from_vec(mask_first_vec, (1, 1, window, 2 * window), device)?.to_dtype(dtype)?;
 
     // 2. Middle chunk mask: shape [1, 1, W, 3W]
     // global_q = W + i, global_k = j (0..3W) -> diff = |W + i - j|
@@ -33,8 +33,8 @@ fn get_static_chunk_masks(
             }
         }
     }
-    let mask_middle = Tensor::from_vec(mask_middle_vec, (1, 1, window, 3 * window), device)?
-        .to_dtype(dtype)?;
+    let mask_middle =
+        Tensor::from_vec(mask_middle_vec, (1, 1, window, 3 * window), device)?.to_dtype(dtype)?;
 
     // 3. Last chunk mask: shape [1, 1, W, 2W]
     // global_q = W + i, global_k = j (0..2W) -> diff = (W + i) - j
@@ -47,8 +47,8 @@ fn get_static_chunk_masks(
             }
         }
     }
-    let mask_last = Tensor::from_vec(mask_last_vec, (1, 1, window, 2 * window), device)?
-        .to_dtype(dtype)?;
+    let mask_last =
+        Tensor::from_vec(mask_last_vec, (1, 1, window, 2 * window), device)?.to_dtype(dtype)?;
 
     Ok((mask_first, mask_middle, mask_last))
 }
@@ -74,7 +74,13 @@ impl AttentionBackend for ChunkedSlidingAttention {
         let window = match sliding_window {
             Some(w) if s > w => w,
             _ => {
-                return StandardAttention.compute_attention(q, k, v, attention_mask, sliding_window);
+                return StandardAttention.compute_attention(
+                    q,
+                    k,
+                    v,
+                    attention_mask,
+                    sliding_window,
+                );
             }
         };
 
@@ -98,7 +104,11 @@ impl AttentionBackend for ChunkedSlidingAttention {
 
             let q_chunk = q.narrow(2, q_start, q_len)?;
 
-            let kv_start = if chunk_idx > 0 { (chunk_idx - 1) * chunk_size } else { 0 };
+            let kv_start = if chunk_idx > 0 {
+                (chunk_idx - 1) * chunk_size
+            } else {
+                0
+            };
             let kv_end = ((chunk_idx + 2) * chunk_size).min(s);
             let kv_len = kv_end - kv_start;
 
@@ -111,7 +121,9 @@ impl AttentionBackend for ChunkedSlidingAttention {
             // Apply attention mask
             if let Some(mask) = attention_mask {
                 // Slice provided global/padding mask
-                let mask_chunk = mask.narrow(2, q_start, q_len)?.narrow(3, kv_start, kv_len)?;
+                let mask_chunk = mask
+                    .narrow(2, q_start, q_len)?
+                    .narrow(3, kv_start, kv_len)?;
                 attn_weights = attn_weights.broadcast_add(&mask_chunk)?;
             } else if let Some((ref mask_first, ref mask_middle, ref mask_last)) = static_masks {
                 // Zero-allocation path using precomputed static masks

@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::LayerNorm;
 
 use crate::config::AudioConfig;
@@ -34,9 +34,10 @@ fn load_optional_f32_scalar<R: std::io::Read + std::io::Seek>(
 ) -> Option<f32> {
     if let Ok(qt) = content.tensor(reader, name, &Device::Cpu)
         && let Ok(t) = qt.dequantize(&Device::Cpu)
-            && let Ok(vec) = t.to_vec1::<f32>() {
-                return vec.first().copied();
-            }
+        && let Ok(vec) = t.to_vec1::<f32>()
+    {
+        return vec.first().copied();
+    }
     None
 }
 
@@ -83,8 +84,10 @@ fn load_gguf_clippable_linear_op<R: std::io::Read + std::io::Seek>(
     let linear = load_gguf_linear_op(content, reader, &weight_name, device, dtype)?;
     let input_min = load_optional_f32_scalar(content, reader, &format!("{}.input_min", base_name));
     let input_max = load_optional_f32_scalar(content, reader, &format!("{}.input_max", base_name));
-    let output_min = load_optional_f32_scalar(content, reader, &format!("{}.output_min", base_name));
-    let output_max = load_optional_f32_scalar(content, reader, &format!("{}.output_max", base_name));
+    let output_min =
+        load_optional_f32_scalar(content, reader, &format!("{}.output_min", base_name));
+    let output_max =
+        load_optional_f32_scalar(content, reader, &format!("{}.output_max", base_name));
 
     Ok(ClippableLinearOp {
         linear,
@@ -133,7 +136,10 @@ impl AudioSubsampleConv {
 
         let (batch, _channels, seq_len, _bins) = x.dims4()?;
         // Permute to [batch, seq_len, bins, channels] and flatten to [batch, seq_len, channels * bins]
-        let x = x.permute((0, 2, 3, 1))?.contiguous()?.reshape((batch, seq_len, ()))?;
+        let x = x
+            .permute((0, 2, 3, 1))?
+            .contiguous()?
+            .reshape((batch, seq_len, ()))?;
         self.input_proj_linear.forward(&x)
     }
 }
@@ -147,11 +153,13 @@ pub struct AudioRelPositionalEncoding {
 
 impl AudioRelPositionalEncoding {
     pub fn new(config: &AudioConfig) -> Self {
-        let context_size = config.attention_chunk_size + config.attention_context_left - 1 + config.attention_context_right;
+        let context_size = config.attention_chunk_size + config.attention_context_left - 1
+            + config.attention_context_right;
         let num_timescales = config.hidden_size / 2;
         let min_timescale = 1.0f64;
         let max_timescale = 10000.0f64;
-        let log_increment = (max_timescale / min_timescale).ln() / ((num_timescales - 1).max(1) as f64);
+        let log_increment =
+            (max_timescale / min_timescale).ln() / ((num_timescales - 1).max(1) as f64);
 
         let mut inv_timescales = Vec::with_capacity(num_timescales);
         for i in 0..num_timescales {
@@ -205,11 +213,7 @@ pub struct AudioAttention {
 }
 
 impl AudioAttention {
-    pub fn forward(
-        &self,
-        hidden_states: &Tensor,
-        mask_tensor: &Tensor,
-    ) -> Result<Tensor> {
+    pub fn forward(&self, hidden_states: &Tensor, mask_tensor: &Tensor) -> Result<Tensor> {
         let (batch, seq_len, _hidden_size) = hidden_states.dims3()?;
 
         let q = self.q_proj.forward(hidden_states)?.to_dtype(DType::F32)?;
@@ -257,17 +261,36 @@ impl AudioAttention {
         let b_h_n = batch * self.num_heads * num_blocks;
         let q_flat_ac = q_blocks.reshape((b_h_n, chunk_size, self.head_dim))?;
         let k_flat_ac = k_perm.reshape((b_h_n, self.head_dim, 24))?;
-        let matrix_ac = q_flat_ac.matmul(&k_flat_ac)?.reshape((batch, self.num_heads, num_blocks, chunk_size, 24))?;
+        let matrix_ac = q_flat_ac.matmul(&k_flat_ac)?.reshape((
+            batch,
+            self.num_heads,
+            num_blocks,
+            chunk_size,
+            24,
+        ))?;
 
         // 4. matrix_bd (relative position bias using precomputed static rel_k)
-        let q_flat = q_blocks.reshape((batch, self.num_heads, num_blocks * chunk_size, self.head_dim))?.contiguous()?;
+        let q_flat = q_blocks
+            .reshape((
+                batch,
+                self.num_heads,
+                num_blocks * chunk_size,
+                self.head_dim,
+            ))?
+            .contiguous()?;
         let bd_flat = q_flat.matmul(&self.precomputed_rel_k)?; // [batch, num_heads, num_blocks * 12, 13]
         let bd = bd_flat.reshape((batch, self.num_heads, num_blocks, chunk_size, 13))?;
 
         // 5. _rel_shift: pad right by 12, flatten last two dims, slice to 12 * 24, reshape to (12, 24)
         let bd_padded = bd.pad_with_zeros(4, 0, 12)?; // [batch, num_heads, num_blocks, 12, 25]
         let bd_flat2 = bd_padded.reshape((batch, self.num_heads, num_blocks, chunk_size * 25))?;
-        let matrix_bd = bd_flat2.narrow(3, 0, chunk_size * 24)?.reshape((batch, self.num_heads, num_blocks, chunk_size, 24))?;
+        let matrix_bd = bd_flat2.narrow(3, 0, chunk_size * 24)?.reshape((
+            batch,
+            self.num_heads,
+            num_blocks,
+            chunk_size,
+            24,
+        ))?;
 
         // 6. Combine and softcap
         let mut attn_weights = (matrix_ac + matrix_bd)?;
@@ -286,13 +309,23 @@ impl AudioAttention {
         let v_perm = v_ctx.permute((0, 3, 1, 2, 4))?.contiguous()?; // [batch, num_heads, num_blocks, 24, head_dim]
         let probs_flat = attn_probs.reshape((b_h_n, chunk_size, 24))?;
         let v_flat = v_perm.reshape((b_h_n, 24, self.head_dim))?;
-        let attn_out = probs_flat.matmul(&v_flat)?.reshape((batch, self.num_heads, num_blocks, chunk_size, self.head_dim))?;
+        let attn_out = probs_flat.matmul(&v_flat)?.reshape((
+            batch,
+            self.num_heads,
+            num_blocks,
+            chunk_size,
+            self.head_dim,
+        ))?;
 
         // 10. Permute back, flatten blocks, slice [:seq_len], project out
         let attn_out = attn_out
             .permute((0, 2, 3, 1, 4))? // [batch, num_blocks, 12, num_heads, head_dim]
             .contiguous()?
-            .reshape((batch, num_blocks * chunk_size, self.num_heads * self.head_dim))?
+            .reshape((
+                batch,
+                num_blocks * chunk_size,
+                self.num_heads * self.head_dim,
+            ))?
             .narrow(1, 0, seq_len)?
             .to_dtype(hidden_states.dtype())?;
 
@@ -302,11 +335,11 @@ impl AudioAttention {
 
 /// Conformer Local 1D Convolution block (Pointwise -> GLU -> Causal Depthwise -> SiLU -> Pointwise)
 pub struct AudioLightConv1d {
-    pub pre_layer_norm: RMSNorm, // GGUF conv_norm.weight
-    pub linear_start: ClippableLinearOp,  // conv_pw1
-    pub depthwise_conv_weight: Tensor, // [1024, 1, 5]
-    pub conv_norm: RMSNorm,      // GGUF norm_conv.weight
-    pub linear_end: ClippableLinearOp,    // conv_pw2
+    pub pre_layer_norm: RMSNorm,         // GGUF conv_norm.weight
+    pub linear_start: ClippableLinearOp, // conv_pw1
+    pub depthwise_conv_weight: Tensor,   // [1024, 1, 5]
+    pub conv_norm: RMSNorm,              // GGUF norm_conv.weight
+    pub linear_end: ClippableLinearOp,   // conv_pw2
     pub hidden_size: usize,
 }
 
@@ -419,7 +452,9 @@ impl AudioConformerLayer {
         // Self-Attention + Fused Post-Norm Residual Add
         let pre_attn = self.norm_pre_attn.forward(&x)?;
         let attn_out = self.self_attn.forward(&pre_attn, mask_tensor)?;
-        let x = self.norm_post_attn.forward_residual_add(&attn_out, &x, None)?;
+        let x = self
+            .norm_post_attn
+            .forward_residual_add(&attn_out, &x, None)?;
 
         // Light Conv 1D
         let x = self.lconv1d.forward(&x)?;
@@ -437,10 +472,10 @@ pub struct AudioTower {
     pub subsampler: AudioSubsampleConv,
     pub rel_pos_enc: AudioRelPositionalEncoding,
     pub layers: Vec<AudioConformerLayer>,
-    pub output_proj: LinearOp, // a.pre_encode.out [1536, 1024]
+    pub output_proj: LinearOp,       // a.pre_encode.out [1536, 1024]
     pub output_bias: Option<Tensor>, // [1536]
-    pub projector_norm: RMSNorm, // unscaled RMSNorm 1536
-    pub projector: LinearOp, // mm.a.input_projection.weight [512, 1536]
+    pub projector_norm: RMSNorm,     // unscaled RMSNorm 1536
+    pub projector: LinearOp,         // mm.a.input_projection.weight [512, 1536]
     pub config: AudioConfig,
     pub device: Device,
     pub dtype: DType,
@@ -451,12 +486,9 @@ impl AudioTower {
     pub fn encode(&self, processed: &ProcessedAudio) -> Result<Tensor> {
         let num_frames = processed.num_frames;
         let num_mels = processed.num_mels;
-        let input_features = Tensor::from_slice(
-            &processed.features,
-            (1, num_frames, num_mels),
-            &self.device,
-        )?
-        .to_dtype(self.dtype)?;
+        let input_features =
+            Tensor::from_slice(&processed.features, (1, num_frames, num_mels), &self.device)?
+                .to_dtype(self.dtype)?;
 
         // 1. Subsampling convolution down to [1, num_frames / 4, 1024]
         let mut hidden_states = self.subsampler.forward(&input_features)?;
@@ -473,18 +505,19 @@ impl AudioTower {
                 if t_q < seq_len {
                     for c in 0..24 {
                         let t_k = (b as i32) * 12 - 12 + (c as i32);
-                        if t_k >= 0 && (t_k as usize) < seq_len && (t_k as usize) <= t_q && (t_q - (t_k as usize)) <= 11 {
+                        if t_k >= 0
+                            && (t_k as usize) < seq_len
+                            && (t_k as usize) <= t_q
+                            && (t_q - (t_k as usize)) <= 11
+                        {
                             mask_vec[b * chunk_size * 24 + q_idx * 24 + c] = 0.0f32;
                         }
                     }
                 }
             }
         }
-        let mask_tensor = Tensor::from_vec(
-            mask_vec,
-            (1, 1, num_blocks, chunk_size, 24),
-            &self.device,
-        )?;
+        let mask_tensor =
+            Tensor::from_vec(mask_vec, (1, 1, num_blocks, chunk_size, 24), &self.device)?;
 
         // 3. 12 Conformer layers with cached mask
         for layer in &self.layers {
@@ -512,8 +545,12 @@ impl AudioTower {
         dtype: DType,
     ) -> Result<Self> {
         // 1. Subsampler
-        let c0_w = content.tensor(reader, "a.conv1d.0.weight", device)?.dequantize(device)?.to_dtype(dtype)?;
-        let c0_norm = load_gguf_norm_tensor(content, reader, "a.conv1d.0.norm.weight", device, dtype)?;
+        let c0_w = content
+            .tensor(reader, "a.conv1d.0.weight", device)?
+            .dequantize(device)?
+            .to_dtype(dtype)?;
+        let c0_norm =
+            load_gguf_norm_tensor(content, reader, "a.conv1d.0.norm.weight", device, dtype)?;
         let layer0 = AudioSubsampleLayer {
             conv_weight: c0_w,
             norm_weight: c0_norm,
@@ -521,8 +558,12 @@ impl AudioTower {
             eps: config.rms_norm_eps,
         };
 
-        let c1_w = content.tensor(reader, "a.conv1d.1.weight", device)?.dequantize(device)?.to_dtype(dtype)?;
-        let c1_norm = load_gguf_norm_tensor(content, reader, "a.conv1d.1.norm.weight", device, dtype)?;
+        let c1_w = content
+            .tensor(reader, "a.conv1d.1.weight", device)?
+            .dequantize(device)?
+            .to_dtype(dtype)?;
+        let c1_norm =
+            load_gguf_norm_tensor(content, reader, "a.conv1d.1.norm.weight", device, dtype)?;
         let layer1 = AudioSubsampleLayer {
             conv_weight: c1_w,
             norm_weight: c1_norm,
@@ -530,7 +571,8 @@ impl AudioTower {
             eps: config.rms_norm_eps,
         };
 
-        let input_proj_linear = load_gguf_linear_op(content, reader, "a.input_projection.weight", device, dtype)?;
+        let input_proj_linear =
+            load_gguf_linear_op(content, reader, "a.input_projection.weight", device, dtype)?;
         let subsampler = AudioSubsampleConv {
             layer0,
             layer1,
@@ -551,10 +593,34 @@ impl AudioTower {
             let prefix = format!("a.blk.{}", l);
 
             // FeedForward 1
-            let ffn1_pre_w = load_gguf_norm_tensor(content, reader, &format!("{}.ffn_norm.weight", prefix), device, dtype)?;
-            let ffn1_post_w = load_gguf_norm_tensor(content, reader, &format!("{}.ffn_post_norm.weight", prefix), device, dtype)?;
-            let ffn1_up = load_gguf_clippable_linear_op(content, reader, &format!("{}.ffn_up", prefix), device, dtype)?;
-            let ffn1_down = load_gguf_clippable_linear_op(content, reader, &format!("{}.ffn_down", prefix), device, dtype)?;
+            let ffn1_pre_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.ffn_norm.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let ffn1_post_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.ffn_post_norm.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let ffn1_up = load_gguf_clippable_linear_op(
+                content,
+                reader,
+                &format!("{}.ffn_up", prefix),
+                device,
+                dtype,
+            )?;
+            let ffn1_down = load_gguf_clippable_linear_op(
+                content,
+                reader,
+                &format!("{}.ffn_down", prefix),
+                device,
+                dtype,
+            )?;
             let feed_forward1 = AudioFeedForward {
                 pre_layer_norm: RMSNorm::new(Some(ffn1_pre_w), config.rms_norm_eps),
                 ffw_layer_1: ffn1_up,
@@ -564,15 +630,53 @@ impl AudioTower {
             };
 
             // Attention
-            let q_proj = load_gguf_clippable_linear_op(content, reader, &format!("{}.attn_q", prefix), device, dtype)?;
-            let k_proj = load_gguf_clippable_linear_op(content, reader, &format!("{}.attn_k", prefix), device, dtype)?;
-            let v_proj = load_gguf_clippable_linear_op(content, reader, &format!("{}.attn_v", prefix), device, dtype)?;
-            let post = load_gguf_clippable_linear_op(content, reader, &format!("{}.attn_out", prefix), device, dtype)?;
-            let relative_k_proj = load_gguf_linear_op(content, reader, &format!("{}.attn_k_rel.weight", prefix), device, dtype)?;
-            let per_dim_scale = load_gguf_norm_tensor(content, reader, &format!("{}.per_dim_scale.weight", prefix), device, dtype)?;
+            let q_proj = load_gguf_clippable_linear_op(
+                content,
+                reader,
+                &format!("{}.attn_q", prefix),
+                device,
+                dtype,
+            )?;
+            let k_proj = load_gguf_clippable_linear_op(
+                content,
+                reader,
+                &format!("{}.attn_k", prefix),
+                device,
+                dtype,
+            )?;
+            let v_proj = load_gguf_clippable_linear_op(
+                content,
+                reader,
+                &format!("{}.attn_v", prefix),
+                device,
+                dtype,
+            )?;
+            let post = load_gguf_clippable_linear_op(
+                content,
+                reader,
+                &format!("{}.attn_out", prefix),
+                device,
+                dtype,
+            )?;
+            let relative_k_proj = load_gguf_linear_op(
+                content,
+                reader,
+                &format!("{}.attn_k_rel.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let per_dim_scale = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.per_dim_scale.weight", prefix),
+                device,
+                dtype,
+            )?;
 
             // Precompute rel_k and per_dim_scale in F32
-            let rel_k = relative_k_proj.forward(&rel_pos_emb)?.to_dtype(DType::F32)?;
+            let rel_k = relative_k_proj
+                .forward(&rel_pos_emb)?
+                .to_dtype(DType::F32)?;
             let precomputed_rel_k = rel_k
                 .reshape((13, config.num_attention_heads, head_dim))?
                 .permute((1, 2, 0))?
@@ -596,17 +700,56 @@ impl AudioTower {
             };
 
             // Norms around attention
-            let norm_pre_attn_w = load_gguf_norm_tensor(content, reader, &format!("{}.attn_pre_norm.weight", prefix), device, dtype)?;
-            let norm_post_attn_w = load_gguf_norm_tensor(content, reader, &format!("{}.attn_post_norm.weight", prefix), device, dtype)?;
+            let norm_pre_attn_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.attn_pre_norm.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let norm_post_attn_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.attn_post_norm.weight", prefix),
+                device,
+                dtype,
+            )?;
 
             // Light Conv 1D
             // Remember GGUF norm naming swap: conv_norm is pre-layer-norm, norm_conv is conv-norm
-            let dw_pre_ln_w = load_gguf_norm_tensor(content, reader, &format!("{}.conv_norm.weight", prefix), device, dtype)?;
-            let dw_pw1 = load_gguf_clippable_linear_op(content, reader, &format!("{}.conv_pw1", prefix), device, dtype)?;
-            let dw_w = content.tensor(reader, &format!("{}.conv_dw.weight", prefix), device)?
-                .dequantize(device)?.to_dtype(dtype)?.unsqueeze(0)?; // [1, 1024, 5]
-            let dw_conv_norm_w = load_gguf_norm_tensor(content, reader, &format!("{}.norm_conv.weight", prefix), device, dtype)?;
-            let dw_pw2 = load_gguf_clippable_linear_op(content, reader, &format!("{}.conv_pw2", prefix), device, dtype)?;
+            let dw_pre_ln_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.conv_norm.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let dw_pw1 = load_gguf_clippable_linear_op(
+                content,
+                reader,
+                &format!("{}.conv_pw1", prefix),
+                device,
+                dtype,
+            )?;
+            let dw_w = content
+                .tensor(reader, &format!("{}.conv_dw.weight", prefix), device)?
+                .dequantize(device)?
+                .to_dtype(dtype)?
+                .unsqueeze(0)?; // [1, 1024, 5]
+            let dw_conv_norm_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.norm_conv.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let dw_pw2 = load_gguf_clippable_linear_op(
+                content,
+                reader,
+                &format!("{}.conv_pw2", prefix),
+                device,
+                dtype,
+            )?;
 
             let lconv1d = AudioLightConv1d {
                 pre_layer_norm: RMSNorm::new(Some(dw_pre_ln_w), config.rms_norm_eps),
@@ -618,10 +761,34 @@ impl AudioTower {
             };
 
             // FeedForward 2
-            let ffn2_pre_w = load_gguf_norm_tensor(content, reader, &format!("{}.ffn_norm_1.weight", prefix), device, dtype)?;
-            let ffn2_post_w = load_gguf_norm_tensor(content, reader, &format!("{}.ffn_post_norm_1.weight", prefix), device, dtype)?;
-            let ffn2_up = load_gguf_clippable_linear_op(content, reader, &format!("{}.ffn_up_1", prefix), device, dtype)?;
-            let ffn2_down = load_gguf_clippable_linear_op(content, reader, &format!("{}.ffn_down_1", prefix), device, dtype)?;
+            let ffn2_pre_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.ffn_norm_1.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let ffn2_post_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.ffn_post_norm_1.weight", prefix),
+                device,
+                dtype,
+            )?;
+            let ffn2_up = load_gguf_clippable_linear_op(
+                content,
+                reader,
+                &format!("{}.ffn_up_1", prefix),
+                device,
+                dtype,
+            )?;
+            let ffn2_down = load_gguf_clippable_linear_op(
+                content,
+                reader,
+                &format!("{}.ffn_down_1", prefix),
+                device,
+                dtype,
+            )?;
             let feed_forward2 = AudioFeedForward {
                 pre_layer_norm: RMSNorm::new(Some(ffn2_pre_w), config.rms_norm_eps),
                 ffw_layer_1: ffn2_up,
@@ -630,7 +797,13 @@ impl AudioTower {
                 residual_weight: 0.5,
             };
 
-            let norm_out_w = load_gguf_norm_tensor(content, reader, &format!("{}.ln2.weight", prefix), device, dtype)?;
+            let norm_out_w = load_gguf_norm_tensor(
+                content,
+                reader,
+                &format!("{}.ln2.weight", prefix),
+                device,
+                dtype,
+            )?;
 
             layers.push(AudioConformerLayer {
                 feed_forward1,
@@ -644,16 +817,29 @@ impl AudioTower {
         }
 
         // 4. Output projection
-        let output_proj = load_gguf_linear_op(content, reader, "a.pre_encode.out.weight", device, dtype)?;
+        let output_proj =
+            load_gguf_linear_op(content, reader, "a.pre_encode.out.weight", device, dtype)?;
         let output_bias = if content.tensor_infos.contains_key("a.pre_encode.out.bias") {
-            Some(load_gguf_norm_tensor(content, reader, "a.pre_encode.out.bias", device, dtype)?)
+            Some(load_gguf_norm_tensor(
+                content,
+                reader,
+                "a.pre_encode.out.bias",
+                device,
+                dtype,
+            )?)
         } else {
             None
         };
 
         // 5. Audio Projector (unscaled RMSNorm 1536 + Linear 1536 -> 512)
         let projector_norm = RMSNorm::new(None, config.rms_norm_eps);
-        let projector = load_gguf_linear_op(content, reader, "mm.a.input_projection.weight", device, dtype)?;
+        let projector = load_gguf_linear_op(
+            content,
+            reader,
+            "mm.a.input_projection.weight",
+            device,
+            dtype,
+        )?;
 
         Ok(Self {
             subsampler,

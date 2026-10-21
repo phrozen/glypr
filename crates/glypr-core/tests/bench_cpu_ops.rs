@@ -34,9 +34,18 @@ fn bench_cpu_simd_vs_baseline() -> anyhow::Result<()> {
     let simd_rmsnorm_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
     println!("\n=== CPU RMSNorm Benchmark (512x2304) ===");
-    println!("  Candle Baseline : {:.3} ms (5 intermediate tensor allocs per call)", baseline_rmsnorm_ms);
-    println!("  Pulp SIMD       : {:.3} ms (0 intermediate tensor allocs)", simd_rmsnorm_ms);
-    println!("  Speedup         : {:.2}x", baseline_rmsnorm_ms / simd_rmsnorm_ms);
+    println!(
+        "  Candle Baseline : {:.3} ms (5 intermediate tensor allocs per call)",
+        baseline_rmsnorm_ms
+    );
+    println!(
+        "  Pulp SIMD       : {:.3} ms (0 intermediate tensor allocs)",
+        simd_rmsnorm_ms
+    );
+    println!(
+        "  Speedup         : {:.2}x",
+        baseline_rmsnorm_ms / simd_rmsnorm_ms
+    );
 
     // 3. GeGLU Benchmark (512x9216)
     let ffn_dim = 9216;
@@ -66,9 +75,18 @@ fn bench_cpu_simd_vs_baseline() -> anyhow::Result<()> {
     let simd_geglu_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
     println!("\n=== CPU GeGLU Benchmark (512x9216) ===");
-    println!("  Candle Baseline : {:.3} ms (10 intermediate tensor allocs per call)", baseline_geglu_ms);
-    println!("  Pulp Streaming  : {:.3} ms (0 intermediate tensor allocs)", simd_geglu_ms);
-    println!("  Speedup         : {:.2}x\n", baseline_geglu_ms / simd_geglu_ms);
+    println!(
+        "  Candle Baseline : {:.3} ms (10 intermediate tensor allocs per call)",
+        baseline_geglu_ms
+    );
+    println!(
+        "  Pulp Streaming  : {:.3} ms (0 intermediate tensor allocs)",
+        simd_geglu_ms
+    );
+    println!(
+        "  Speedup         : {:.2}x\n",
+        baseline_geglu_ms / simd_geglu_ms
+    );
 
     Ok(())
 }

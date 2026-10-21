@@ -1,10 +1,10 @@
 use anyhow::Result;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use candle_core::{DType, Device};
 use glypr_core::GlyprEmbedder;
 use glypr_server::{
-    build_router, spawn_inference_engine, AppState, HealthResponse, ModelListResponse,
+    AppState, HealthResponse, ModelListResponse, build_router, spawn_inference_engine,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -444,9 +444,21 @@ async fn test_server_embeddings_multimodal_request() -> Result<()> {
     let sim_query_doc = dot(&emb_query, &emb_doc);
 
     // Verify task conditioning produces distinct embeddings (not identical vectors)
-    assert!(sim_raw_query < 0.99, "Raw vs Query similarity too high: {}", sim_raw_query);
-    assert!(sim_raw_doc < 0.99, "Raw vs Document similarity too high: {}", sim_raw_doc);
-    assert!(sim_query_doc < 0.99, "Query vs Document similarity too high: {}", sim_query_doc);
+    assert!(
+        sim_raw_query < 0.99,
+        "Raw vs Query similarity too high: {}",
+        sim_raw_query
+    );
+    assert!(
+        sim_raw_doc < 0.99,
+        "Raw vs Document similarity too high: {}",
+        sim_raw_doc
+    );
+    assert!(
+        sim_query_doc < 0.99,
+        "Query vs Document similarity too high: {}",
+        sim_query_doc
+    );
 
     Ok(())
 }
@@ -585,9 +597,7 @@ async fn test_server_concurrent_multimodal_batching() -> Result<()> {
     for p in payloads {
         let c = client.clone();
         let u = format!("{}/v1/embeddings", base_url);
-        handles.push(tokio::spawn(async move {
-            c.post(u).json(&p).send().await
-        }));
+        handles.push(tokio::spawn(async move { c.post(u).json(&p).send().await }));
     }
 
     for handle in handles {
@@ -600,4 +610,3 @@ async fn test_server_concurrent_multimodal_batching() -> Result<()> {
 
     Ok(())
 }
-

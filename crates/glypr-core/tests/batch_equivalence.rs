@@ -1,6 +1,6 @@
 use anyhow::Result;
 use candle_core::{DType, Device};
-use glypr_core::{cosine_similarity, GlyprEmbedder};
+use glypr_core::{GlyprEmbedder, cosine_similarity};
 use std::path::PathBuf;
 
 fn allow_missing_weights() -> bool {
@@ -40,10 +40,13 @@ fn test_batch_single_equivalence() -> Result<()> {
 
     // 2. Encode as a batch
     // Note: since query1 and query2 have different tasks, encode formatted texts together:
-    let batch_res = embedder.encode_batch_texts(&[
-        &embedder.format_query(query1, "SearchQuery"),
-        &embedder.format_query(query2, "CodeRetrieval"),
-    ], Some(768))?;
+    let batch_res = embedder.encode_batch_texts(
+        &[
+            &embedder.format_query(query1, "SearchQuery"),
+            &embedder.format_query(query2, "CodeRetrieval"),
+        ],
+        Some(768),
+    )?;
 
     assert_eq!(batch_res.len(), 2);
     let batch1 = &batch_res[0];
@@ -56,8 +59,16 @@ fn test_batch_single_equivalence() -> Result<()> {
     println!("  Query 2 batch vs single cosine similarity: {:.6}", sim2);
 
     // Padding mask should preserve numerical equality
-    assert!(sim1 > 0.9999, "Batch equivalence for query 1 ({:.6}) below 0.9999", sim1);
-    assert!(sim2 > 0.9999, "Batch equivalence for query 2 ({:.6}) below 0.9999", sim2);
+    assert!(
+        sim1 > 0.9999,
+        "Batch equivalence for query 1 ({:.6}) below 0.9999",
+        sim1
+    );
+    assert!(
+        sim2 > 0.9999,
+        "Batch equivalence for query 2 ({:.6}) below 0.9999",
+        sim2
+    );
 
     println!("✓ Batch equivalence test passed!");
     Ok(())
@@ -87,12 +98,19 @@ fn test_multimodal_batch_equivalence() -> Result<()> {
     #[cfg(not(feature = "metal"))]
     let device = Device::Cpu;
 
-    println!("Initializing GlyprEmbedder with GGUF BF16 on {:?}...", device);
+    println!(
+        "Initializing GlyprEmbedder with GGUF BF16 on {:?}...",
+        device
+    );
     let mut embedder = GlyprEmbedder::load_gguf_bf16(&gguf_path, &device)?;
     embedder.attach_multimodal_projector(&mmproj_path)?;
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap().parent().unwrap().to_path_buf();
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let img_path = manifest_dir.join("tests/golden_vectors/multimodal_test_image.png");
     let audio_path = manifest_dir.join("tests/golden_vectors/multimodal_test_audio.wav");
 
@@ -119,7 +137,9 @@ fn test_multimodal_batch_equivalence() -> Result<()> {
         // 1. Single individual embeddings
         let single_img = embedder.embed_image_with_budget(&img, None, 140)?;
         let single_text = embedder.embed_interleaved(
-            &[glypr_core::ModalityPart::Text("A high fantasy trading card")],
+            &[glypr_core::ModalityPart::Text(
+                "A high fantasy trading card",
+            )],
             glypr_core::Task::SearchQuery,
         )?;
         let single_audio = embedder.embed_audio(&samples, None)?;
@@ -136,14 +156,30 @@ fn test_multimodal_batch_equivalence() -> Result<()> {
         let sim_img1 = cosine_similarity(&single_img, &homo_res[1]);
         println!("  Image 0 vs single sim: {:.6}", sim_img0);
         println!("  Image 1 vs single sim: {:.6}", sim_img1);
-        assert!(sim_img0 >= 0.9999, "[{}] Homogeneous image batch sim ({:.6}) < 0.9999", mode_name, sim_img0);
-        assert!(sim_img1 >= 0.9999, "[{}] Homogeneous image batch sim ({:.6}) < 0.9999", mode_name, sim_img1);
+        assert!(
+            sim_img0 >= 0.9999,
+            "[{}] Homogeneous image batch sim ({:.6}) < 0.9999",
+            mode_name,
+            sim_img0
+        );
+        assert!(
+            sim_img1 >= 0.9999,
+            "[{}] Homogeneous image batch sim ({:.6}) < 0.9999",
+            mode_name,
+            sim_img1
+        );
 
         // 3. Heterogeneous Multimodal Batch (Image + Text Query + Audio)
-        println!("Testing Heterogeneous Multimodal Batch (Image + Text + Audio) ({})...", mode_name);
+        println!(
+            "Testing Heterogeneous Multimodal Batch (Image + Text + Audio) ({})...",
+            mode_name
+        );
         let hetero_batch = vec![
             glypr_core::MultimodalInput::image(&img, Some(140), glypr_core::Task::Raw),
-            glypr_core::MultimodalInput::text("A high fantasy trading card", glypr_core::Task::SearchQuery),
+            glypr_core::MultimodalInput::text(
+                "A high fantasy trading card",
+                glypr_core::Task::SearchQuery,
+            ),
             glypr_core::MultimodalInput::audio(&samples, glypr_core::Task::Raw),
         ];
         let hetero_res = embedder.embed_batch(&hetero_batch, None)?;
@@ -157,12 +193,26 @@ fn test_multimodal_batch_equivalence() -> Result<()> {
         println!("  Heterogeneous Text vs single sim:  {:.6}", sim_het_txt);
         println!("  Heterogeneous Audio vs single sim: {:.6}", sim_het_aud);
 
-        assert!(sim_het_img >= 0.9998, "[{}] Heterogeneous image sim ({:.6}) < 0.9998", mode_name, sim_het_img);
-        assert!(sim_het_txt >= 0.9998, "[{}] Heterogeneous text sim ({:.6}) < 0.9998", mode_name, sim_het_txt);
-        assert!(sim_het_aud >= 0.9998, "[{}] Heterogeneous audio sim ({:.6}) < 0.9998", mode_name, sim_het_aud);
+        assert!(
+            sim_het_img >= 0.9998,
+            "[{}] Heterogeneous image sim ({:.6}) < 0.9998",
+            mode_name,
+            sim_het_img
+        );
+        assert!(
+            sim_het_txt >= 0.9998,
+            "[{}] Heterogeneous text sim ({:.6}) < 0.9998",
+            mode_name,
+            sim_het_txt
+        );
+        assert!(
+            sim_het_aud >= 0.9998,
+            "[{}] Heterogeneous audio sim ({:.6}) < 0.9998",
+            mode_name,
+            sim_het_aud
+        );
     }
 
     println!("✓ All multimodal batch equivalence checks passed!");
     Ok(())
 }
-

@@ -1,6 +1,6 @@
-use candle_core::{Result, Tensor, Device};
-use super::traits::AttentionBackend;
 use super::chunked::ChunkedSlidingAttention;
+use super::traits::AttentionBackend;
+use candle_core::{Device, Result, Tensor};
 
 /// Fused Metal scaled dot-product attention backend.
 /// Uses Apple Silicon hardware-accelerated Steel Attention kernels via candle-nn.
@@ -25,7 +25,13 @@ impl AttentionBackend for MetalSdpaAttention {
             Device::Metal(_) => {}
             _ => {
                 // Seamless CPU fallback
-                return ChunkedSlidingAttention.compute_attention(q, k, v, attention_mask, sliding_window);
+                return ChunkedSlidingAttention.compute_attention(
+                    q,
+                    k,
+                    v,
+                    attention_mask,
+                    sliding_window,
+                );
             }
         }
 

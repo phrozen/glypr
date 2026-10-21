@@ -16,7 +16,9 @@ pub enum CoreMLComputeUnits {
 impl From<CoreMLComputeUnits> for coreml_native::ComputeUnits {
     fn from(cu: CoreMLComputeUnits) -> Self {
         match cu {
-            CoreMLComputeUnits::CpuAndNeuralEngine => coreml_native::ComputeUnits::CpuAndNeuralEngine,
+            CoreMLComputeUnits::CpuAndNeuralEngine => {
+                coreml_native::ComputeUnits::CpuAndNeuralEngine
+            }
             CoreMLComputeUnits::All => coreml_native::ComputeUnits::All,
             CoreMLComputeUnits::CpuAndGpu => coreml_native::ComputeUnits::CpuAndGpu,
             CoreMLComputeUnits::CpuOnly => coreml_native::ComputeUnits::CpuOnly,

@@ -1,7 +1,7 @@
 [project]
-name = "gemma-embeddings-2"
-version = "0.1.0"
-description = "Official reference harness and ground-truth embeddings for EmbeddingGemma 2"
+name = "glypr-baseline"
+version = "0.3.0"
+description = "Reference harness and ground-truth parity test suite for Glypr / EmbeddingGemma 2"
 readme = "README.md"
 authors = [
     { name = "Guillermo Estrada", email = "213238+phrozen@users.noreply.github.com" }

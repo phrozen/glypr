@@ -1,5 +1,5 @@
-use candle_core::{DType, Result, Tensor, D};
 use super::traits::AttentionBackend;
+use candle_core::{D, DType, Result, Tensor};
 
 /// Standard full dense attention (computes full NxN matrix).
 /// Used for short sequences, full-attention layers, and as the reference ground truth.

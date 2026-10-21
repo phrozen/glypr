@@ -77,22 +77,36 @@ impl TextConfig {
         metadata: &HashMap<String, candle_core::quantized::gguf_file::Value>,
     ) -> anyhow::Result<Self> {
         let num_hidden_layers = get_u32(metadata.get("gemma-embedding2.block_count"))
-            .ok_or_else(|| anyhow::anyhow!("Missing gemma-embedding2.block_count"))? as usize;
+            .ok_or_else(|| anyhow::anyhow!("Missing gemma-embedding2.block_count"))?
+            as usize;
         let hidden_size = get_u32(metadata.get("gemma-embedding2.embedding_length"))
-            .ok_or_else(|| anyhow::anyhow!("Missing gemma-embedding2.embedding_length"))? as usize;
+            .ok_or_else(|| anyhow::anyhow!("Missing gemma-embedding2.embedding_length"))?
+            as usize;
         let intermediate_size = get_u32(metadata.get("gemma-embedding2.feed_forward_length"))
-            .ok_or_else(|| anyhow::anyhow!("Missing gemma-embedding2.feed_forward_length"))? as usize;
+            .ok_or_else(|| anyhow::anyhow!("Missing gemma-embedding2.feed_forward_length"))?
+            as usize;
         let num_attention_heads = get_u32(metadata.get("gemma-embedding2.attention.head_count"))
-            .ok_or_else(|| anyhow::anyhow!("Missing gemma-embedding2.attention.head_count"))? as usize;
-        let head_dim = get_u32(metadata.get("gemma-embedding2.attention.key_length_swa")).unwrap_or(256) as usize;
-        let embedding_dim = get_u32(metadata.get("gemma-embedding2.embedding_length_out")).unwrap_or(768) as usize;
-        let max_position_embeddings = get_u32(metadata.get("gemma-embedding2.context_length")).unwrap_or(262144) as usize;
-        let rms_norm_eps = get_f64(metadata.get("gemma-embedding2.attention.layer_norm_rms_epsilon")).unwrap_or(1e-6);
-        let hidden_size_per_layer_input = get_u32(metadata.get("gemma-embedding2.embedding_length_per_layer_input")).unwrap_or(512) as usize;
+            .ok_or_else(|| anyhow::anyhow!("Missing gemma-embedding2.attention.head_count"))?
+            as usize;
+        let head_dim = get_u32(metadata.get("gemma-embedding2.attention.key_length_swa"))
+            .unwrap_or(256) as usize;
+        let embedding_dim =
+            get_u32(metadata.get("gemma-embedding2.embedding_length_out")).unwrap_or(768) as usize;
+        let max_position_embeddings =
+            get_u32(metadata.get("gemma-embedding2.context_length")).unwrap_or(262144) as usize;
+        let rms_norm_eps =
+            get_f64(metadata.get("gemma-embedding2.attention.layer_norm_rms_epsilon"))
+                .unwrap_or(1e-6);
+        let hidden_size_per_layer_input =
+            get_u32(metadata.get("gemma-embedding2.embedding_length_per_layer_input"))
+                .unwrap_or(512) as usize;
 
-        let pad_token_id = get_u32(metadata.get("tokenizer.ggml.padding_token_id")).unwrap_or(0) as usize;
-        let bos_token_id = get_u32(metadata.get("tokenizer.ggml.bos_token_id")).unwrap_or(2) as usize;
-        let eos_token_id = get_u32(metadata.get("tokenizer.ggml.eos_token_id")).unwrap_or(1) as usize;
+        let pad_token_id =
+            get_u32(metadata.get("tokenizer.ggml.padding_token_id")).unwrap_or(0) as usize;
+        let bos_token_id =
+            get_u32(metadata.get("tokenizer.ggml.bos_token_id")).unwrap_or(2) as usize;
+        let eos_token_id =
+            get_u32(metadata.get("tokenizer.ggml.eos_token_id")).unwrap_or(1) as usize;
 
         let vocab_size = match metadata.get("tokenizer.ggml.tokens") {
             Some(candle_core::quantized::gguf_file::Value::Array(arr)) => arr.len(),
@@ -133,7 +147,8 @@ impl TextConfig {
             .and_then(|arr| get_u32(arr.first()))
             .unwrap_or(2) as usize;
 
-        let full_head_dim = get_u32(metadata.get("gemma-embedding2.attention.key_length")).unwrap_or(512) as usize;
+        let full_head_dim =
+            get_u32(metadata.get("gemma-embedding2.attention.key_length")).unwrap_or(512) as usize;
 
         let mut per_layer_config = HashMap::new();
         for (i, &lt) in layer_types.iter().enumerate() {
@@ -153,8 +168,10 @@ impl TextConfig {
             }
         }
 
-        let rope_theta_swa = get_f64(metadata.get("gemma-embedding2.rope.freq_base_swa")).unwrap_or(10000.0);
-        let rope_theta_full = get_f64(metadata.get("gemma-embedding2.rope.freq_base")).unwrap_or(1000000.0);
+        let rope_theta_swa =
+            get_f64(metadata.get("gemma-embedding2.rope.freq_base_swa")).unwrap_or(10000.0);
+        let rope_theta_full =
+            get_f64(metadata.get("gemma-embedding2.rope.freq_base")).unwrap_or(1000000.0);
         let mut rope_parameters = HashMap::new();
         rope_parameters.insert(
             "sliding_attention".to_string(),

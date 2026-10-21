@@ -1,6 +1,6 @@
 use anyhow::Result;
 use candle_core::Device;
-use glypr_core::{cosine_similarity, AttentionMode, GlyprEmbedder};
+use glypr_core::{AttentionMode, GlyprEmbedder, cosine_similarity};
 use safetensors::SafeTensors;
 use serde::Deserialize;
 use serde_json::json;
@@ -36,8 +36,11 @@ fn get_gguf_bf16_path() -> PathBuf {
 }
 
 fn get_gguf_q8_path() -> PathBuf {
-    glypr_core::hub::resolve_file("ggml-org/embeddinggemma-2-GGUF", "embeddinggemma-2-Q8_0.gguf")
-        .expect("Failed to resolve Q8_0 GGUF")
+    glypr_core::hub::resolve_file(
+        "ggml-org/embeddinggemma-2-GGUF",
+        "embeddinggemma-2-Q8_0.gguf",
+    )
+    .expect("Failed to resolve Q8_0 GGUF")
 }
 
 fn get_golden_dir() -> PathBuf {
@@ -114,7 +117,12 @@ fn evaluate_model(
             let golden_vec = load_golden(&golden_key)?;
             let sim = cosine_similarity(&rust_vec, &golden_vec);
             if sim.is_nan() {
-                println!("WARNING: NaN detected for {} (dim={})! rust_vec norm={}", eid, dim, rust_vec.iter().map(|x| x*x).sum::<f32>().sqrt());
+                println!(
+                    "WARNING: NaN detected for {} (dim={})! rust_vec norm={}",
+                    eid,
+                    dim,
+                    rust_vec.iter().map(|x| x * x).sum::<f32>().sqrt()
+                );
             }
             similarities.push(sim);
 
@@ -127,7 +135,10 @@ fn evaluate_model(
 
     let min_parity = similarities.iter().cloned().fold(f32::INFINITY, f32::min);
     let avg_parity = similarities.iter().sum::<f32>() / (similarities.len() as f32);
-    println!("  Parity (292 vectors): Avg = {:.6} | Min = {:.6}", avg_parity, min_parity);
+    println!(
+        "  Parity (292 vectors): Avg = {:.6} | Min = {:.6}",
+        avg_parity, min_parity
+    );
 
     // 2. Multilingual retrieval separation
     let languages = ["en", "es", "de", "fr", "ja", "zh", "ko", "ru", "el", "ar"];
@@ -179,7 +190,11 @@ fn evaluate_model(
         .iter()
         .filter_map(|&b| {
             let doc_id = format!("doc_physics_{}t", b);
-            corpus.entries.iter().find(|e| e.id == doc_id).map(|e| (b, e))
+            corpus
+                .entries
+                .iter()
+                .find(|e| e.id == doc_id)
+                .map(|e| (b, e))
         })
         .collect();
 
@@ -326,14 +341,22 @@ fn main() -> Result<()> {
 
     // Print Comparative Summary Table
     println!("\n");
-    println!("========================================================================================================================");
-    println!("                                              FINAL COMPARATIVE SCORECARD                                               ");
-    println!("========================================================================================================================");
+    println!(
+        "========================================================================================================================"
+    );
+    println!(
+        "                                              FINAL COMPARATIVE SCORECARD                                               "
+    );
+    println!(
+        "========================================================================================================================"
+    );
     println!(
         "{:<26} | {:<20} | {:<20} | {:<20} | {:<20}",
         "Metric", "GGUF BF16 (Std)", "GGUF BF16 (Chunk)", "GGUF BF16 (Flash)", "GGUF Q8_0 (Flash)"
     );
-    println!("------------------------------------------------------------------------------------------------------------------------");
+    println!(
+        "------------------------------------------------------------------------------------------------------------------------"
+    );
     println!(
         "{:<26} | {:>17.1} MB | {:>17.1} MB | {:>17.1} MB | {:>17.1} MB (-44.5%)",
         "Disk Footprint",
@@ -382,32 +405,50 @@ fn main() -> Result<()> {
         bf16_flash_stats.avg_length_margin,
         q8_flash_stats.avg_length_margin
     );
-    println!("------------------------------------------------------------------------------------------------------------------------");
+    println!(
+        "------------------------------------------------------------------------------------------------------------------------"
+    );
     println!("Latency Scaling (Median ms):");
     for &b in &corpus.buckets {
         let std_lat = bf16_std_stats.latencies.get(&b).map(|x| x.0).unwrap_or(0.0);
         let opt_lat = bf16_opt_stats.latencies.get(&b).map(|x| x.0).unwrap_or(0.0);
-        let flash_lat = bf16_flash_stats.latencies.get(&b).map(|x| x.0).unwrap_or(0.0);
+        let flash_lat = bf16_flash_stats
+            .latencies
+            .get(&b)
+            .map(|x| x.0)
+            .unwrap_or(0.0);
         let q8_lat = q8_flash_stats.latencies.get(&b).map(|x| x.0).unwrap_or(0.0);
-        let speedup = if flash_lat > 0.0 { std_lat / flash_lat } else { 1.0 };
+        let speedup = if flash_lat > 0.0 {
+            std_lat / flash_lat
+        } else {
+            1.0
+        };
         println!(
             "  {:4} tokens                | {:>17.2} ms | {:>17.2} ms | {:>13.2} ms ({:.1}x) | {:>17.2} ms",
             b, std_lat, opt_lat, flash_lat, speedup, q8_lat
         );
     }
-    println!("------------------------------------------------------------------------------------------------------------------------");
+    println!(
+        "------------------------------------------------------------------------------------------------------------------------"
+    );
     println!("Throughput Scaling (tok/sec):");
     for &b in &corpus.buckets {
         let std_tps = bf16_std_stats.latencies.get(&b).map(|x| x.2).unwrap_or(0.0);
         let opt_tps = bf16_opt_stats.latencies.get(&b).map(|x| x.2).unwrap_or(0.0);
-        let flash_tps = bf16_flash_stats.latencies.get(&b).map(|x| x.2).unwrap_or(0.0);
+        let flash_tps = bf16_flash_stats
+            .latencies
+            .get(&b)
+            .map(|x| x.2)
+            .unwrap_or(0.0);
         let q8_tps = q8_flash_stats.latencies.get(&b).map(|x| x.2).unwrap_or(0.0);
         println!(
             "  {:4} tokens                | {:>14.0} tok/s | {:>14.0} tok/s | {:>14.0} tok/s | {:>14.0} tok/s",
             b, std_tps, opt_tps, flash_tps, q8_tps
         );
     }
-    println!("========================================================================================================================\n");
+    println!(
+        "========================================================================================================================\n"
+    );
 
     let summary_json = json!({
         "gguf_bf16_standard": {

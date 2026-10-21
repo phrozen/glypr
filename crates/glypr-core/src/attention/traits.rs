@@ -33,7 +33,6 @@ impl Default for AttentionMode {
     }
 }
 
-
 /// Pluggable attention backend trait
 pub trait AttentionBackend: std::fmt::Debug + Send + Sync {
     fn compute_attention(

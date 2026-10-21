@@ -3,7 +3,9 @@
 pub enum Task<'a> {
     #[default]
     SearchQuery,
-    Document { title: Option<&'a str> },
+    Document {
+        title: Option<&'a str>,
+    },
     CodeRetrieval,
     Classification,
     Clustering,
@@ -58,7 +60,9 @@ impl<'a> Task<'a> {
             "clustering" => Task::Clustering,
             "questionanswering" | "qa" => Task::QuestionAnswering,
             "factchecking" => Task::FactChecking,
-            "sentencesimilarity" | "sts" | "pairclassification" | "summarization" => Task::SentenceSimilarity,
+            "sentencesimilarity" | "sts" | "pairclassification" | "summarization" => {
+                Task::SentenceSimilarity
+            }
             "raw" | "none" => Task::Raw,
             _ => Task::Custom(name),
         }
@@ -80,7 +84,10 @@ mod tests {
             "title: none | text: content body"
         );
         assert_eq!(
-            Task::Document { title: Some("Physics 101") }.format_text("content body"),
+            Task::Document {
+                title: Some("Physics 101")
+            }
+            .format_text("content body"),
             "title: Physics 101 | text: content body"
         );
         assert_eq!(
@@ -91,10 +98,7 @@ mod tests {
             Task::Classification.format_text("sentiment review"),
             "task: classification | query: sentiment review"
         );
-        assert_eq!(
-            Task::Raw.format_text("unprompted text"),
-            "unprompted text"
-        );
+        assert_eq!(Task::Raw.format_text("unprompted text"), "unprompted text");
     }
 
     #[test]
@@ -105,7 +109,9 @@ mod tests {
         );
         assert_eq!(
             Task::from_name_and_title("document", Some("Doc A")),
-            Task::Document { title: Some("Doc A") }
+            Task::Document {
+                title: Some("Doc A")
+            }
         );
         assert_eq!(
             Task::from_name_and_title("code_retrieval", None),

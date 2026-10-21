@@ -1,6 +1,6 @@
 use crate::coreml::CoreMLComputeUnits;
 use crate::multimodal::ProcessedImage;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use candle_core::{Device, Tensor};
 use coreml_native::{AsMultiArray, BorrowedTensor, Model};
 use std::collections::HashMap;
@@ -31,8 +31,12 @@ impl CoreMLVisionTower {
             bail!("CoreML model not found at {}", path_ref.display());
         }
 
-        let model = Model::load(path_ref, compute_units.into())
-            .with_context(|| format!("Failed to load CoreML vision model at {}", path_ref.display()))?;
+        let model = Model::load(path_ref, compute_units.into()).with_context(|| {
+            format!(
+                "Failed to load CoreML vision model at {}",
+                path_ref.display()
+            )
+        })?;
 
         let entry = Self::inspect_and_build_entry(model, path_ref)?;
         let mut models = HashMap::new();
@@ -62,14 +66,18 @@ impl CoreMLVisionTower {
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 if stem.contains("vision_tower")
                     && let Ok(model) = Model::load(&path, compute_units.into())
-                        && let Ok(v_entry) = Self::inspect_and_build_entry(model, &path) {
-                            models.insert(v_entry.num_patches, v_entry);
-                        }
+                    && let Ok(v_entry) = Self::inspect_and_build_entry(model, &path)
+                {
+                    models.insert(v_entry.num_patches, v_entry);
+                }
             }
         }
 
         if models.is_empty() {
-            bail!("No compiled CoreML vision models found in {}", dir_ref.display());
+            bail!(
+                "No compiled CoreML vision models found in {}",
+                dir_ref.display()
+            );
         }
 
         Ok(Self {
@@ -83,7 +91,12 @@ impl CoreMLVisionTower {
         let pixel_input = inputs
             .iter()
             .find(|inp| inp.name() == "pixel_values")
-            .ok_or_else(|| anyhow!("Model at {} does not have 'pixel_values' input", path.display()))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "Model at {} does not have 'pixel_values' input",
+                    path.display()
+                )
+            })?;
 
         let in_shape = pixel_input
             .shape()

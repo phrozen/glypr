@@ -9,13 +9,16 @@ fn main() -> Result<()> {
     let mut gguf_file = File::open(&gguf_bf16_path)?;
     let content = gguf_file::Content::read(&mut gguf_file)?;
 
-    println!("GGUF read success. Metadata keys: {}", content.metadata.len());
+    println!(
+        "GGUF read success. Metadata keys: {}",
+        content.metadata.len()
+    );
 
     let tokens_val = content.metadata.get("tokenizer.ggml.tokens");
     let merges_val = content.metadata.get("tokenizer.ggml.merges");
 
-    use tokenizers::models::bpe::BPE;
     use tokenizers::Tokenizer;
+    use tokenizers::models::bpe::BPE;
 
     let tokens_arr = match tokens_val.unwrap() {
         gguf_file::Value::Array(arr) => arr,
@@ -63,18 +66,22 @@ fn main() -> Result<()> {
     use tokenizers::normalizers::replace::Replace;
     tokenizer.with_normalizer(Some(Replace::new(" ", "\u{2581}").unwrap()));
 
-    use tokenizers::pre_tokenizers::split::Split;
     use tokenizers::SplitDelimiterBehavior;
-    tokenizer.with_pre_tokenizer(Some(Split::new(
-        " ",
-        SplitDelimiterBehavior::MergedWithPrevious,
-        false,
-    ).unwrap()));
+    use tokenizers::pre_tokenizers::split::Split;
+    tokenizer.with_pre_tokenizer(Some(
+        Split::new(" ", SplitDelimiterBehavior::MergedWithPrevious, false).unwrap(),
+    ));
     println!("Built Tokenizer successfully!");
 
     let text = "Hello world";
-    let encoding = tokenizer.encode(text, true).map_err(|e| anyhow::anyhow!("{}", e))?;
-    println!("GGUF Raw BPE Encoded '{}' -> IDs: {:?}", text, encoding.get_ids());
+    let encoding = tokenizer
+        .encode(text, true)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    println!(
+        "GGUF Raw BPE Encoded '{}' -> IDs: {:?}",
+        text,
+        encoding.get_ids()
+    );
     println!("GGUF Raw BPE Tokens: {:?}", encoding.get_tokens());
 
     let test_texts = [
@@ -97,10 +104,14 @@ fn main() -> Result<()> {
 
     let mut all_matched = true;
     for text in test_texts {
-        let hf_enc = hf_tok.encode(text, true).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let hf_enc = hf_tok
+            .encode(text, true)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let hf_ids = hf_enc.get_ids().to_vec();
 
-        let gguf_enc = tokenizer.encode(text, true).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let gguf_enc = tokenizer
+            .encode(text, true)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let mut gguf_ids = gguf_enc.get_ids().to_vec();
         // Insert BOS/EOS as GlyprTokenizer does
         if gguf_ids.first() != Some(&2) {
@@ -133,14 +144,21 @@ fn main() -> Result<()> {
     let corpus: serde_json::Value = serde_json::from_slice(&corpus_bytes)?;
     let entries = corpus["entries"].as_array().unwrap();
 
-    println!("\nTesting all {} entries from corpus_8k.json...", entries.len());
+    println!(
+        "\nTesting all {} entries from corpus_8k.json...",
+        entries.len()
+    );
     let mut corpus_matched = 0;
     for entry in entries {
         let content = entry["content"].as_str().unwrap();
-        let hf_enc = hf_tok.encode(content, true).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let hf_enc = hf_tok
+            .encode(content, true)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let hf_ids = hf_enc.get_ids().to_vec();
 
-        let gguf_enc = tokenizer.encode(content, true).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let gguf_enc = tokenizer
+            .encode(content, true)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let mut gguf_ids = gguf_enc.get_ids().to_vec();
         if gguf_ids.first() != Some(&2) {
             gguf_ids.insert(0, 2);
@@ -151,71 +169,132 @@ fn main() -> Result<()> {
 
         if hf_ids != gguf_ids {
             let id = entry["id"].as_str().unwrap();
-            println!("MISMATCH on corpus entry {}: HF len {}, GGUF len {}", id, hf_ids.len(), gguf_ids.len());
+            println!(
+                "MISMATCH on corpus entry {}: HF len {}, GGUF len {}",
+                id,
+                hf_ids.len(),
+                gguf_ids.len()
+            );
             anyhow::bail!("Corpus token mismatch on {}", id);
         }
         corpus_matched += 1;
     }
 
-    println!("✓ 100% MATCH: All {}/{} corpus entries produced identical token sequences!", corpus_matched, entries.len());
+    println!(
+        "✓ 100% MATCH: All {}/{} corpus entries produced identical token sequences!",
+        corpus_matched,
+        entries.len()
+    );
 
     // --- Test Architecture Config Extraction ---
     println!("\nTesting TextConfig extraction from GGUF metadata...");
     let hf_config_path = glypr_core::hub::resolve_file("google/embeddinggemma-2", "config.json")?;
     let hf_config = glypr_core::config::TextConfig::from_json_file(&hf_config_path)?;
 
-    let num_hidden_layers = get_u32(content.metadata.get("gemma-embedding2.block_count")).unwrap() as usize;
-    let hidden_size = get_u32(content.metadata.get("gemma-embedding2.embedding_length")).unwrap() as usize;
-    let intermediate_size = get_u32(content.metadata.get("gemma-embedding2.feed_forward_length")).unwrap() as usize;
-    let num_attention_heads = get_u32(content.metadata.get("gemma-embedding2.attention.head_count")).unwrap() as usize;
-    let head_dim = get_u32(content.metadata.get("gemma-embedding2.attention.key_length_swa")).unwrap_or(256) as usize;
-    let embedding_dim = get_u32(content.metadata.get("gemma-embedding2.embedding_length_out")).unwrap_or(768) as usize;
-    let max_position_embeddings = get_u32(content.metadata.get("gemma-embedding2.context_length")).unwrap_or(262144) as usize;
-    let rms_norm_eps = get_f64(content.metadata.get("gemma-embedding2.attention.layer_norm_rms_epsilon")).unwrap_or(1e-6);
-    let hidden_size_per_layer_input = get_u32(content.metadata.get("gemma-embedding2.embedding_length_per_layer_input")).unwrap_or(512) as usize;
+    let num_hidden_layers =
+        get_u32(content.metadata.get("gemma-embedding2.block_count")).unwrap() as usize;
+    let hidden_size =
+        get_u32(content.metadata.get("gemma-embedding2.embedding_length")).unwrap() as usize;
+    let intermediate_size =
+        get_u32(content.metadata.get("gemma-embedding2.feed_forward_length")).unwrap() as usize;
+    let num_attention_heads = get_u32(
+        content
+            .metadata
+            .get("gemma-embedding2.attention.head_count"),
+    )
+    .unwrap() as usize;
+    let head_dim = get_u32(
+        content
+            .metadata
+            .get("gemma-embedding2.attention.key_length_swa"),
+    )
+    .unwrap_or(256) as usize;
+    let embedding_dim = get_u32(
+        content
+            .metadata
+            .get("gemma-embedding2.embedding_length_out"),
+    )
+    .unwrap_or(768) as usize;
+    let max_position_embeddings =
+        get_u32(content.metadata.get("gemma-embedding2.context_length")).unwrap_or(262144) as usize;
+    let rms_norm_eps = get_f64(
+        content
+            .metadata
+            .get("gemma-embedding2.attention.layer_norm_rms_epsilon"),
+    )
+    .unwrap_or(1e-6);
+    let hidden_size_per_layer_input = get_u32(
+        content
+            .metadata
+            .get("gemma-embedding2.embedding_length_per_layer_input"),
+    )
+    .unwrap_or(512) as usize;
 
-    let pad_token_id = get_u32(content.metadata.get("tokenizer.ggml.padding_token_id")).unwrap_or(0) as usize;
-    let bos_token_id = get_u32(content.metadata.get("tokenizer.ggml.bos_token_id")).unwrap_or(2) as usize;
-    let eos_token_id = get_u32(content.metadata.get("tokenizer.ggml.eos_token_id")).unwrap_or(1) as usize;
+    let pad_token_id =
+        get_u32(content.metadata.get("tokenizer.ggml.padding_token_id")).unwrap_or(0) as usize;
+    let bos_token_id =
+        get_u32(content.metadata.get("tokenizer.ggml.bos_token_id")).unwrap_or(2) as usize;
+    let eos_token_id =
+        get_u32(content.metadata.get("tokenizer.ggml.eos_token_id")).unwrap_or(1) as usize;
     let vocab_size = tokens_arr.len();
 
     // Sliding window pattern & layer types
-    let swa_pattern = match content.metadata.get("gemma-embedding2.attention.sliding_window_pattern") {
+    let swa_pattern = match content
+        .metadata
+        .get("gemma-embedding2.attention.sliding_window_pattern")
+    {
         Some(gguf_file::Value::Array(arr)) => arr,
         _ => panic!("Missing sliding_window_pattern"),
     };
     let mut layer_types = Vec::with_capacity(num_hidden_layers);
     for v in swa_pattern {
         match v {
-            gguf_file::Value::Bool(true) => layer_types.push(glypr_core::config::LayerType::SlidingAttention),
-            gguf_file::Value::Bool(false) => layer_types.push(glypr_core::config::LayerType::FullAttention),
+            gguf_file::Value::Bool(true) => {
+                layer_types.push(glypr_core::config::LayerType::SlidingAttention)
+            }
+            gguf_file::Value::Bool(false) => {
+                layer_types.push(glypr_core::config::LayerType::FullAttention)
+            }
             _ => panic!("Invalid bool in pattern"),
         }
     }
 
     // KV heads
-    let kv_heads_arr = match content.metadata.get("gemma-embedding2.attention.head_count_kv") {
+    let kv_heads_arr = match content
+        .metadata
+        .get("gemma-embedding2.attention.head_count_kv")
+    {
         Some(gguf_file::Value::Array(arr)) => arr,
         _ => panic!("Missing head_count_kv"),
     };
     let num_key_value_heads = get_u32(kv_heads_arr.first()).unwrap() as usize;
 
-    let full_head_dim = get_u32(content.metadata.get("gemma-embedding2.attention.key_length")).unwrap_or(512) as usize;
+    let full_head_dim = get_u32(
+        content
+            .metadata
+            .get("gemma-embedding2.attention.key_length"),
+    )
+    .unwrap_or(512) as usize;
 
     let mut per_layer_config = std::collections::HashMap::new();
     for (i, &lt) in layer_types.iter().enumerate() {
         if lt == glypr_core::config::LayerType::FullAttention {
             let key = format!("{:02}", i);
             let kv_heads = get_u32(kv_heads_arr.get(i)).unwrap() as usize;
-            per_layer_config.insert(key, glypr_core::config::LayerOverride {
-                head_dim: full_head_dim,
-                num_key_value_heads: kv_heads,
-            });
+            per_layer_config.insert(
+                key,
+                glypr_core::config::LayerOverride {
+                    head_dim: full_head_dim,
+                    num_key_value_heads: kv_heads,
+                },
+            );
         }
     }
 
-    let rope_theta_swa = get_f64(content.metadata.get("gemma-embedding2.rope.freq_base_swa")).unwrap_or(10000.0);
-    let rope_theta_full = get_f64(content.metadata.get("gemma-embedding2.rope.freq_base")).unwrap_or(1000000.0);
+    let rope_theta_swa =
+        get_f64(content.metadata.get("gemma-embedding2.rope.freq_base_swa")).unwrap_or(10000.0);
+    let rope_theta_full =
+        get_f64(content.metadata.get("gemma-embedding2.rope.freq_base")).unwrap_or(1000000.0);
     let mut rope_parameters = std::collections::HashMap::new();
     rope_parameters.insert(
         "sliding_attention".to_string(),
@@ -259,17 +338,32 @@ fn main() -> Result<()> {
     assert_eq!(hf_config.hidden_size, gguf_config.hidden_size);
     assert_eq!(hf_config.intermediate_size, gguf_config.intermediate_size);
     assert_eq!(hf_config.num_hidden_layers, gguf_config.num_hidden_layers);
-    assert_eq!(hf_config.num_attention_heads, gguf_config.num_attention_heads);
-    assert_eq!(hf_config.num_key_value_heads, gguf_config.num_key_value_heads);
+    assert_eq!(
+        hf_config.num_attention_heads,
+        gguf_config.num_attention_heads
+    );
+    assert_eq!(
+        hf_config.num_key_value_heads,
+        gguf_config.num_key_value_heads
+    );
     assert_eq!(hf_config.head_dim, gguf_config.head_dim);
     assert_eq!(hf_config.vocab_size, gguf_config.vocab_size);
     assert_eq!(hf_config.embedding_dim, gguf_config.embedding_dim);
-    assert_eq!(hf_config.max_position_embeddings, gguf_config.max_position_embeddings);
+    assert_eq!(
+        hf_config.max_position_embeddings,
+        gguf_config.max_position_embeddings
+    );
     assert_eq!(hf_config.sliding_window, gguf_config.sliding_window);
     assert!((hf_config.rms_norm_eps - gguf_config.rms_norm_eps).abs() < 1e-10);
-    assert_eq!(hf_config.hidden_size_per_layer_input, gguf_config.hidden_size_per_layer_input);
+    assert_eq!(
+        hf_config.hidden_size_per_layer_input,
+        gguf_config.hidden_size_per_layer_input
+    );
     assert_eq!(hf_config.layer_types, gguf_config.layer_types);
-    assert_eq!(hf_config.per_layer_config.len(), gguf_config.per_layer_config.len());
+    assert_eq!(
+        hf_config.per_layer_config.len(),
+        gguf_config.per_layer_config.len()
+    );
     for (k, v) in &hf_config.per_layer_config {
         let gv = gguf_config.per_layer_config.get(k).unwrap();
         assert_eq!(v.head_dim, gv.head_dim);
@@ -279,7 +373,9 @@ fn main() -> Result<()> {
         let gv = gguf_config.rope_parameters.get(k).unwrap();
         assert_eq!(v.rope_theta, gv.rope_theta);
     }
-    println!("✓ 100% MATCH: GGUF extracted TextConfig is 100% field-identical to HuggingFace config.json!");
+    println!(
+        "✓ 100% MATCH: GGUF extracted TextConfig is 100% field-identical to HuggingFace config.json!"
+    );
 
     Ok(())
 }

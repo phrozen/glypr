@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use glypr_core::{truncate_mrl, with_autorelease_pool, GlyprEmbedder, MultimodalInput, Task};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use glypr_core::{GlyprEmbedder, MultimodalInput, Task, truncate_mrl, with_autorelease_pool};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::schema::InputItem;
@@ -263,7 +263,11 @@ fn process_batch(embedder: &GlyprEmbedder, batch: Vec<InferenceRequest>) {
             let task = req.task.as_task();
             match &req.item {
                 PreparedItem::Text(s) => MultimodalInput::text(s.as_str(), task),
-                PreparedItem::Image { image, text, budget } => {
+                PreparedItem::Image {
+                    image,
+                    text,
+                    budget,
+                } => {
                     if let Some(prompt) = text {
                         MultimodalInput::image_with_prompt(
                             image.as_ref(),
@@ -314,7 +318,9 @@ fn process_batch(embedder: &GlyprEmbedder, batch: Vec<InferenceRequest>) {
         Err(e) => {
             let err_msg = e.to_string();
             for req in batch {
-                let _ = req.sender.send(Err(anyhow::anyhow!("Batch inference error: {}", err_msg)));
+                let _ = req
+                    .sender
+                    .send(Err(anyhow::anyhow!("Batch inference error: {}", err_msg)));
             }
         }
     }

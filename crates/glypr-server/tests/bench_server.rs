@@ -1,7 +1,7 @@
 use anyhow::Result;
 use candle_core::{DType, Device};
 use glypr_core::GlyprEmbedder;
-use glypr_server::{build_router, spawn_inference_engine, AppState};
+use glypr_server::{AppState, build_router, spawn_inference_engine};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Instant;
@@ -98,7 +98,10 @@ async fn bench_http_server_latencies() -> Result<()> {
             fmt_latencies.push(t0.elapsed().as_secs_f64() * 1000.0);
         }
         fmt_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        println!("   - {:<28}: Median {:.2} ms (Min {:.2} ms)", name, fmt_latencies[5], fmt_latencies[0]);
+        println!(
+            "   - {:<28}: Median {:.2} ms (Min {:.2} ms)",
+            name, fmt_latencies[5], fmt_latencies[0]
+        );
     }
     println!();
 
@@ -121,7 +124,10 @@ async fn bench_http_server_latencies() -> Result<()> {
             dim_latencies.push(t0.elapsed().as_secs_f64() * 1000.0);
         }
         dim_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        println!("   - {:<4}d: Median {:.2} ms (Min {:.2} ms)", dim, dim_latencies[5], dim_latencies[0]);
+        println!(
+            "   - {:<4}d: Median {:.2} ms (Min {:.2} ms)",
+            dim, dim_latencies[5], dim_latencies[0]
+        );
     }
     println!();
 
@@ -194,7 +200,9 @@ async fn bench_http_server_latencies() -> Result<()> {
         );
     }
 
-    println!("\n================================================================================\n");
+    println!(
+        "\n================================================================================\n"
+    );
 
     Ok(())
 }

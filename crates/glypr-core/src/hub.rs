@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use hf_hub::{api::sync::Api, api::sync::ApiBuilder, Cache};
+use hf_hub::{Cache, api::sync::Api, api::sync::ApiBuilder};
 use std::path::PathBuf;
 
 pub const DEFAULT_GGUF_REPO: &str = "ggml-org/embeddinggemma-2-GGUF";

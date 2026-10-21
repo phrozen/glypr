@@ -50,17 +50,30 @@ fn test_quantization_mrl_parity_across_dimensions() -> Result<()> {
     // Define 3 real text items for semantic similarity and ranking tests
     let query = "what is gravitational lensing in astronomy?";
     let doc_relevant = "Gravitational lensing occurs when a massive celestial body warps spacetime, deflecting light from distant sources.";
-    let doc_unrelated = "To bake sourdough bread, mix active starter with flour, water, and salt before proofing.";
+    let doc_unrelated =
+        "To bake sourdough bread, mix active starter with flour, water, and salt before proofing.";
 
     let q_emb_768 = embedder.embed_text(query, Task::SearchQuery)?;
-    let rel_emb_768 = embedder.embed_text(doc_relevant, Task::Document { title: Some("Astrophysics") })?;
-    let unrel_emb_768 = embedder.embed_text(doc_unrelated, Task::Document { title: Some("Cooking") })?;
+    let rel_emb_768 = embedder.embed_text(
+        doc_relevant,
+        Task::Document {
+            title: Some("Astrophysics"),
+        },
+    )?;
+    let unrel_emb_768 = embedder.embed_text(
+        doc_unrelated,
+        Task::Document {
+            title: Some("Cooking"),
+        },
+    )?;
 
     let dimensions = [768, 512, 256, 128];
 
     println!("\n=== MRL & QUANTIZATION FIDELITY REPORT ===");
-    println!("{:<6} | {:<12} | {:<14} | {:<14} | {:<10}",
-        "Dim", "Metric Pair", "Float32 Cosim", "INT8 Cosim", "Binary Cos");
+    println!(
+        "{:<6} | {:<12} | {:<14} | {:<14} | {:<10}",
+        "Dim", "Metric Pair", "Float32 Cosim", "INT8 Cosim", "Binary Cos"
+    );
     println!("{}", "-".repeat(66));
 
     for &dim in &dimensions {
@@ -89,22 +102,48 @@ fn test_quantization_mrl_parity_across_dimensions() -> Result<()> {
         let bin_rel = binary_cosine_similarity(&q_bin, &rel_bin);
         let bin_unrel = binary_cosine_similarity(&q_bin, &unrel_bin);
 
-        println!("{:<6} | {:<12} | {:<14.4} | {:<14.4} | {:<10.4}",
-            dim, "Relevant", f32_rel, int8_rel, bin_rel);
-        println!("{:<6} | {:<12} | {:<14.4} | {:<14.4} | {:<10.4}",
-            dim, "Unrelated", f32_unrel, int8_unrel, bin_unrel);
+        println!(
+            "{:<6} | {:<12} | {:<14.4} | {:<14.4} | {:<10.4}",
+            dim, "Relevant", f32_rel, int8_rel, bin_rel
+        );
+        println!(
+            "{:<6} | {:<12} | {:<14.4} | {:<14.4} | {:<10.4}",
+            dim, "Unrelated", f32_unrel, int8_unrel, bin_unrel
+        );
 
         // Assertions:
         // A. INT8 vs Float32 delta is very small (< 0.015)
         let delta_int8_rel = (f32_rel - int8_rel).abs();
         let delta_int8_unrel = (f32_unrel - int8_unrel).abs();
-        assert!(delta_int8_rel < 0.015, "INT8 rel delta {} too large at dim {}", delta_int8_rel, dim);
-        assert!(delta_int8_unrel < 0.015, "INT8 unrel delta {} too large at dim {}", delta_int8_unrel, dim);
+        assert!(
+            delta_int8_rel < 0.015,
+            "INT8 rel delta {} too large at dim {}",
+            delta_int8_rel,
+            dim
+        );
+        assert!(
+            delta_int8_unrel < 0.015,
+            "INT8 unrel delta {} too large at dim {}",
+            delta_int8_unrel,
+            dim
+        );
 
         // B. Ranking preservation: relevant must always score significantly higher than unrelated
-        assert!(f32_rel > f32_unrel + 0.20, "Float32 failed ranking separation at dim {}", dim);
-        assert!(int8_rel > int8_unrel + 0.20, "INT8 failed ranking separation at dim {}", dim);
-        assert!(bin_rel > bin_unrel + 0.15, "Binary failed ranking separation at dim {}", dim);
+        assert!(
+            f32_rel > f32_unrel + 0.20,
+            "Float32 failed ranking separation at dim {}",
+            dim
+        );
+        assert!(
+            int8_rel > int8_unrel + 0.20,
+            "INT8 failed ranking separation at dim {}",
+            dim
+        );
+        assert!(
+            bin_rel > bin_unrel + 0.15,
+            "Binary failed ranking separation at dim {}",
+            dim
+        );
     }
     println!("{}", "-".repeat(66));
 

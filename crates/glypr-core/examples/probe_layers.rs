@@ -36,11 +36,20 @@ fn main() -> Result<()> {
     println!("Model loaded: {:.1} MB", get_metal_mb());
 
     let corpus_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap().parent().unwrap()
-        .join("tests/golden_vectors").join("corpus_8k.json");
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/golden_vectors")
+        .join("corpus_8k.json");
     let corpus_bytes = fs::read(&corpus_path)?;
     let corpus: serde_json::Value = serde_json::from_slice(&corpus_bytes)?;
-    let entry = corpus["entries"].as_array().unwrap().iter().find(|e| e["id"] == "doc_physics_8192t").unwrap();
+    let entry = corpus["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "doc_physics_8192t")
+        .unwrap();
     let content = entry["content"].as_str().unwrap();
 
     let token_ids = embedder.tokenizer.encode(content)?;
@@ -67,14 +76,24 @@ fn main() -> Result<()> {
         println!("After PLE linear projection: {:.1} MB", get_metal_mb());
         let ple_p2 = (ple_p1 * model.ple.scale)?;
         println!("After PLE scale: {:.1} MB", get_metal_mb());
-        let per_layer_projections = ple_p2.reshape((1, 8192, model.ple.num_layers, model.ple.hidden_size_per_layer_input))?;
+        let per_layer_projections = ple_p2.reshape((
+            1,
+            8192,
+            model.ple.num_layers,
+            model.ple.hidden_size_per_layer_input,
+        ))?;
         println!("After PLE reshape: {:.1} MB", get_metal_mb());
 
-        let (cos_sliding, sin_sliding) = model.rope_sliding.get_cos_sin(8192, &device, model.dtype)?;
+        let (cos_sliding, sin_sliding) =
+            model.rope_sliding.get_cos_sin(8192, &device, model.dtype)?;
         let (cos_full, sin_full) = model.rope_full.get_cos_sin(8192, &device, model.dtype)?;
 
         let is_chunked = mode == AttentionMode::ChunkedSliding;
-        let sliding_window_for_mask = if is_chunked { None } else { Some(model.config.sliding_window) };
+        let sliding_window_for_mask = if is_chunked {
+            None
+        } else {
+            Some(model.config.sliding_window)
+        };
         let sliding_mask = model.build_attention_mask(1, 8192, sliding_window_for_mask, None)?;
         println!("After building sliding_mask: {:.1} MB", get_metal_mb());
         let full_mask = model.build_attention_mask(1, 8192, None, None)?;
@@ -88,7 +107,9 @@ fn main() -> Result<()> {
         println!("L0 start (after sliced PLE norm): {:.1} MB", get_metal_mb());
         let norm0 = l0.input_layernorm.forward(&hidden_states)?;
         println!("L0 after input_layernorm: {:.1} MB", get_metal_mb());
-        let attn0 = l0.self_attn.forward(&norm0, sliding_mask.as_ref(), &cos_sliding, &sin_sliding)?;
+        let attn0 =
+            l0.self_attn
+                .forward(&norm0, sliding_mask.as_ref(), &cos_sliding, &sin_sliding)?;
         println!("L0 after self_attn: {:.1} MB", get_metal_mb());
         let post_attn0 = l0.post_attention_layernorm.forward(&attn0)?;
         println!("L0 after post_attn_ln: {:.1} MB", get_metal_mb());
@@ -114,13 +135,17 @@ fn main() -> Result<()> {
             let p_raw = per_layer_projections.narrow(2, i, 1)?.squeeze(2)?;
             let per_layer_slice = model.ple.norm.forward(&p_raw)?;
             let (cos, sin, mask) = match layer_type {
-                glypr_core::config::LayerType::SlidingAttention => (&cos_sliding, &sin_sliding, sliding_mask.as_ref()),
-                glypr_core::config::LayerType::FullAttention => (&cos_full, &sin_full, full_mask.as_ref()),
+                glypr_core::config::LayerType::SlidingAttention => {
+                    (&cos_sliding, &sin_sliding, sliding_mask.as_ref())
+                }
+                glypr_core::config::LayerType::FullAttention => {
+                    (&cos_full, &sin_full, full_mask.as_ref())
+                }
             };
 
             // Sample peak during layer
-            use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
             use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
             use std::thread;
             let running = Arc::new(AtomicBool::new(true));
             let peak = Arc::new(AtomicU64::new(get_metal_mb() as u64));
@@ -140,8 +165,13 @@ fn main() -> Result<()> {
             handle.join().unwrap();
             let peak_during = peak.load(Ordering::Relaxed);
 
-            println!("Layer {:02} ({:?}) -> End: {:.1} MB | Peak during: {} MB", 
-                i, layer_type, get_metal_mb(), peak_during);
+            println!(
+                "Layer {:02} ({:?}) -> End: {:.1} MB | Peak during: {} MB",
+                i,
+                layer_type,
+                get_metal_mb(),
+                peak_during
+            );
         }
 
         let normed = model.norm.forward(&hidden_states)?;

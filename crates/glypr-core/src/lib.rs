@@ -1,23 +1,23 @@
 pub mod attention;
 pub mod config;
+#[cfg(feature = "coreml")]
+pub mod coreml;
+pub mod cpu_simd;
+pub mod hub;
 pub mod layer;
 pub mod linear;
+#[cfg(feature = "metal")]
+pub mod metal_kernels;
 pub mod mlp;
 pub mod model;
+pub mod multimodal;
 pub mod norm;
 pub mod ple;
 pub mod profile;
 pub mod rope;
-pub mod tokenizer;
-pub mod cpu_simd;
-pub mod multimodal;
-pub mod hub;
 pub mod task;
+pub mod tokenizer;
 pub mod util;
-#[cfg(feature = "metal")]
-pub mod metal_kernels;
-#[cfg(feature = "coreml")]
-pub mod coreml;
 
 pub use attention::AttentionMode;
 #[cfg(feature = "coreml")]
@@ -25,18 +25,17 @@ pub use coreml::{CoreMLComputeUnits, CoreMLTextBackbone, CoreMLVisionTower};
 pub use linear::LinearOp;
 pub use model::EmbeddingGemma2Model;
 pub use multimodal::{
-    ModalityPart, MultimodalProjector, VisionBackendPolicy, VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH,
+    ModalityPart, MultimodalProjector, VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH,
     VISION_BUDGET_LOW, VISION_BUDGET_MAX, VISION_BUDGET_MEDIUM, VISION_BUDGET_MIN,
-    VISION_BUDGET_ULTRA, validate_vision_budget,
+    VISION_BUDGET_ULTRA, VisionBackendPolicy, validate_vision_budget,
 };
 pub use profile::{ForwardProfile, LayerProfile, PipelineProfile};
 pub use task::Task;
 pub use util::{
-    binary_cosine_similarity, cosine_similarity, hamming_distance, int8_cosine_similarity,
-    int8_dot_product, l2_normalize, quantize_binary, quantize_int8, truncate_mrl,
-    with_autorelease_pool, AutoreleaseScope,
+    AutoreleaseScope, binary_cosine_similarity, cosine_similarity, hamming_distance,
+    int8_cosine_similarity, int8_dot_product, l2_normalize, quantize_binary, quantize_int8,
+    truncate_mrl, with_autorelease_pool,
 };
-
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Module, Tensor};
@@ -46,7 +45,6 @@ use tokenizer::GlyprTokenizer;
 
 // 8,192 content tokens + 128 tokens headroom for task prefixes, document titles, and special tokens
 pub const DEFAULT_MAX_SEQ_LEN: usize = 8192 + 128; // 8,320 tokens
-
 
 pub struct GlyprEmbedder {
     pub model: EmbeddingGemma2Model,
@@ -140,7 +138,6 @@ impl<'a> MultimodalInput<'a> {
     }
 }
 
-
 impl GlyprEmbedder {
     pub fn load<P: AsRef<Path>>(model_dir: P, device: &Device, dtype: DType) -> Result<Self> {
         let dir = model_dir.as_ref();
@@ -176,16 +173,17 @@ impl GlyprEmbedder {
 
     /// Load a 100% self-contained GGUF file (extracts model weights, architecture config, and BPE tokenizer).
     /// Zero external file or HuggingFace snapshot dependencies!
-    pub fn load_gguf<P: AsRef<Path>>(
-        gguf_path: P,
-        device: &Device,
-        dtype: DType,
-    ) -> Result<Self> {
+    pub fn load_gguf<P: AsRef<Path>>(gguf_path: P, device: &Device, dtype: DType) -> Result<Self> {
         let mut file = std::fs::File::open(gguf_path.as_ref())
             .with_context(|| format!("Failed to open GGUF file {:?}", gguf_path.as_ref()))?;
 
-        let content = candle_core::quantized::gguf_file::Content::read(&mut file)
-            .with_context(|| format!("Failed to read GGUF container from {:?}", gguf_path.as_ref()))?;
+        let content =
+            candle_core::quantized::gguf_file::Content::read(&mut file).with_context(|| {
+                format!(
+                    "Failed to read GGUF container from {:?}",
+                    gguf_path.as_ref()
+                )
+            })?;
 
         let config = TextConfig::from_gguf_metadata(&content.metadata)
             .context("Failed to parse TextConfig from GGUF metadata")?;
@@ -193,8 +191,9 @@ impl GlyprEmbedder {
         let tokenizer = GlyprTokenizer::from_gguf_metadata(&content.metadata)
             .context("Failed to parse GlyprTokenizer from GGUF metadata")?;
 
-        let model = EmbeddingGemma2Model::from_gguf_content(&content, &mut file, config, device, dtype)
-            .map_err(|e| anyhow::anyhow!("GGUF Model initialization failed: {}", e))?;
+        let model =
+            EmbeddingGemma2Model::from_gguf_content(&content, &mut file, config, device, dtype)
+                .map_err(|e| anyhow::anyhow!("GGUF Model initialization failed: {}", e))?;
 
         Ok(Self {
             model,
@@ -210,26 +209,29 @@ impl GlyprEmbedder {
     }
 
     /// Load self-contained BF16 GGUF file (e.g., `embeddinggemma-2-BF16.gguf`)
-    pub fn load_gguf_bf16<P: AsRef<Path>>(
-        gguf_path: P,
-        device: &Device,
-    ) -> Result<Self> {
-        let dtype = if device.is_metal() { DType::BF16 } else { DType::F32 };
+    pub fn load_gguf_bf16<P: AsRef<Path>>(gguf_path: P, device: &Device) -> Result<Self> {
+        let dtype = if device.is_metal() {
+            DType::BF16
+        } else {
+            DType::F32
+        };
         Self::load_gguf(gguf_path, device, dtype)
     }
 
     /// Load self-contained Q8_0 quantized GGUF file (e.g., `embeddinggemma-2-Q8_0.gguf`)
-    pub fn load_gguf_q8<P: AsRef<Path>>(
-        gguf_path: P,
-        device: &Device,
-    ) -> Result<Self> {
-        let dtype = if device.is_metal() { DType::BF16 } else { DType::F32 };
+    pub fn load_gguf_q8<P: AsRef<Path>>(gguf_path: P, device: &Device) -> Result<Self> {
+        let dtype = if device.is_metal() {
+            DType::BF16
+        } else {
+            DType::F32
+        };
         Self::load_gguf(gguf_path, device, dtype)
     }
 
     /// Dynamically attach an optional multimodal projector GGUF (`mmproj-*.gguf`)
     pub fn attach_multimodal_projector<P: AsRef<Path>>(&mut self, mmproj_path: P) -> Result<()> {
-        let projector = MultimodalProjector::from_gguf_file(mmproj_path.as_ref(), &self.device, self.dtype)?;
+        let projector =
+            MultimodalProjector::from_gguf_file(mmproj_path.as_ref(), &self.device, self.dtype)?;
         self.multimodal = Some(projector);
         Ok(())
     }
@@ -279,9 +281,13 @@ impl GlyprEmbedder {
     /// Whether CoreML Vision models are attached.
     pub fn has_coreml_vision(&self) -> bool {
         #[cfg(feature = "coreml")]
-        { self.coreml_vision.is_some() }
+        {
+            self.coreml_vision.is_some()
+        }
         #[cfg(not(feature = "coreml"))]
-        { false }
+        {
+            false
+        }
     }
 
     /// Encode a single image item using the routed vision engine (ANE CoreML or Metal/CPU GGUF).
@@ -311,10 +317,9 @@ impl GlyprEmbedder {
                 VisionBackendPolicy::Metal => false,
             };
 
-            if use_coreml
-                && let Some(cv) = &self.coreml_vision {
-                    return cv.encode_to_tensor_dtype(&processed, &self.device, self.dtype);
-                }
+            if use_coreml && let Some(cv) = &self.coreml_vision {
+                return cv.encode_to_tensor_dtype(&processed, &self.device, self.dtype);
+            }
         }
 
         // Standard Candle / GGUF path
@@ -348,13 +353,19 @@ impl GlyprEmbedder {
     ) -> Result<Vec<f32>> {
         let has_coreml_vision = {
             #[cfg(feature = "coreml")]
-            { self.coreml_vision.is_some() }
+            {
+                self.coreml_vision.is_some()
+            }
             #[cfg(not(feature = "coreml"))]
-            { false }
+            {
+                false
+            }
         };
 
         if self.multimodal.is_none() && !has_coreml_vision {
-            anyhow::bail!("Multimodal engine not attached. Call embedder.attach_multimodal_projector() or embedder.attach_coreml_vision() first.");
+            anyhow::bail!(
+                "Multimodal engine not attached. Call embedder.attach_multimodal_projector() or embedder.attach_coreml_vision() first."
+            );
         }
 
         // =========================================================================
@@ -382,7 +393,10 @@ impl GlyprEmbedder {
                         num_soft_tokens: n_tokens,
                     });
                 }
-                MediaItem::VideoFrames { frames, budget_per_frame } => {
+                MediaItem::VideoFrames {
+                    frames,
+                    budget_per_frame,
+                } => {
                     let b = budget_per_frame.unwrap_or(140);
                     let n_tokens = if frames.is_empty() {
                         0
@@ -436,7 +450,10 @@ impl GlyprEmbedder {
                     let (soft_toks, _) = projector.encode_audio(samples)?;
                     soft_tensors.push(soft_toks);
                 }
-                MediaItem::VideoFrames { frames, budget_per_frame } => {
+                MediaItem::VideoFrames {
+                    frames,
+                    budget_per_frame,
+                } => {
                     let b = budget_per_frame.unwrap_or(140);
                     for frame in frames.iter() {
                         let soft_toks = self.encode_image_part(frame, b)?;
@@ -452,7 +469,8 @@ impl GlyprEmbedder {
         let input_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
 
         // 1. Embed tokens with scaling
-        let text_embeds = (self.model.embed_tokens.forward(&input_tensor)? * self.model.embed_scale)?;
+        let text_embeds =
+            (self.model.embed_tokens.forward(&input_tensor)? * self.model.embed_scale)?;
 
         // 2. Splice soft tokens into their respective slot ranges
         let mut chunks = Vec::new();
@@ -475,7 +493,9 @@ impl GlyprEmbedder {
 
         // 3. Forward through backbone and pool
         let token_embeds = self.model.forward_embeds(&merged_embeds, None)?;
-        let pooled = self.model.pool_and_normalize(&token_embeds, None, truncate_dim)?;
+        let pooled = self
+            .model
+            .pool_and_normalize(&token_embeds, None, truncate_dim)?;
         let pooled_f32 = pooled.to_dtype(DType::F32)?;
         let vec = pooled_f32.squeeze(0)?.to_vec1::<f32>()?;
         Ok(vec)
@@ -502,28 +522,26 @@ impl GlyprEmbedder {
     /// Matches Python `sentence-transformers` list format:
     /// `embedder.embed_interleaved(&[ModalityPart::Text("..."), ModalityPart::Image { ... }], Task::SearchQuery)`
     /// Returns native 768-dimensional L2-normalized embedding vector.
-    pub fn embed_interleaved(
-        &self,
-        parts: &[ModalityPart],
-        task: Task,
-    ) -> Result<Vec<f32>> {
+    pub fn embed_interleaved(&self, parts: &[ModalityPart], task: Task) -> Result<Vec<f32>> {
         with_autorelease_pool(|| self.embed_interleaved_inner(parts, task))
     }
 
-    fn embed_interleaved_inner(
-        &self,
-        parts: &[ModalityPart],
-        task: Task,
-    ) -> Result<Vec<f32>> {
+    fn embed_interleaved_inner(&self, parts: &[ModalityPart], task: Task) -> Result<Vec<f32>> {
         let has_media = parts.iter().any(|p| !matches!(p, ModalityPart::Text(_)));
         let has_coreml_vision = {
             #[cfg(feature = "coreml")]
-            { self.coreml_vision.is_some() }
+            {
+                self.coreml_vision.is_some()
+            }
             #[cfg(not(feature = "coreml"))]
-            { false }
+            {
+                false
+            }
         };
         if has_media && self.multimodal.is_none() && !has_coreml_vision {
-            anyhow::bail!("Multimodal engine not attached. Call embedder.attach_multimodal_projector() or embedder.attach_coreml_vision() first.");
+            anyhow::bail!(
+                "Multimodal engine not attached. Call embedder.attach_multimodal_projector() or embedder.attach_coreml_vision() first."
+            );
         }
 
         // 1. Tokenize sequence and validate context window preflight (< 10 µs, 0 neural forwards)
@@ -567,7 +585,8 @@ impl GlyprEmbedder {
 
         // 3. Splicing & Backbone Forward Pass
         let input_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
-        let text_embeds = (self.model.embed_tokens.forward(&input_tensor)? * self.model.embed_scale)?;
+        let text_embeds =
+            (self.model.embed_tokens.forward(&input_tensor)? * self.model.embed_scale)?;
 
         let mut chunks = Vec::new();
         let mut curr = 0;
@@ -625,16 +644,8 @@ impl GlyprEmbedder {
 
     /// Encode an audio waveform (with optional prompt) into a dense normalized embedding vector.
     /// Returns native 768-dimensional normalized embedding vector.
-    pub fn embed_audio(
-        &self,
-        samples: &[f32],
-        prompt: Option<&str>,
-    ) -> Result<Vec<f32>> {
-        self.embed_composite(
-            prompt,
-            &[MediaItem::Audio { samples }],
-            None,
-        )
+    pub fn embed_audio(&self, samples: &[f32], prompt: Option<&str>) -> Result<Vec<f32>> {
+        self.embed_composite(prompt, &[MediaItem::Audio { samples }], None)
     }
 
     pub fn set_attention_mode(&mut self, mode: AttentionMode) {
@@ -649,17 +660,32 @@ impl GlyprEmbedder {
         self.tokenizer.format_document(content, title)
     }
 
-    pub fn embed_query(&self, query: &str, task: &str, truncate_dim: Option<usize>) -> Result<Vec<f32>> {
+    pub fn embed_query(
+        &self,
+        query: &str,
+        task: &str,
+        truncate_dim: Option<usize>,
+    ) -> Result<Vec<f32>> {
         let formatted = self.tokenizer.format_query(query, task);
         self.encode_single_text(&formatted, truncate_dim)
     }
 
-    pub fn embed_document(&self, content: &str, title: Option<&str>, truncate_dim: Option<usize>) -> Result<Vec<f32>> {
+    pub fn embed_document(
+        &self,
+        content: &str,
+        title: Option<&str>,
+        truncate_dim: Option<usize>,
+    ) -> Result<Vec<f32>> {
         let formatted = self.tokenizer.format_document(content, title);
         self.encode_single_text(&formatted, truncate_dim)
     }
 
-    pub fn embed_symmetric(&self, text: &str, task: &str, truncate_dim: Option<usize>) -> Result<Vec<f32>> {
+    pub fn embed_symmetric(
+        &self,
+        text: &str,
+        task: &str,
+        truncate_dim: Option<usize>,
+    ) -> Result<Vec<f32>> {
         let formatted = self.tokenizer.format_query(text, task);
         self.encode_single_text(&formatted, truncate_dim)
     }
@@ -670,7 +696,10 @@ impl GlyprEmbedder {
         task: &str,
         truncate_dim: Option<usize>,
     ) -> Result<Vec<Vec<f32>>> {
-        let formatted: Vec<String> = queries.iter().map(|q| self.tokenizer.format_query(q, task)).collect();
+        let formatted: Vec<String> = queries
+            .iter()
+            .map(|q| self.tokenizer.format_query(q, task))
+            .collect();
         let formatted_refs: Vec<&str> = formatted.iter().map(|s| s.as_str()).collect();
         self.encode_batch_texts(&formatted_refs, truncate_dim)
     }
@@ -729,16 +758,24 @@ impl GlyprEmbedder {
 
         // 1. Check multimodal projector requirement if media parts exist
         let has_any_media = inputs.iter().any(|inp| {
-            inp.parts.iter().any(|p| !matches!(p, ModalityPart::Text(_)))
+            inp.parts
+                .iter()
+                .any(|p| !matches!(p, ModalityPart::Text(_)))
         });
         let has_coreml_vision = {
             #[cfg(feature = "coreml")]
-            { self.coreml_vision.is_some() }
+            {
+                self.coreml_vision.is_some()
+            }
             #[cfg(not(feature = "coreml"))]
-            { false }
+            {
+                false
+            }
         };
         if has_any_media && self.multimodal.is_none() && !has_coreml_vision {
-            anyhow::bail!("Multimodal input received in batch, but multimodal engine is not attached.");
+            anyhow::bail!(
+                "Multimodal input received in batch, but multimodal engine is not attached."
+            );
         }
 
         // 2. Pre-extract and batch-encode all images across all items
@@ -755,9 +792,14 @@ impl GlyprEmbedder {
         let encoded_images: Vec<Tensor> = if !image_requests.is_empty() {
             let use_coreml = {
                 #[cfg(feature = "coreml")]
-                { self.coreml_vision.is_some() && self.vision_backend != VisionBackendPolicy::Metal }
+                {
+                    self.coreml_vision.is_some()
+                        && self.vision_backend != VisionBackendPolicy::Metal
+                }
                 #[cfg(not(feature = "coreml"))]
-                { false }
+                {
+                    false
+                }
             };
 
             if use_coreml {
@@ -767,9 +809,10 @@ impl GlyprEmbedder {
                 }
                 res
             } else {
-                let projector = self.multimodal.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("Multimodal engine not attached.")
-                })?;
+                let projector = self
+                    .multimodal
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Multimodal engine not attached."))?;
                 let images_and_budgets: Vec<(&image::DynamicImage, usize)> = image_requests
                     .iter()
                     .map(|(_, _, img, b)| (*img, *b))
@@ -787,9 +830,10 @@ impl GlyprEmbedder {
         let mut item_embeds = Vec::with_capacity(b);
         let mut seq_lens = Vec::with_capacity(b);
 
-
         for (item_idx, inp) in inputs.iter().enumerate() {
-            let (token_ids, slots) = self.tokenizer.encode_modality_sequence(&inp.parts, inp.task)?;
+            let (token_ids, slots) = self
+                .tokenizer
+                .encode_modality_sequence(&inp.parts, inp.task)?;
             let seq_len = token_ids.len();
             if seq_len > self.max_seq_len {
                 anyhow::bail!(
@@ -825,7 +869,8 @@ impl GlyprEmbedder {
             }
 
             let input_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
-            let text_embeds = (self.model.embed_tokens.forward(&input_tensor)? * self.model.embed_scale)?;
+            let text_embeds =
+                (self.model.embed_tokens.forward(&input_tensor)? * self.model.embed_scale)?;
 
             let mut chunks = Vec::new();
             let mut curr = 0;
@@ -882,14 +927,18 @@ impl GlyprEmbedder {
 
             let refs: Vec<&Tensor> = padded_items.iter().collect();
             let stacked = Tensor::cat(&refs, 0)?; // [b, max_len, 512]
-            let mask_tensor = Tensor::from_vec(mask_vec, (b, max_len), &self.device)?
-                .to_dtype(self.dtype)?;
+            let mask_tensor =
+                Tensor::from_vec(mask_vec, (b, max_len), &self.device)?.to_dtype(self.dtype)?;
             (stacked, Some(mask_tensor))
         };
 
         // 5. Forward through language model backbone and pool
-        let token_embeds = self.model.forward_embeds(&batched_embeds, pad_mask.as_ref())?;
-        let pooled = self.model.pool_and_normalize(&token_embeds, pad_mask.as_ref(), truncate_dim)?;
+        let token_embeds = self
+            .model
+            .forward_embeds(&batched_embeds, pad_mask.as_ref())?;
+        let pooled =
+            self.model
+                .pool_and_normalize(&token_embeds, pad_mask.as_ref(), truncate_dim)?;
         let pooled_f32 = pooled.to_dtype(DType::F32)?;
         let out_dim = pooled_f32.dim(1)?;
         let all_floats = pooled_f32.flatten_all()?.to_vec1::<f32>()?;
@@ -902,7 +951,6 @@ impl GlyprEmbedder {
         Ok(results)
     }
 
-
     pub fn encode_batch_texts(
         &self,
         texts: &[&str],
@@ -914,7 +962,6 @@ impl GlyprEmbedder {
             .collect();
         self.embed_batch(&inputs, truncate_dim)
     }
-
 
     fn encode_single_text(&self, text: &str, truncate_dim: Option<usize>) -> Result<Vec<f32>> {
         with_autorelease_pool(|| {
@@ -933,7 +980,9 @@ impl GlyprEmbedder {
             let token_embeds = self.model.forward(&input_tensor, None)?;
 
             // Pool and normalize
-            let pooled = self.model.pool_and_normalize(&token_embeds, None, truncate_dim)?;
+            let pooled = self
+                .model
+                .pool_and_normalize(&token_embeds, None, truncate_dim)?;
 
             // Cast to F32 vec
             let pooled_f32 = pooled.to_dtype(DType::F32)?;
@@ -965,16 +1014,26 @@ impl GlyprEmbedder {
                 let t = Tensor::from_vec(ids, (1, seq_len), &self.device)?;
                 (t, None)
             } else {
-                let (ids, mask) = self.tokenizer.encode_batch_padded_with_limit(texts, self.max_seq_len, &self.device)?;
+                let (ids, mask) = self.tokenizer.encode_batch_padded_with_limit(
+                    texts,
+                    self.max_seq_len,
+                    &self.device,
+                )?;
                 (ids, Some(mask))
             };
             let tokenizer_ms = t_tok.elapsed().as_secs_f64() * 1000.0;
             let seq_len = input_ids.dim(1)?;
 
-            let (token_embeds, forward_profile) = self.model.forward_profiled(&input_ids, attention_mask.as_ref())?;
+            let (token_embeds, forward_profile) = self
+                .model
+                .forward_profiled(&input_ids, attention_mask.as_ref())?;
 
             let t_pool = std::time::Instant::now();
-            let pooled = self.model.pool_and_normalize(&token_embeds, attention_mask.as_ref(), truncate_dim)?;
+            let pooled = self.model.pool_and_normalize(
+                &token_embeds,
+                attention_mask.as_ref(),
+                truncate_dim,
+            )?;
             let pooled_f32 = pooled.to_dtype(DType::F32)?;
             let pooling_ms = t_pool.elapsed().as_secs_f64() * 1000.0;
 

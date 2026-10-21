@@ -1,6 +1,6 @@
 use candle_core::{DType, Device};
 use glypr_core::coreml::{CoreMLComputeUnits, CoreMLTextBackbone};
-use glypr_core::{hub, GlyprEmbedder, Task};
+use glypr_core::{GlyprEmbedder, Task, hub};
 use std::path::Path;
 use std::time::Instant;
 
@@ -18,8 +18,13 @@ fn bench_text_ane_vs_metal(seq_len: usize) -> anyhow::Result<()> {
     // 1. CoreML ANE Text Backbone (models/coreml/gemma2_text_backbone_s512_w8a16.mlmodelc)
     let coreml_text_path = "models/coreml/gemma2_text_backbone_s512_w8a16.mlmodelc";
     if Path::new(coreml_text_path).exists() {
-        let ane_backbone = CoreMLTextBackbone::from_path(coreml_text_path, CoreMLComputeUnits::CpuAndNeuralEngine)?;
-        let sample_ids: Vec<i32> = (0..seq_len).map(|i| ((i * 37 + 100) % 250000) as i32).collect();
+        let ane_backbone = CoreMLTextBackbone::from_path(
+            coreml_text_path,
+            CoreMLComputeUnits::CpuAndNeuralEngine,
+        )?;
+        let sample_ids: Vec<i32> = (0..seq_len)
+            .map(|i| ((i * 37 + 100) % 250000) as i32)
+            .collect();
 
         // Warmup
         for _ in 0..5 {
@@ -34,9 +39,14 @@ fn bench_text_ane_vs_metal(seq_len: usize) -> anyhow::Result<()> {
             times.push(t0.elapsed().as_secs_f64() * 1000.0);
         }
         let mean = times.iter().sum::<f64>() / iters as f64;
-        println!("1. Pure ANE (CpuAndNeuralEngine, INT8):  {:6.2} ms  ({:5.1} queries/s)", mean, 1000.0 / mean);
+        println!(
+            "1. Pure ANE (CpuAndNeuralEngine, INT8):  {:6.2} ms  ({:5.1} queries/s)",
+            mean,
+            1000.0 / mean
+        );
 
-        let all_backbone = CoreMLTextBackbone::from_path(coreml_text_path, CoreMLComputeUnits::All)?;
+        let all_backbone =
+            CoreMLTextBackbone::from_path(coreml_text_path, CoreMLComputeUnits::All)?;
         for _ in 0..5 {
             let _ = all_backbone.embed_token_ids(&sample_ids)?;
         }
@@ -47,7 +57,11 @@ fn bench_text_ane_vs_metal(seq_len: usize) -> anyhow::Result<()> {
             times_all.push(t0.elapsed().as_secs_f64() * 1000.0);
         }
         let mean_all = times_all.iter().sum::<f64>() / iters as f64;
-        println!("2. CoreML ALL (ANE + GPU, INT8):          {:6.2} ms  ({:5.1} queries/s)", mean_all, 1000.0 / mean_all);
+        println!(
+            "2. CoreML ALL (ANE + GPU, INT8):          {:6.2} ms  ({:5.1} queries/s)",
+            mean_all,
+            1000.0 / mean_all
+        );
     }
 
     // 2. Candle Metal (BF16 GGUF base)
@@ -69,7 +83,11 @@ fn bench_text_ane_vs_metal(seq_len: usize) -> anyhow::Result<()> {
                 times.push(t0.elapsed().as_secs_f64() * 1000.0);
             }
             let mean = times.iter().sum::<f64>() / iters as f64;
-            println!("3. Candle Metal (GGUF BF16 on GPU):       {:6.2} ms  ({:5.1} queries/s)", mean, 1000.0 / mean);
+            println!(
+                "3. Candle Metal (GGUF BF16 on GPU):       {:6.2} ms  ({:5.1} queries/s)",
+                mean,
+                1000.0 / mean
+            );
         }
 
         // 3. Candle Metal (Q8_0 GGUF base)
@@ -90,7 +108,11 @@ fn bench_text_ane_vs_metal(seq_len: usize) -> anyhow::Result<()> {
                 times.push(t0.elapsed().as_secs_f64() * 1000.0);
             }
             let mean = times.iter().sum::<f64>() / iters as f64;
-            println!("4. Candle Metal (GGUF Q8_0 on GPU):       {:6.2} ms  ({:5.1} queries/s)", mean, 1000.0 / mean);
+            println!(
+                "4. Candle Metal (GGUF Q8_0 on GPU):       {:6.2} ms  ({:5.1} queries/s)",
+                mean,
+                1000.0 / mean
+            );
         }
     }
 

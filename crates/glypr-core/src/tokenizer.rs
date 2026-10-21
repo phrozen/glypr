@@ -12,24 +12,61 @@ pub struct GlyprTokenizer {
 impl GlyprTokenizer {
     fn default_prompts() -> HashMap<String, String> {
         let mut prompts = HashMap::new();
-        prompts.insert("searchquery".to_string(), "task: search result | query: ".to_string());
-        prompts.insert("retrieval".to_string(), "task: search result | query: ".to_string());
-        prompts.insert("coderetrieval".to_string(), "task: code retrieval | query: ".to_string());
-        prompts.insert("questionanswering".to_string(), "task: question answering | query: ".to_string());
-        prompts.insert("factchecking".to_string(), "task: fact checking | query: ".to_string());
-        prompts.insert("sentencesimilarity".to_string(), "task: sentence similarity | query: ".to_string());
-        prompts.insert("sts".to_string(), "task: sentence similarity | query: ".to_string());
-        prompts.insert("summarization".to_string(), "task: sentence similarity | query: ".to_string());
-        prompts.insert("classification".to_string(), "task: classification | query: ".to_string());
-        prompts.insert("clustering".to_string(), "task: clustering | query: ".to_string());
-        prompts.insert("reranking".to_string(), "task: search result | query: ".to_string());
-        prompts.insert("bitextmining".to_string(), "task: search result | query: ".to_string());
+        prompts.insert(
+            "searchquery".to_string(),
+            "task: search result | query: ".to_string(),
+        );
+        prompts.insert(
+            "retrieval".to_string(),
+            "task: search result | query: ".to_string(),
+        );
+        prompts.insert(
+            "coderetrieval".to_string(),
+            "task: code retrieval | query: ".to_string(),
+        );
+        prompts.insert(
+            "questionanswering".to_string(),
+            "task: question answering | query: ".to_string(),
+        );
+        prompts.insert(
+            "factchecking".to_string(),
+            "task: fact checking | query: ".to_string(),
+        );
+        prompts.insert(
+            "sentencesimilarity".to_string(),
+            "task: sentence similarity | query: ".to_string(),
+        );
+        prompts.insert(
+            "sts".to_string(),
+            "task: sentence similarity | query: ".to_string(),
+        );
+        prompts.insert(
+            "summarization".to_string(),
+            "task: sentence similarity | query: ".to_string(),
+        );
+        prompts.insert(
+            "classification".to_string(),
+            "task: classification | query: ".to_string(),
+        );
+        prompts.insert(
+            "clustering".to_string(),
+            "task: clustering | query: ".to_string(),
+        );
+        prompts.insert(
+            "reranking".to_string(),
+            "task: search result | query: ".to_string(),
+        );
+        prompts.insert(
+            "bitextmining".to_string(),
+            "task: search result | query: ".to_string(),
+        );
         prompts.insert("document".to_string(), "title: none | text: ".to_string());
         prompts
     }
 
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let tokenizer = Tokenizer::from_file(path).map_err(|e| anyhow::anyhow!("Tokenizer load error: {}", e))?;
+        let tokenizer = Tokenizer::from_file(path)
+            .map_err(|e| anyhow::anyhow!("Tokenizer load error: {}", e))?;
         Ok(Self {
             tokenizer,
             prompts: Self::default_prompts(),
@@ -86,12 +123,13 @@ impl GlyprTokenizer {
         // Gemma normalization: Replace " " with " " (\u{2581})
         use tokenizers::normalizers::replace::Replace;
         tokenizer.with_normalizer(Some(
-            Replace::new(" ", "\u{2581}").map_err(|e| anyhow::anyhow!("Normalizer error: {}", e))?,
+            Replace::new(" ", "\u{2581}")
+                .map_err(|e| anyhow::anyhow!("Normalizer error: {}", e))?,
         ));
 
         // Gemma pre-tokenization: Split on " " (\u{2581}) merged with previous token
-        use tokenizers::pre_tokenizers::split::Split;
         use tokenizers::SplitDelimiterBehavior;
+        use tokenizers::pre_tokenizers::split::Split;
         tokenizer.with_pre_tokenizer(Some(
             Split::new(" ", SplitDelimiterBehavior::MergedWithPrevious, false)
                 .map_err(|e| anyhow::anyhow!("Pre-tokenizer error: {}", e))?,
@@ -105,9 +143,11 @@ impl GlyprTokenizer {
 
     pub fn format_query(&self, query: &str, task: &str) -> String {
         let key = task.to_lowercase().replace(['-', '_', ' '], "");
-        let prefix = self.prompts.get(&key).cloned().unwrap_or_else(|| {
-            format!("task: {} | query: ", task.to_lowercase())
-        });
+        let prefix = self
+            .prompts
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| format!("task: {} | query: ", task.to_lowercase()));
         format!("{}{}", prefix, query)
     }
 
@@ -179,8 +219,10 @@ impl GlyprTokenizer {
             }
         }
 
-        let input_ids = candle_core::Tensor::from_vec(input_ids_vec, (batch_size, max_len), device)?;
-        let attention_mask = candle_core::Tensor::from_vec(attention_mask_vec, (batch_size, max_len), device)?;
+        let input_ids =
+            candle_core::Tensor::from_vec(input_ids_vec, (batch_size, max_len), device)?;
+        let attention_mask =
+            candle_core::Tensor::from_vec(attention_mask_vec, (batch_size, max_len), device)?;
 
         Ok((input_ids, attention_mask))
     }
@@ -195,14 +237,16 @@ impl GlyprTokenizer {
     }
 
     /// Construct token sequence for an image query:
-    /// <bos> <boi> <image>*N <eoi> [prompt] <eos>
-    pub fn encode_image_query(&self, prompt: Option<&str>, num_soft_tokens: usize) -> Result<Vec<u32>> {
+    /// `<bos> <boi> <image>*N <eoi> [prompt] <eos>`
+    pub fn encode_image_query(
+        &self,
+        prompt: Option<&str>,
+        num_soft_tokens: usize,
+    ) -> Result<Vec<u32>> {
         let mut tokens = Vec::with_capacity(num_soft_tokens + 16);
         tokens.push(TOKEN_BOS);
         tokens.push(TOKEN_BOI);
-        for _ in 0..num_soft_tokens {
-            tokens.push(TOKEN_IMAGE);
-        }
+        tokens.resize(tokens.len() + num_soft_tokens, TOKEN_IMAGE);
         tokens.push(TOKEN_EOI);
 
         if let Some(text) = prompt {
@@ -223,14 +267,16 @@ impl GlyprTokenizer {
     }
 
     /// Construct token sequence for an audio query:
-    /// <bos> <boa> <audio>*N <eoa> [prompt] <eos>
-    pub fn encode_audio_query(&self, prompt: Option<&str>, num_soft_tokens: usize) -> Result<Vec<u32>> {
+    /// `<bos> <boa> <audio>*N <eoa> [prompt] <eos>`
+    pub fn encode_audio_query(
+        &self,
+        prompt: Option<&str>,
+        num_soft_tokens: usize,
+    ) -> Result<Vec<u32>> {
         let mut tokens = Vec::with_capacity(num_soft_tokens + 16);
         tokens.push(TOKEN_BOS);
         tokens.push(TOKEN_BOA);
-        for _ in 0..num_soft_tokens {
-            tokens.push(TOKEN_AUDIO);
-        }
+        tokens.resize(tokens.len() + num_soft_tokens, TOKEN_AUDIO);
         tokens.push(TOKEN_EOA);
 
         if let Some(text) = prompt {
@@ -253,7 +299,7 @@ impl GlyprTokenizer {
     /// Construct token sequence and slot map for an interleaved multimodal sequence:
     /// Supports manual placeholder tags `<|image|>`, `<|audio|>`, `<|video|>` in prompt,
     /// or prepends media placeholders if no manual tags are present.
-    /// Returns (token_ids, Vec<MediaSlot>).
+    /// Returns `(token_ids, Vec<MediaSlot>)`.
     pub fn encode_interleaved(
         &self,
         prompt: Option<&str>,
@@ -280,10 +326,11 @@ impl GlyprTokenizer {
 
                 for tag in &tags {
                     if let Some(pos) = remaining.find(tag)
-                        && earliest_pos.is_none_or(|p| pos < p) {
-                            earliest_pos = Some(pos);
-                            found_tag = tag;
-                        }
+                        && earliest_pos.is_none_or(|p| pos < p)
+                    {
+                        earliest_pos = Some(pos);
+                        found_tag = tag;
+                    }
                 }
 
                 if let Some(pos) = earliest_pos {
@@ -301,9 +348,7 @@ impl GlyprTokenizer {
                             MediaPlaceholder::Image { num_soft_tokens } => {
                                 tokens.push(TOKEN_BOI);
                                 let slot_start = tokens.len();
-                                for _ in 0..*num_soft_tokens {
-                                    tokens.push(TOKEN_IMAGE);
-                                }
+                                tokens.resize(tokens.len() + *num_soft_tokens, TOKEN_IMAGE);
                                 tokens.push(TOKEN_EOI);
                                 slots.push(MediaSlot {
                                     start_idx: slot_start,
@@ -313,22 +358,22 @@ impl GlyprTokenizer {
                             MediaPlaceholder::Audio { num_soft_tokens } => {
                                 tokens.push(TOKEN_BOA);
                                 let slot_start = tokens.len();
-                                for _ in 0..*num_soft_tokens {
-                                    tokens.push(TOKEN_AUDIO);
-                                }
+                                tokens.resize(tokens.len() + *num_soft_tokens, TOKEN_AUDIO);
                                 tokens.push(TOKEN_EOA);
                                 slots.push(MediaSlot {
                                     start_idx: slot_start,
                                     length: *num_soft_tokens,
                                 });
                             }
-                            MediaPlaceholder::Video { num_frames, soft_tokens_per_frame } => {
+                            MediaPlaceholder::Video {
+                                num_frames,
+                                soft_tokens_per_frame,
+                            } => {
                                 for _ in 0..*num_frames {
                                     tokens.push(TOKEN_BOI);
                                     let slot_start = tokens.len();
-                                    for _ in 0..*soft_tokens_per_frame {
-                                        tokens.push(TOKEN_VIDEO);
-                                    }
+                                    tokens
+                                        .resize(tokens.len() + *soft_tokens_per_frame, TOKEN_VIDEO);
                                     tokens.push(TOKEN_EOI);
                                     slots.push(MediaSlot {
                                         start_idx: slot_start,
@@ -356,9 +401,7 @@ impl GlyprTokenizer {
                     MediaPlaceholder::Image { num_soft_tokens } => {
                         tokens.push(TOKEN_BOI);
                         let slot_start = tokens.len();
-                        for _ in 0..*num_soft_tokens {
-                            tokens.push(TOKEN_IMAGE);
-                        }
+                        tokens.resize(tokens.len() + *num_soft_tokens, TOKEN_IMAGE);
                         tokens.push(TOKEN_EOI);
                         slots.push(MediaSlot {
                             start_idx: slot_start,
@@ -368,22 +411,21 @@ impl GlyprTokenizer {
                     MediaPlaceholder::Audio { num_soft_tokens } => {
                         tokens.push(TOKEN_BOA);
                         let slot_start = tokens.len();
-                        for _ in 0..*num_soft_tokens {
-                            tokens.push(TOKEN_AUDIO);
-                        }
+                        tokens.resize(tokens.len() + *num_soft_tokens, TOKEN_AUDIO);
                         tokens.push(TOKEN_EOA);
                         slots.push(MediaSlot {
                             start_idx: slot_start,
                             length: *num_soft_tokens,
                         });
                     }
-                    MediaPlaceholder::Video { num_frames, soft_tokens_per_frame } => {
+                    MediaPlaceholder::Video {
+                        num_frames,
+                        soft_tokens_per_frame,
+                    } => {
                         for _ in 0..*num_frames {
                             tokens.push(TOKEN_BOI);
                             let slot_start = tokens.len();
-                            for _ in 0..*soft_tokens_per_frame {
-                                tokens.push(TOKEN_VIDEO);
-                            }
+                            tokens.resize(tokens.len() + *soft_tokens_per_frame, TOKEN_VIDEO);
                             tokens.push(TOKEN_EOI);
                             slots.push(MediaSlot {
                                 start_idx: slot_start,
@@ -408,7 +450,7 @@ impl GlyprTokenizer {
     }
 
     /// Encode an ordered sequence of ModalityPart items with an optional Task prompt.
-    /// Returns (token_ids, Vec<MediaSlot>).
+    /// Returns `(token_ids, Vec<MediaSlot>)`.
     pub fn encode_modality_sequence(
         &self,
         parts: &[crate::multimodal::ModalityPart],
@@ -456,9 +498,7 @@ impl GlyprTokenizer {
                     )?;
                     tokens.push(TOKEN_BOI);
                     let slot_start = tokens.len();
-                    for _ in 0..n_tokens {
-                        tokens.push(TOKEN_IMAGE);
-                    }
+                    tokens.resize(tokens.len() + n_tokens, TOKEN_IMAGE);
                     tokens.push(TOKEN_EOI);
                     slots.push(MediaSlot {
                         start_idx: slot_start,
@@ -477,9 +517,7 @@ impl GlyprTokenizer {
 
                     tokens.push(TOKEN_BOA);
                     let slot_start = tokens.len();
-                    for _ in 0..n_tokens {
-                        tokens.push(TOKEN_AUDIO);
-                    }
+                    tokens.resize(tokens.len() + n_tokens, TOKEN_AUDIO);
                     tokens.push(TOKEN_EOA);
                     slots.push(MediaSlot {
                         start_idx: slot_start,
@@ -504,9 +542,7 @@ impl GlyprTokenizer {
                     )?;
                     tokens.push(TOKEN_BOI);
                     let slot_start = tokens.len();
-                    for _ in 0..n_tokens {
-                        tokens.push(TOKEN_VIDEO);
-                    }
+                    tokens.resize(tokens.len() + n_tokens, TOKEN_VIDEO);
                     tokens.push(TOKEN_EOI);
                     slots.push(MediaSlot {
                         start_idx: slot_start,
@@ -531,9 +567,16 @@ impl GlyprTokenizer {
 
 #[derive(Debug, Clone)]
 pub enum MediaPlaceholder {
-    Image { num_soft_tokens: usize },
-    Audio { num_soft_tokens: usize },
-    Video { num_frames: usize, soft_tokens_per_frame: usize },
+    Image {
+        num_soft_tokens: usize,
+    },
+    Audio {
+        num_soft_tokens: usize,
+    },
+    Video {
+        num_frames: usize,
+        soft_tokens_per_frame: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -552,4 +595,3 @@ pub const TOKEN_AUDIO: u32 = 258881;
 pub const TOKEN_EOI: u32 = 258882;
 pub const TOKEN_EOA: u32 = 258883;
 pub const TOKEN_VIDEO: u32 = 258884;
-

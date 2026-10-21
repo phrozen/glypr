@@ -32,7 +32,11 @@ impl CustomOp2 for CpuGeGLUOp {
         l2: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
         if l1.shape() != l2.shape() {
-            candle_core::bail!("cpu_geglu shape mismatch: {:?} vs {:?}", l1.shape(), l2.shape());
+            candle_core::bail!(
+                "cpu_geglu shape mismatch: {:?} vs {:?}",
+                l1.shape(),
+                l2.shape()
+            );
         }
         let total_elem = l1.shape().elem_count();
 
@@ -100,7 +104,11 @@ impl CustomOp2 for CpuGeGLUOp {
 
                 Ok((CpuStorage::BF16(out), l1.shape().clone()))
             }
-            _ => candle_core::bail!("cpu_geglu unsupported dtypes: {:?}, {:?}", s1.dtype(), s2.dtype()),
+            _ => candle_core::bail!(
+                "cpu_geglu unsupported dtypes: {:?}, {:?}",
+                s1.dtype(),
+                s2.dtype()
+            ),
         }
     }
 }

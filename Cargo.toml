@@ -11,6 +11,12 @@ version = "0.3.0"
 edition = "2024"
 authors = ["Guillermo Estrada <213238+phrozen@users.noreply.github.com>"]
 license = "Apache-2.0"
+repository = "https://github.com/phrozen/glypr"
+homepage = "https://github.com/phrozen/glypr"
+documentation = "https://docs.rs/glypr-core"
+readme = "README.md"
+keywords = ["embeddings", "gemma", "metal", "coreml", "multimodal"]
+categories = ["science", "multimedia", "command-line-utilities"]
 description = "Native Rust embedding and retrieval engine for EmbeddingGemma 2"
 
 [workspace.dependencies]
@@ -42,3 +48,6 @@ tower-http = { version = "0.7", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 base64 = "0.23"
+
+[profile.test]
+opt-level = 3

@@ -83,21 +83,31 @@ impl EmbeddingGemma2Model {
 
         // 3. Precompute RoPE (cos, sin)
         let t0 = Instant::now();
-        let (cos_sliding, sin_sliding) = self.rope_sliding.get_cos_sin(seq_len, &self.device, self.dtype)?;
-        let (cos_full, sin_full) = self.rope_full.get_cos_sin(seq_len, &self.device, self.dtype)?;
+        let (cos_sliding, sin_sliding) =
+            self.rope_sliding
+                .get_cos_sin(seq_len, &self.device, self.dtype)?;
+        let (cos_full, sin_full) = self
+            .rope_full
+            .get_cos_sin(seq_len, &self.device, self.dtype)?;
         sync(&cos_sliding)?;
         let rope_calc_ms = elapsed_ms(t0);
 
         // 4. Attention masks
         let t0 = Instant::now();
-        let is_chunked_or_flash = !self.layers.is_empty() && match self.layers[0].self_attn.attention_mode {
-            crate::attention::AttentionMode::ChunkedSliding => true,
-            #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
-            crate::attention::AttentionMode::MetalFlash => true,
-            _ => false,
+        let is_chunked_or_flash = !self.layers.is_empty()
+            && match self.layers[0].self_attn.attention_mode {
+                crate::attention::AttentionMode::ChunkedSliding => true,
+                #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
+                crate::attention::AttentionMode::MetalFlash => true,
+                _ => false,
+            };
+        let sliding_window_for_mask = if is_chunked_or_flash {
+            None
+        } else {
+            Some(self.config.sliding_window)
         };
-        let sliding_window_for_mask = if is_chunked_or_flash { None } else { Some(self.config.sliding_window) };
-        let sliding_mask = self.build_attention_mask(batch, seq_len, sliding_window_for_mask, attention_mask)?;
+        let sliding_mask =
+            self.build_attention_mask(batch, seq_len, sliding_window_for_mask, attention_mask)?;
         let full_mask = self.build_attention_mask(batch, seq_len, None, attention_mask)?;
         if let Some(ref m) = sliding_mask {
             sync(m)?;
@@ -179,19 +189,34 @@ impl EmbeddingGemma2Model {
                 let q = layer
                     .self_attn
                     .q_norm
-                    .forward(&q.reshape((batch, seq_len, layer.self_attn.num_attention_heads, layer.self_attn.head_dim))?)?
+                    .forward(&q.reshape((
+                        batch,
+                        seq_len,
+                        layer.self_attn.num_attention_heads,
+                        layer.self_attn.head_dim,
+                    ))?)?
                     .transpose(1, 2)?
                     .contiguous()?;
                 let k = layer
                     .self_attn
                     .k_norm
-                    .forward(&k.reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?)?
+                    .forward(&k.reshape((
+                        batch,
+                        seq_len,
+                        layer.self_attn.num_key_value_heads,
+                        layer.self_attn.head_dim,
+                    ))?)?
                     .transpose(1, 2)?
                     .contiguous()?;
                 let v = layer
                     .self_attn
                     .v_norm
-                    .forward(&v.reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?)?
+                    .forward(&v.reshape((
+                        batch,
+                        seq_len,
+                        layer.self_attn.num_key_value_heads,
+                        layer.self_attn.head_dim,
+                    ))?)?
                     .transpose(1, 2)?
                     .contiguous()?;
                 let q = apply_rotary_pos_emb(&q, cos, sin)?;
@@ -203,19 +228,34 @@ impl EmbeddingGemma2Model {
                 let q = layer
                     .self_attn
                     .q_norm
-                    .forward(&q.reshape((batch, seq_len, layer.self_attn.num_attention_heads, layer.self_attn.head_dim))?)?
+                    .forward(&q.reshape((
+                        batch,
+                        seq_len,
+                        layer.self_attn.num_attention_heads,
+                        layer.self_attn.head_dim,
+                    ))?)?
                     .transpose(1, 2)?
                     .contiguous()?;
                 let k = layer
                     .self_attn
                     .k_norm
-                    .forward(&k.reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?)?
+                    .forward(&k.reshape((
+                        batch,
+                        seq_len,
+                        layer.self_attn.num_key_value_heads,
+                        layer.self_attn.head_dim,
+                    ))?)?
                     .transpose(1, 2)?
                     .contiguous()?;
                 let v = layer
                     .self_attn
                     .v_norm
-                    .forward(&v.reshape((batch, seq_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim))?)?
+                    .forward(&v.reshape((
+                        batch,
+                        seq_len,
+                        layer.self_attn.num_key_value_heads,
+                        layer.self_attn.head_dim,
+                    ))?)?
                     .transpose(1, 2)?
                     .contiguous()?;
                 let q = apply_rotary_pos_emb(&q, cos, sin)?;
@@ -231,37 +271,69 @@ impl EmbeddingGemma2Model {
                 #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
                 crate::attention::AttentionMode::MetalFlash => {
                     use crate::attention::AttentionBackend;
-                    crate::attention::MetalFlashAttention.compute_attention(&q, &k, &v, mask, layer.self_attn.sliding_window)?
+                    crate::attention::MetalFlashAttention.compute_attention(
+                        &q,
+                        &k,
+                        &v,
+                        mask,
+                        layer.self_attn.sliding_window,
+                    )?
                 }
                 _ => {
                     use crate::attention::AttentionBackend;
-                    let num_groups = layer.self_attn.num_attention_heads / layer.self_attn.num_key_value_heads;
+                    let num_groups =
+                        layer.self_attn.num_attention_heads / layer.self_attn.num_key_value_heads;
                     let k_rep = repeat_kv(&k, num_groups)?;
                     let v_rep = repeat_kv(&v, num_groups)?;
                     match layer.self_attn.attention_mode {
                         crate::attention::AttentionMode::Standard => {
-                            crate::attention::StandardAttention.compute_attention(&q, &k_rep, &v_rep, mask, layer.self_attn.sliding_window)?
+                            crate::attention::StandardAttention.compute_attention(
+                                &q,
+                                &k_rep,
+                                &v_rep,
+                                mask,
+                                layer.self_attn.sliding_window,
+                            )?
                         }
                         crate::attention::AttentionMode::ChunkedSliding => {
-                            crate::attention::ChunkedSlidingAttention.compute_attention(&q, &k_rep, &v_rep, mask, layer.self_attn.sliding_window)?
+                            crate::attention::ChunkedSlidingAttention.compute_attention(
+                                &q,
+                                &k_rep,
+                                &v_rep,
+                                mask,
+                                layer.self_attn.sliding_window,
+                            )?
                         }
                         #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
                         crate::attention::AttentionMode::MetalSdpa => {
-                            crate::attention::MetalSdpaAttention.compute_attention(&q, &k_rep, &v_rep, mask, layer.self_attn.sliding_window)?
+                            crate::attention::MetalSdpaAttention.compute_attention(
+                                &q,
+                                &k_rep,
+                                &v_rep,
+                                mask,
+                                layer.self_attn.sliding_window,
+                            )?
                         }
                         #[cfg(feature = "cuda-flash-attn")]
                         crate::attention::AttentionMode::CudaFlash => {
-                            crate::attention::ChunkedSlidingAttention.compute_attention(&q, &k_rep, &v_rep, mask, layer.self_attn.sliding_window)?
+                            crate::attention::ChunkedSlidingAttention.compute_attention(
+                                &q,
+                                &k_rep,
+                                &v_rep,
+                                mask,
+                                layer.self_attn.sliding_window,
+                            )?
                         }
                         #[allow(unreachable_patterns)]
                         _ => unreachable!(),
                     }
                 }
             };
-            let context = context
-                .transpose(1, 2)?
-                .contiguous()?
-                .reshape((batch, seq_len, layer.self_attn.num_attention_heads * layer.self_attn.head_dim))?;
+            let context = context.transpose(1, 2)?.contiguous()?.reshape((
+                batch,
+                seq_len,
+                layer.self_attn.num_attention_heads * layer.self_attn.head_dim,
+            ))?;
             sync(&context)?;
             let attn_core_ms = elapsed_ms(t0);
 
@@ -282,7 +354,9 @@ impl EmbeddingGemma2Model {
             // FFN pre norm
             let t0 = Instant::now();
             let residual = hidden_states_next.clone();
-            let pre_ffn = layer.pre_feedforward_layernorm.forward(&hidden_states_next)?;
+            let pre_ffn = layer
+                .pre_feedforward_layernorm
+                .forward(&hidden_states_next)?;
             sync(&pre_ffn)?;
             let ffn_pre_norm_ms = elapsed_ms(t0);
 

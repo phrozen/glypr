@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use pulp::Simd;
 
 /// Truncate a normalized embedding to a Matryoshka (MRL) dimension (e.g. 512, 256, 128)
@@ -71,6 +71,7 @@ pub fn quantize_binary(embedding: &[f32]) -> Result<Vec<u64>> {
 
 /// Compute exact Hamming distance between two packed `u64` binary vectors using hardware POPCNT.
 #[inline]
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
     assert_eq!(
         a.len(),
@@ -132,6 +133,7 @@ pub fn quantize_int8(embedding: &[f32]) -> Vec<i8> {
 }
 
 #[pulp::with_simd(int8_dot_product_dispatch = ::pulp::Arch::new())]
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn int8_dot_product_simd<S: Simd>(_simd: S, a: &[i8], b: &[i8]) -> i32 {
     let mut sum0 = 0i32;
     let mut sum1 = 0i32;

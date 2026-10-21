@@ -1,8 +1,8 @@
-use candle_core::{Result, Tensor};
 use crate::attention::SelfAttention;
 use crate::mlp::MLP;
 use crate::norm::RMSNorm;
 use crate::ple::TextPLEBlock;
+use candle_core::{Result, Tensor};
 
 #[derive(Debug, Clone)]
 pub struct EncoderLayer {

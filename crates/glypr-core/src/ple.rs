@@ -1,6 +1,6 @@
-use candle_core::{Result, Tensor};
 use crate::linear::LinearOp;
 use crate::norm::RMSNorm;
+use candle_core::{Result, Tensor};
 
 /// Exact PyTorch gelu_pytorch_tanh approximation:
 /// 0.5 * x * (1.0 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
@@ -100,7 +100,11 @@ pub struct TextPLEBlock {
 
 impl TextPLEBlock {
     pub fn new(gate: LinearOp, projection: LinearOp, norm: RMSNorm) -> Self {
-        Self { gate, projection, norm }
+        Self {
+            gate,
+            projection,
+            norm,
+        }
     }
 
     /// Forward pass mixing the layer's slice of per-layer inputs
@@ -136,6 +140,7 @@ impl TextPLEBlock {
         };
 
         let h = self.projection.forward(&h)?;
-        self.norm.forward_residual_add(&h, hidden_states, layer_scalar)
+        self.norm
+            .forward_residual_add(&h, hidden_states, layer_scalar)
     }
 }

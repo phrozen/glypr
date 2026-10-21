@@ -88,10 +88,8 @@ static CAPABILITIES_CACHE: OnceLock<MetalCapabilities> = OnceLock::new();
 pub fn compile_metal4_library(
     dev: &MtlDevice,
     source: &str,
-) -> std::result::Result<
-    candle_metal_kernels::metal::Library,
-    candle_metal_kernels::MetalKernelError,
-> {
+) -> std::result::Result<candle_metal_kernels::metal::Library, candle_metal_kernels::MetalKernelError>
+{
     let opts = MTLCompileOptions::new();
     opts.setLanguageVersion(MTLLanguageVersion::Version4_0);
     dev.new_library_with_source(source, Some(&opts))
@@ -240,4 +238,3 @@ mod tests {
         Ok(())
     }
 }
-

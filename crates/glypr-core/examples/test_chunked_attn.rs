@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 
 /// Standard full dense attention with sliding window mask
 fn standard_attention(
@@ -76,7 +76,11 @@ fn chunked_sliding_attention(
         let q_chunk = q.narrow(2, q_start, q_len)?;
 
         // Key/Value window: chunk_idx - 1 to chunk_idx + 1
-        let kv_start = if chunk_idx > 0 { (chunk_idx - 1) * chunk_size } else { 0 };
+        let kv_start = if chunk_idx > 0 {
+            (chunk_idx - 1) * chunk_size
+        } else {
+            0
+        };
         let kv_end = ((chunk_idx + 2) * chunk_size).min(s);
         let kv_len = kv_end - kv_start;
 
@@ -165,13 +169,17 @@ fn main() -> anyhow::Result<()> {
         assert_eq!(standard_out.dims4()?, chunked_out.dims4()?);
 
         // Compare values
-        let diff = (&standard_out.to_dtype(DType::F32)? - &chunked_out.to_dtype(DType::F32)?)?
-            .abs()?;
+        let diff =
+            (&standard_out.to_dtype(DType::F32)? - &chunked_out.to_dtype(DType::F32)?)?.abs()?;
         let max_diff: f32 = diff.max_all()?.to_scalar()?;
         let mean_diff: f32 = diff.mean_all()?.to_scalar()?;
 
         println!("  Standard Time : {:7.2} ms", standard_ms);
-        println!("  Chunked Time  : {:7.2} ms ({:.2}x speedup)", chunked_ms, standard_ms / chunked_ms);
+        println!(
+            "  Chunked Time  : {:7.2} ms ({:.2}x speedup)",
+            chunked_ms,
+            standard_ms / chunked_ms
+        );
         println!("  Max Diff      : {:e}", max_diff);
         println!("  Mean Diff     : {:e}", mean_diff);
 

@@ -57,8 +57,6 @@ fn get_golden_dir() -> PathBuf {
         .join("tests/golden_vectors")
 }
 
-
-
 fn main() -> Result<()> {
     let snapshot_dir = get_snapshot_dir();
     let golden_dir = get_golden_dir();
@@ -79,7 +77,11 @@ fn main() -> Result<()> {
         DType::F32
     };
 
-    let dev_name = if device.is_metal() { "Apple Metal GPU" } else { "CPU" };
+    let dev_name = if device.is_metal() {
+        "Apple Metal GPU"
+    } else {
+        "CPU"
+    };
     println!("Target Device: {} | Precision: {:?}", dev_name, dtype);
 
     let t_load = Instant::now();
@@ -90,7 +92,11 @@ fn main() -> Result<()> {
     // Warmup
     print!("Warming up GPU kernels... ");
     for _ in 0..3 {
-        let _ = embedder.embed_query("Warmup query for kernel compilation", "SearchQuery", Some(768))?;
+        let _ = embedder.embed_query(
+            "Warmup query for kernel compilation",
+            "SearchQuery",
+            Some(768),
+        )?;
     }
     println!("Done.\n");
 
@@ -103,14 +109,29 @@ fn main() -> Result<()> {
     let token_buckets = [64, 256, 512, 1024, 2048, 4096, 8192];
     let mut seq_results = Vec::new();
 
-    println!("------------------------------------------------------------------------------------------------------------------");
+    println!(
+        "------------------------------------------------------------------------------------------------------------------"
+    );
     println!("  PART 1: SEQUENCE LENGTH SCALING & OPERATOR BOTTLENECK BREAKDOWN");
-    println!("------------------------------------------------------------------------------------------------------------------");
+    println!(
+        "------------------------------------------------------------------------------------------------------------------"
+    );
     println!(
         "{:<6} | {:<10} | {:<10} | {:<9} | {:<9} | {:<9} | {:<9} | {:<9} | {:<9} | {:<9}",
-        "Tokens", "Total Med", "Tok/sec", "Tokenize", "Embed+PLE", "RoPE+Mask", "Attn QKV", "Attn Core", "MLP GeGLU", "PLE Blk"
+        "Tokens",
+        "Total Med",
+        "Tok/sec",
+        "Tokenize",
+        "Embed+PLE",
+        "RoPE+Mask",
+        "Attn QKV",
+        "Attn Core",
+        "MLP GeGLU",
+        "PLE Blk"
     );
-    println!("------------------------------------------------------------------------------------------------------------------");
+    println!(
+        "------------------------------------------------------------------------------------------------------------------"
+    );
 
     for &b in &token_buckets {
         // Find document entry for this bucket
@@ -147,9 +168,19 @@ fn main() -> Result<()> {
 
         // Aggregate stage sums across all 24 layers
         let sum_qkv: f64 = inst_pipe.forward.layers.iter().map(|l| l.qkv_proj_ms).sum();
-        let sum_attn_core: f64 = inst_pipe.forward.layers.iter().map(|l| l.attn_core_ms).sum();
+        let sum_attn_core: f64 = inst_pipe
+            .forward
+            .layers
+            .iter()
+            .map(|l| l.attn_core_ms)
+            .sum();
         let sum_mlp: f64 = inst_pipe.forward.layers.iter().map(|l| l.mlp_ms).sum();
-        let sum_ple_blk: f64 = inst_pipe.forward.layers.iter().map(|l| l.ple_block_ms).sum();
+        let sum_ple_blk: f64 = inst_pipe
+            .forward
+            .layers
+            .iter()
+            .map(|l| l.ple_block_ms)
+            .sum();
 
         let embed_ple = inst_pipe.forward.embed_tokens_ms + inst_pipe.forward.ple_input_ms;
         let rope_mask = inst_pipe.forward.rope_calc_ms + inst_pipe.forward.mask_build_ms;
@@ -175,17 +206,25 @@ fn main() -> Result<()> {
         });
     }
 
-    println!("------------------------------------------------------------------------------------------------------------------\n");
+    println!(
+        "------------------------------------------------------------------------------------------------------------------\n"
+    );
 
     // 2. Batched Throughput Analysis for typical RAG chunks (256 tokens)
-    println!("--------------------------------------------------------------------------------------------------");
+    println!(
+        "--------------------------------------------------------------------------------------------------"
+    );
     println!("  PART 2: BATCHED INFERENCE THROUGHPUT (Sequence Length = 256 tokens)");
-    println!("--------------------------------------------------------------------------------------------------");
+    println!(
+        "--------------------------------------------------------------------------------------------------"
+    );
     println!(
         "{:<10} | {:<12} | {:<14} | {:<14} | {:<12}",
         "Batch Size", "Total Tokens", "Batch Latency", "Per-Item Lat", "Throughput"
     );
-    println!("--------------------------------------------------------------------------------------------------");
+    println!(
+        "--------------------------------------------------------------------------------------------------"
+    );
 
     let entry_256 = entries
         .iter()
@@ -225,17 +264,25 @@ fn main() -> Result<()> {
         });
     }
 
-    println!("--------------------------------------------------------------------------------------------------\n");
+    println!(
+        "--------------------------------------------------------------------------------------------------\n"
+    );
 
     // 3. Batched Throughput Analysis for 512 tokens
-    println!("--------------------------------------------------------------------------------------------------");
+    println!(
+        "--------------------------------------------------------------------------------------------------"
+    );
     println!("  PART 3: BATCHED INFERENCE THROUGHPUT (Sequence Length = 512 tokens)");
-    println!("--------------------------------------------------------------------------------------------------");
+    println!(
+        "--------------------------------------------------------------------------------------------------"
+    );
     println!(
         "{:<10} | {:<12} | {:<14} | {:<14} | {:<12}",
         "Batch Size", "Total Tokens", "Batch Latency", "Per-Item Lat", "Throughput"
     );
-    println!("--------------------------------------------------------------------------------------------------");
+    println!(
+        "--------------------------------------------------------------------------------------------------"
+    );
 
     let entry_512 = entries
         .iter()
@@ -275,7 +322,9 @@ fn main() -> Result<()> {
         });
     }
 
-    println!("--------------------------------------------------------------------------------------------------\n");
+    println!(
+        "--------------------------------------------------------------------------------------------------\n"
+    );
 
     // Save report to JSON
     let report = DeepProfileReport {

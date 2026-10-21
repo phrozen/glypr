@@ -1,6 +1,6 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use glypr_core::{cosine_similarity, GlyprEmbedder};
+use glypr_core::{GlyprEmbedder, cosine_similarity};
 use safetensors::SafeTensors;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -61,7 +61,10 @@ fn get_gguf_bf16_path() -> Result<Option<PathBuf>> {
 }
 
 fn get_gguf_q8_path() -> Result<Option<PathBuf>> {
-    match glypr_core::hub::resolve_file("ggml-org/embeddinggemma-2-GGUF", "embeddinggemma-2-Q8_0.gguf") {
+    match glypr_core::hub::resolve_file(
+        "ggml-org/embeddinggemma-2-GGUF",
+        "embeddinggemma-2-Q8_0.gguf",
+    ) {
         Ok(p) => Ok(Some(p)),
         Err(e) if allow_missing_weights() => {
             eprintln!("Skipping test (GLYPR_ALLOW_MISSING_WEIGHTS=1): {e}");
@@ -218,7 +221,10 @@ fn run_corpus_validation(
                 let pos_sim = cosine_similarity(q, pos);
                 let neg_sim = cosine_similarity(q, neg);
                 let margin = pos_sim - neg_sim;
-                println!("    Bucket {:4}t: Pos = {:.4} | Neg = {:.4} | Margin = {:+.4}", b, pos_sim, neg_sim, margin);
+                println!(
+                    "    Bucket {:4}t: Pos = {:.4} | Neg = {:.4} | Margin = {:+.4}",
+                    b, pos_sim, neg_sim, margin
+                );
                 assert!(
                     margin > 0.08,
                     "Ranking margin too small at {}t on {}: margin = {:.4}",
@@ -245,7 +251,10 @@ fn run_corpus_validation(
                 let pos_sim = cosine_similarity(q, pos);
                 let neg_sim = cosine_similarity(q, neg);
                 let margin = pos_sim - neg_sim;
-                println!("    Lang [{:<2}]: Pos = {:.4} | Neg = {:.4} | Margin = {:+.4}", lang, pos_sim, neg_sim, margin);
+                println!(
+                    "    Lang [{:<2}]: Pos = {:.4} | Neg = {:.4} | Margin = {:+.4}",
+                    lang, pos_sim, neg_sim, margin
+                );
                 assert!(
                     margin > 0.15,
                     "Multilingual margin failure for {} on {}: margin = {:.4}",
@@ -257,7 +266,10 @@ fn run_corpus_validation(
         }
     }
 
-    println!("\n✓ All {} parity checks passed on {}!\n", total_evaluated, model_name);
+    println!(
+        "\n✓ All {} parity checks passed on {}!\n",
+        total_evaluated, model_name
+    );
     Ok(())
 }
 
@@ -268,7 +280,13 @@ fn test_corpus_parity_cpu() -> Result<()> {
         None => return Ok(()),
     };
     let embedder = GlyprEmbedder::load(&snapshot_dir, &Device::Cpu, DType::F32)?;
-    run_corpus_validation(&embedder, "Safetensors FP32 (CPU)", 0.9999, 0.99995, Some(64))
+    run_corpus_validation(
+        &embedder,
+        "Safetensors FP32 (CPU)",
+        0.9999,
+        0.99995,
+        Some(64),
+    )
 }
 
 #[cfg(feature = "metal")]
@@ -281,12 +299,24 @@ fn test_corpus_parity_safetensors_metal() -> Result<()> {
     let device = Device::new_metal(0)?;
     let mut embedder = GlyprEmbedder::load(&snapshot_dir, &device, DType::BF16)?;
     embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
-    run_corpus_validation(&embedder, "Safetensors BF16 (Metal ChunkedSliding)", 0.9998, 0.9999, None)?;
+    run_corpus_validation(
+        &embedder,
+        "Safetensors BF16 (Metal ChunkedSliding)",
+        0.9998,
+        0.9999,
+        None,
+    )?;
 
     #[cfg(feature = "metal-flash-attn")]
     {
         embedder.set_attention_mode(glypr_core::AttentionMode::MetalFlash);
-        run_corpus_validation(&embedder, "Safetensors BF16 (Metal FlashAttention)", 0.9998, 0.9999, None)?;
+        run_corpus_validation(
+            &embedder,
+            "Safetensors BF16 (Metal FlashAttention)",
+            0.9998,
+            0.9999,
+            None,
+        )?;
     }
     Ok(())
 }
@@ -300,7 +330,25 @@ fn test_corpus_parity_gguf_q8_cpu() -> Result<()> {
     let device = Device::Cpu;
     let mut embedder = GlyprEmbedder::load_gguf_q8(&gguf_path, &device)?;
     embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
-    // Full 292 vectors across all buckets up to 8192 tokens
+    run_corpus_validation(
+        &embedder,
+        "GGUF Q8_0 (CPU Chunked)",
+        0.9994,
+        0.9998,
+        Some(64),
+    )
+}
+
+#[test]
+#[ignore = "Slow integration test: full 292 vectors up to 8192 tokens on CPU"]
+fn test_corpus_parity_gguf_q8_cpu_full_8k() -> Result<()> {
+    let gguf_path = match get_gguf_q8_path()? {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let device = Device::Cpu;
+    let mut embedder = GlyprEmbedder::load_gguf_q8(&gguf_path, &device)?;
+    embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
     run_corpus_validation(&embedder, "GGUF Q8_0 (CPU Chunked)", 0.9994, 0.9998, None)
 }
 
@@ -314,12 +362,24 @@ fn test_corpus_parity_gguf_bf16_metal() -> Result<()> {
     let device = Device::new_metal(0)?;
     let mut embedder = GlyprEmbedder::load_gguf_bf16(&gguf_path, &device)?;
     embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
-    run_corpus_validation(&embedder, "GGUF BF16 (Metal ChunkedSliding)", 0.9998, 0.9999, None)?;
+    run_corpus_validation(
+        &embedder,
+        "GGUF BF16 (Metal ChunkedSliding)",
+        0.9998,
+        0.9999,
+        None,
+    )?;
 
     #[cfg(feature = "metal-flash-attn")]
     {
         embedder.set_attention_mode(glypr_core::AttentionMode::MetalFlash);
-        run_corpus_validation(&embedder, "GGUF BF16 (Metal FlashAttention)", 0.9998, 0.9999, None)?;
+        run_corpus_validation(
+            &embedder,
+            "GGUF BF16 (Metal FlashAttention)",
+            0.9998,
+            0.9999,
+            None,
+        )?;
     }
     Ok(())
 }
@@ -334,12 +394,24 @@ fn test_corpus_parity_gguf_q8_metal() -> Result<()> {
     let device = Device::new_metal(0)?;
     let mut embedder = GlyprEmbedder::load_gguf_q8(&gguf_path, &device)?;
     embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
-    run_corpus_validation(&embedder, "GGUF Q8_0 (Metal ChunkedSliding)", 0.9996, 0.9998, None)?;
+    run_corpus_validation(
+        &embedder,
+        "GGUF Q8_0 (Metal ChunkedSliding)",
+        0.9996,
+        0.9998,
+        None,
+    )?;
 
     #[cfg(feature = "metal-flash-attn")]
     {
         embedder.set_attention_mode(glypr_core::AttentionMode::MetalFlash);
-        run_corpus_validation(&embedder, "GGUF Q8_0 (Metal FlashAttention)", 0.9996, 0.9998, None)?;
+        run_corpus_validation(
+            &embedder,
+            "GGUF Q8_0 (Metal FlashAttention)",
+            0.9996,
+            0.9998,
+            None,
+        )?;
     }
     Ok(())
 }
@@ -376,15 +448,20 @@ fn test_long_context_pooling_precision() -> Result<()> {
                 ref_mean[c] += raw_vec[t * hidden_dim + c] as f64;
             }
         }
-        for c in 0..hidden_dim {
-            ref_mean[c] /= seq_len as f64;
+        for val in &mut ref_mean {
+            *val /= seq_len as f64;
         }
-        let norm_f64 = ref_mean.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-12);
+        let norm_f64 = ref_mean
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            .sqrt()
+            .max(1e-12);
         let ref_l2: Vec<f32> = ref_mean.iter().map(|v| (v / norm_f64) as f32).collect();
 
         // Create token embeddings tensor in BF16
-        let t_tensor = Tensor::from_vec(raw_vec, (1, seq_len, hidden_dim), &device)?
-            .to_dtype(DType::BF16)?;
+        let t_tensor =
+            Tensor::from_vec(raw_vec, (1, seq_len, hidden_dim), &device)?.to_dtype(DType::BF16)?;
 
         // Pool and normalize
         let pooled = embedder.model.pool_and_normalize(&t_tensor, None, None)?;
@@ -400,7 +477,10 @@ fn test_long_context_pooling_precision() -> Result<()> {
             norm_b += ref_l2[i] * ref_l2[i];
         }
         let cos_sim = dot / (norm_a.sqrt() * norm_b.sqrt());
-        println!("Long-context seq_len={} pooling cosine vs F64 ground truth: {:.7}", seq_len, cos_sim);
+        println!(
+            "Long-context seq_len={} pooling cosine vs F64 ground truth: {:.7}",
+            seq_len, cos_sim
+        );
         // Phase 0 baseline characterization: BF16 pooling yields ~0.9992 at 1K, ~0.9993 at 2K, ~0.987 at 4K, and ~0.95 at 8K due to 7-bit mantissa swamping.
         // In Phase 2, casting to FP32 before mean/sum will elevate all of these to > 0.99999.
         assert!(
@@ -412,4 +492,3 @@ fn test_long_context_pooling_precision() -> Result<()> {
     }
     Ok(())
 }
-

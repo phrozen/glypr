@@ -1,10 +1,10 @@
-pub mod traits;
-pub mod standard;
 pub mod chunked;
+pub mod standard;
+pub mod traits;
 
-pub use traits::{AttentionBackend, AttentionMode};
-pub use standard::StandardAttention;
 pub use chunked::ChunkedSlidingAttention;
+pub use standard::StandardAttention;
+pub use traits::{AttentionBackend, AttentionMode};
 #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
 pub mod metal_sdpa;
 #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
@@ -14,10 +14,10 @@ pub mod metal_flash;
 #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
 pub use metal_flash::MetalFlashAttention;
 
-use candle_core::{Result, Tensor};
 use crate::linear::LinearOp;
 use crate::norm::RMSNorm;
 use crate::rope::apply_rotary_pos_emb;
+use candle_core::{Result, Tensor};
 
 pub fn repeat_kv(x: &Tensor, n_rep: usize) -> Result<Tensor> {
     if n_rep == 1 {
@@ -48,6 +48,7 @@ pub struct SelfAttention {
 }
 
 impl SelfAttention {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mut q_proj: LinearOp,
         mut k_proj: LinearOp,
@@ -61,16 +62,15 @@ impl SelfAttention {
         head_dim: usize,
         sliding_window: Option<usize>,
     ) -> Self {
-        let fused_qkv = if let Some((fused, mut views)) =
-            LinearOp::try_concat(&[&q_proj, &k_proj, &v_proj])
-        {
-            v_proj = views.pop().unwrap();
-            k_proj = views.pop().unwrap();
-            q_proj = views.pop().unwrap();
-            Some(fused)
-        } else {
-            None
-        };
+        let fused_qkv =
+            if let Some((fused, mut views)) = LinearOp::try_concat(&[&q_proj, &k_proj, &v_proj]) {
+                v_proj = views.pop().unwrap();
+                k_proj = views.pop().unwrap();
+                q_proj = views.pop().unwrap();
+                Some(fused)
+            } else {
+                None
+            };
         Self {
             q_proj,
             k_proj,
@@ -217,27 +217,49 @@ impl SelfAttention {
             #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
             AttentionMode::MetalFlash => {
                 // Native GQA: zero memory copies or KV head duplication!
-                MetalFlashAttention.compute_attention(&q, &k, &v, attention_mask, self.sliding_window)?
+                MetalFlashAttention.compute_attention(
+                    &q,
+                    &k,
+                    &v,
+                    attention_mask,
+                    self.sliding_window,
+                )?
             }
             _ => {
                 let num_groups = self.num_attention_heads / self.num_key_value_heads;
                 let k_rep = repeat_kv(&k, num_groups)?;
                 let v_rep = repeat_kv(&v, num_groups)?;
                 match self.attention_mode {
-                    AttentionMode::Standard => {
-                        StandardAttention.compute_attention(&q, &k_rep, &v_rep, attention_mask, self.sliding_window)?
-                    }
-                    AttentionMode::ChunkedSliding => {
-                        ChunkedSlidingAttention.compute_attention(&q, &k_rep, &v_rep, attention_mask, self.sliding_window)?
-                    }
+                    AttentionMode::Standard => StandardAttention.compute_attention(
+                        &q,
+                        &k_rep,
+                        &v_rep,
+                        attention_mask,
+                        self.sliding_window,
+                    )?,
+                    AttentionMode::ChunkedSliding => ChunkedSlidingAttention.compute_attention(
+                        &q,
+                        &k_rep,
+                        &v_rep,
+                        attention_mask,
+                        self.sliding_window,
+                    )?,
                     #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
-                    AttentionMode::MetalSdpa => {
-                        MetalSdpaAttention.compute_attention(&q, &k_rep, &v_rep, attention_mask, self.sliding_window)?
-                    }
+                    AttentionMode::MetalSdpa => MetalSdpaAttention.compute_attention(
+                        &q,
+                        &k_rep,
+                        &v_rep,
+                        attention_mask,
+                        self.sliding_window,
+                    )?,
                     #[cfg(feature = "cuda-flash-attn")]
-                    AttentionMode::CudaFlash => {
-                        ChunkedSlidingAttention.compute_attention(&q, &k_rep, &v_rep, attention_mask, self.sliding_window)?
-                    }
+                    AttentionMode::CudaFlash => ChunkedSlidingAttention.compute_attention(
+                        &q,
+                        &k_rep,
+                        &v_rep,
+                        attention_mask,
+                        self.sliding_window,
+                    )?,
                     #[allow(unreachable_patterns)]
                     _ => unreachable!(),
                 }
@@ -245,10 +267,11 @@ impl SelfAttention {
         };
 
         // Transpose back to [batch, seq_len, num_heads, head_dim] -> reshape [batch, seq_len, num_heads * head_dim]
-        let context = context
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((batch, seq_len, self.num_attention_heads * self.head_dim))?;
+        let context = context.transpose(1, 2)?.contiguous()?.reshape((
+            batch,
+            seq_len,
+            self.num_attention_heads * self.head_dim,
+        ))?;
 
         self.o_proj.forward(&context)
     }

@@ -1,7 +1,7 @@
 use crate::coreml::CoreMLComputeUnits;
 use crate::task::Task;
 use crate::tokenizer::GlyprTokenizer;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use candle_core::{Device, Tensor};
 use coreml_native::{AsMultiArray, BorrowedTensor, Model};
 use std::path::Path;
@@ -25,8 +25,9 @@ impl CoreMLTextBackbone {
             bail!("CoreML text model not found at {}", path_ref.display());
         }
 
-        let model = Model::load(path_ref, compute_units.into())
-            .with_context(|| format!("Failed to load CoreML text model at {}", path_ref.display()))?;
+        let model = Model::load(path_ref, compute_units.into()).with_context(|| {
+            format!("Failed to load CoreML text model at {}", path_ref.display())
+        })?;
 
         let inputs = model.inputs();
         let id_input = inputs
@@ -79,10 +80,8 @@ impl CoreMLTextBackbone {
         let t_mask = BorrowedTensor::from_f32(&padded_mask, &[1, self.seq_len])
             .context("Failed to create BorrowedTensor for attention_mask")?;
 
-        let inputs: &[(&str, &dyn AsMultiArray)] = &[
-            ("input_ids", &t_ids),
-            ("attention_mask", &t_mask),
-        ];
+        let inputs: &[(&str, &dyn AsMultiArray)] =
+            &[("input_ids", &t_ids), ("attention_mask", &t_mask)];
 
         let prediction = self
             .model
@@ -117,7 +116,12 @@ impl CoreMLTextBackbone {
     }
 
     /// Embed a text string, optionally applying the prompt format for the given task.
-    pub fn embed_text(&self, text: &str, tokenizer: &GlyprTokenizer, task: Option<Task>) -> Result<Vec<f32>> {
+    pub fn embed_text(
+        &self,
+        text: &str,
+        tokenizer: &GlyprTokenizer,
+        task: Option<Task>,
+    ) -> Result<Vec<f32>> {
         let formatted = if let Some(t) = task {
             t.format_text(text)
         } else {
@@ -130,7 +134,13 @@ impl CoreMLTextBackbone {
     }
 
     /// Embed a text string directly into a Candle `Tensor` `[1, 768]` on the specified device.
-    pub fn embed_to_tensor(&self, text: &str, tokenizer: &GlyprTokenizer, task: Option<Task>, device: &Device) -> Result<Tensor> {
+    pub fn embed_to_tensor(
+        &self,
+        text: &str,
+        tokenizer: &GlyprTokenizer,
+        task: Option<Task>,
+        device: &Device,
+    ) -> Result<Tensor> {
         let vec = self.embed_text(text, tokenizer, task)?;
         Ok(Tensor::from_vec(vec, (1, 768), device)?)
     }

@@ -6,7 +6,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Testing CoreML Vision Tower ===");
     let vision_dir = "models/coreml";
     if Path::new(vision_dir).is_dir() {
-        let vision_tower = CoreMLVisionTower::from_dir(vision_dir, CoreMLComputeUnits::CpuAndNeuralEngine)?;
+        let vision_tower =
+            CoreMLVisionTower::from_dir(vision_dir, CoreMLComputeUnits::CpuAndNeuralEngine)?;
         println!(
             "Loaded CoreML Vision Tower supporting patch counts: {:?}",
             vision_tower.supported_patch_counts()
@@ -27,13 +28,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let (buf, shape) = vision_tower.encode_raw(&dummy_image)?;
-            println!("✓ ANE Vision Tower Output Shape: {:?}, Elements: {}", shape, buf.len());
-            println!("  First 5 soft token features: {:?}", &buf[..5.min(buf.len())]);
+            println!(
+                "✓ ANE Vision Tower Output Shape: {:?}, Elements: {}",
+                shape,
+                buf.len()
+            );
+            println!(
+                "  First 5 soft token features: {:?}",
+                &buf[..5.min(buf.len())]
+            );
 
             // Test Candle Tensor conversion
             let device = candle_core::Device::Cpu;
             let tensor = vision_tower.encode_to_tensor(&dummy_image, &device)?;
-            println!("✓ Converted to Candle Tensor: shape {:?}, dtype {:?}", tensor.shape(), tensor.dtype());
+            println!(
+                "✓ Converted to Candle Tensor: shape {:?}, dtype {:?}",
+                tensor.shape(),
+                tensor.dtype()
+            );
         }
 
         // Test with Budget 280 image (2394 patches -> 266 soft tokens)
@@ -51,23 +63,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let (buf, shape) = vision_tower.encode_raw(&dummy_image_280)?;
-            println!("✓ ANE Vision Tower Output Shape: {:?}, Elements: {}", shape, buf.len());
+            println!(
+                "✓ ANE Vision Tower Output Shape: {:?}, Elements: {}",
+                shape,
+                buf.len()
+            );
             let device = candle_core::Device::Cpu;
             let tensor = vision_tower.encode_to_tensor(&dummy_image_280, &device)?;
-            println!("✓ Converted to Candle Tensor: shape {:?}, dtype {:?}", tensor.shape(), tensor.dtype());
+            println!(
+                "✓ Converted to Candle Tensor: shape {:?}, dtype {:?}",
+                tensor.shape(),
+                tensor.dtype()
+            );
         }
     }
 
     println!("\n=== Testing CoreML Text Backbone ===");
     let text_path = "models/coreml/gemma2_text_backbone_s512_w8a16.mlmodelc";
     if Path::new(text_path).exists() {
-        let text_backbone = CoreMLTextBackbone::from_path(text_path, CoreMLComputeUnits::CpuAndNeuralEngine)?;
+        let text_backbone =
+            CoreMLTextBackbone::from_path(text_path, CoreMLComputeUnits::CpuAndNeuralEngine)?;
         println!(
             "Loaded CoreML Text Backbone (seq_len: {}) on ANE",
             text_backbone.seq_len()
         );
 
-        let sample_tokens = [2i32, 603, 235292, 1146, 235284, 1489, 235292, 235248, 1841, 6496, 573, 11956, 5028, 235336];
+        let sample_tokens = [
+            2i32, 603, 235292, 1146, 235284, 1489, 235292, 235248, 1841, 6496, 573, 11956, 5028,
+            235336,
+        ];
         println!("Embedding {} sample tokens on ANE...", sample_tokens.len());
         let embedding = text_backbone.embed_token_ids(&sample_tokens)?;
         let norm: f32 = embedding.iter().map(|&x| x * x).sum::<f32>().sqrt();

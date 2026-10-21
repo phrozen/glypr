@@ -1,12 +1,12 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, Tensor};
 use image::DynamicImage;
 use std::path::Path;
 
 use crate::config::MultimodalConfig;
 use crate::multimodal::audio::AudioTower;
-use crate::multimodal::audio_preprocessor::{preprocess_audio, ProcessedAudio};
-use crate::multimodal::image_preprocessor::{preprocess_image, ProcessedImage};
+use crate::multimodal::audio_preprocessor::{ProcessedAudio, preprocess_audio};
+use crate::multimodal::image_preprocessor::{ProcessedImage, preprocess_image};
 use crate::multimodal::vision::VisionTower;
 
 /// Unified Multimodal Projector managing Vision and Audio towers loaded from GGUF
@@ -20,11 +20,7 @@ pub struct MultimodalProjector {
 
 impl MultimodalProjector {
     /// Load multimodal projector directly from a GGUF file (`mmproj-*.gguf`)
-    pub fn from_gguf_file<P: AsRef<Path>>(
-        path: P,
-        device: &Device,
-        dtype: DType,
-    ) -> Result<Self> {
+    pub fn from_gguf_file<P: AsRef<Path>>(path: P, device: &Device, dtype: DType) -> Result<Self> {
         let p = path.as_ref();
         if !p.exists() {
             bail!("Multimodal projector file not found at {:?}", p);
@@ -55,7 +51,10 @@ impl MultimodalProjector {
         };
 
         if vision_tower.is_none() && audio_tower.is_none() {
-            bail!("GGUF file at {:?} contains neither vision nor audio projector weights", p);
+            bail!(
+                "GGUF file at {:?} contains neither vision nor audio projector weights",
+                p
+            );
         }
 
         Ok(Self {
@@ -69,14 +68,20 @@ impl MultimodalProjector {
 
     /// Encode an image into soft tokens [num_soft_tokens, 512] using default token budget (280)
     pub fn encode_image(&self, img: &DynamicImage) -> Result<(Tensor, usize)> {
-        let budget = self.vision_tower.as_ref()
+        let budget = self
+            .vision_tower
+            .as_ref()
             .map(|t| t.config.default_output_length)
             .unwrap_or(280);
         self.encode_image_with_budget(img, budget)
     }
 
     /// Encode an image with a specific token budget (e.g. 70, 140, 280, 560, 1120) into soft tokens [num_soft_tokens, 512]
-    pub fn encode_image_with_budget(&self, img: &DynamicImage, budget: usize) -> Result<(Tensor, usize)> {
+    pub fn encode_image_with_budget(
+        &self,
+        img: &DynamicImage,
+        budget: usize,
+    ) -> Result<(Tensor, usize)> {
         let tower = self.vision_tower.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Vision Tower is not available in this multimodal projector")
         })?;
@@ -123,20 +128,20 @@ impl MultimodalProjector {
         }
 
         // Check if all images have the same patch grid dimensions
-        let is_homogeneous = processed_images.len() > 1 && processed_images.windows(2).all(|w| {
-            w[0].num_patches == w[1].num_patches
-                && w[0].patch_width == w[1].patch_width
-                && w[0].patch_height == w[1].patch_height
-        });
+        let is_homogeneous = processed_images.len() > 1
+            && processed_images.windows(2).all(|w| {
+                w[0].num_patches == w[1].num_patches
+                    && w[0].patch_width == w[1].patch_width
+                    && w[0].patch_height == w[1].patch_height
+            });
 
         if is_homogeneous {
             let batched_tokens = tower.encode_batch(&processed_images)?; // [b, num_soft_tokens, 512]
             let b = processed_images.len();
             let mut result = Vec::with_capacity(b);
-            for i in 0..b {
+            for (i, p) in processed_images.iter().enumerate() {
                 let single = batched_tokens.get(i)?; // [num_soft_tokens, 512]
-                let count = processed_images[i].num_soft_tokens;
-                result.push((single, count));
+                result.push((single, p.num_soft_tokens));
             }
             Ok(result)
         } else {
@@ -149,7 +154,6 @@ impl MultimodalProjector {
             Ok(result)
         }
     }
-
 
     /// Encode raw 16 kHz audio samples into soft tokens [num_soft_tokens, 512]
     pub fn encode_audio(&self, samples: &[f32]) -> Result<(Tensor, usize)> {

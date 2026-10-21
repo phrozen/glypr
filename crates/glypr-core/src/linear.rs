@@ -1,5 +1,5 @@
-use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_core::quantized::QMatMul;
+use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::Linear;
 
 #[derive(Debug, Clone)]
@@ -40,9 +40,10 @@ impl LinearOp {
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
-        let info = content.tensor_infos.get(name).ok_or_else(|| {
-            candle_core::Error::Msg(format!("Missing tensor info for {}", name))
-        })?;
+        let info = content
+            .tensor_infos
+            .get(name)
+            .ok_or_else(|| candle_core::Error::Msg(format!("Missing tensor info for {}", name)))?;
         match info.ggml_dtype {
             candle_core::quantized::GgmlDType::F32
             | candle_core::quantized::GgmlDType::F16
@@ -82,7 +83,10 @@ impl LinearOp {
         if ops.len() < 2 {
             return None;
         }
-        if ops.iter().all(|op| matches!(op, Self::Standard(l) if l.bias().is_none())) {
+        if ops
+            .iter()
+            .all(|op| matches!(op, Self::Standard(l) if l.bias().is_none()))
+        {
             let mut weights = Vec::with_capacity(ops.len());
             let mut row_counts = Vec::with_capacity(ops.len());
             for op in ops {
@@ -161,13 +165,9 @@ impl LinearOp {
                 weight_q8_bytes,
                 out_dim,
                 in_dim,
-            } => crate::metal_kernels::fused_metal_q8_0_matmul(
-                weight_q8_bytes,
-                x,
-                *out_dim,
-                *in_dim,
-            ),
+            } => {
+                crate::metal_kernels::fused_metal_q8_0_matmul(weight_q8_bytes, x, *out_dim, *in_dim)
+            }
         }
     }
 }
-

@@ -1,9 +1,9 @@
 use anyhow::Result;
 use candle_core::Device;
 use glypr_core::{
-    cosine_similarity, l2_normalize, truncate_mrl, validate_vision_budget, GlyprEmbedder,
-    ModalityPart, Task, VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH, VISION_BUDGET_LOW,
-    VISION_BUDGET_MAX, VISION_BUDGET_MEDIUM, VISION_BUDGET_MIN, VISION_BUDGET_ULTRA,
+    GlyprEmbedder, ModalityPart, Task, VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH,
+    VISION_BUDGET_LOW, VISION_BUDGET_MAX, VISION_BUDGET_MEDIUM, VISION_BUDGET_MIN,
+    VISION_BUDGET_ULTRA, cosine_similarity, l2_normalize, truncate_mrl, validate_vision_budget,
 };
 use std::path::PathBuf;
 
@@ -14,7 +14,10 @@ fn test_task_formatting_and_parsing() {
         "task: search result | query: what is rust"
     );
     assert_eq!(
-        Task::Document { title: Some("Rust Guide") }.format_text("Rust is memory safe."),
+        Task::Document {
+            title: Some("Rust Guide")
+        }
+        .format_text("Rust is memory safe."),
         "title: Rust Guide | text: Rust is memory safe."
     );
     assert_eq!(
@@ -45,29 +48,37 @@ fn test_task_formatting_and_parsing() {
         Task::SentenceSimilarity.format_text("two sentences"),
         "task: sentence similarity | query: two sentences"
     );
-    assert_eq!(
-        Task::Raw.format_text("no prefix text"),
-        "no prefix text"
-    );
+    assert_eq!(Task::Raw.format_text("no prefix text"), "no prefix text");
     assert_eq!(
         Task::Custom("my custom task").format_text("custom input"),
         "task: my custom task | query: custom input"
     );
 
     // Parsing from name and title strings
-    assert_eq!(Task::from_name_and_title("SearchQuery", None), Task::SearchQuery);
+    assert_eq!(
+        Task::from_name_and_title("SearchQuery", None),
+        Task::SearchQuery
+    );
     assert_eq!(Task::from_name_and_title("query", None), Task::SearchQuery);
-    assert_eq!(Task::from_name_and_title("retrieval", None), Task::SearchQuery);
+    assert_eq!(
+        Task::from_name_and_title("retrieval", None),
+        Task::SearchQuery
+    );
     assert_eq!(
         Task::from_name_and_title("Document", Some("Doc1")),
-        Task::Document { title: Some("Doc1") }
+        Task::Document {
+            title: Some("Doc1")
+        }
     );
     assert_eq!(
         Task::from_name_and_title("document", None),
         Task::Document { title: None }
     );
     assert_eq!(Task::from_name_and_title("code", None), Task::CodeRetrieval);
-    assert_eq!(Task::from_name_and_title("classification", None), Task::Classification);
+    assert_eq!(
+        Task::from_name_and_title("classification", None),
+        Task::Classification
+    );
     assert_eq!(Task::from_name_and_title("raw", None), Task::Raw);
     assert_eq!(Task::from_name_and_title("none", None), Task::Raw);
     assert_eq!(
@@ -138,7 +149,10 @@ fn test_vision_budget_constants_and_validation() {
 fn test_unified_api_model_inference() -> Result<()> {
     let gguf_path = glypr_core::hub::resolve_default_gguf()?;
     if !gguf_path.exists() {
-        eprintln!("Skipping inference test: GGUF model not found at {:?}", gguf_path);
+        eprintln!(
+            "Skipping inference test: GGUF model not found at {:?}",
+            gguf_path
+        );
         return Ok(());
     }
 
@@ -156,7 +170,12 @@ fn test_unified_api_model_inference() -> Result<()> {
         embedder.attach_multimodal_projector(&mmproj_path)?;
     }
 
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf();
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let golden_dir = repo_root.join("tests/golden_vectors");
 
     // 1. Text embedding with Task enum
@@ -167,14 +186,20 @@ fn test_unified_api_model_inference() -> Result<()> {
 
     let doc_emb = embedder.embed_text(
         "Gravitational lensing occurs when a massive celestial body warps spacetime.",
-        Task::Document { title: Some("Astrophysics 101") },
+        Task::Document {
+            title: Some("Astrophysics 101"),
+        },
     )?;
     assert_eq!(doc_emb.len(), 768);
 
     // High semantic similarity between query and relevant document
     let sim_text = cosine_similarity(&q_emb, &doc_emb);
     println!("Text SearchQuery vs Document similarity: {:.4}", sim_text);
-    assert!(sim_text > 0.5, "Expected high semantic similarity, got {}", sim_text);
+    assert!(
+        sim_text > 0.5,
+        "Expected high semantic similarity, got {}",
+        sim_text
+    );
 
     // 2. MRL Truncation from native 768d vector
     let q_emb_256 = truncate_mrl(&q_emb, 256)?;
@@ -225,14 +250,20 @@ fn test_unified_api_model_inference() -> Result<()> {
             let interleaved_multimodal = embedder.embed_interleaved(
                 &[
                     ModalityPart::Text("A photograph of "),
-                    ModalityPart::Image { image: &img, budget: Some(VISION_BUDGET_DEFAULT) },
+                    ModalityPart::Image {
+                        image: &img,
+                        budget: Some(VISION_BUDGET_DEFAULT),
+                    },
                 ],
                 Task::SearchQuery,
             )?;
             assert_eq!(interleaved_multimodal.len(), 768);
 
             let sim_img_multimodal = cosine_similarity(&img_emb, &interleaved_multimodal);
-            println!("Image prompt vs interleaved similarity: {:.4}", sim_img_multimodal);
+            println!(
+                "Image prompt vs interleaved similarity: {:.4}",
+                sim_img_multimodal
+            );
             assert!(sim_img_multimodal > 0.7);
         }
     }

@@ -12,7 +12,10 @@ fn main() -> Result<()> {
     }
     println!("\nMMProj Tensors: {}", mmproj_content.tensor_infos.len());
     for (k, info) in &mmproj_content.tensor_infos {
-        println!("  [MMPROJ TENSOR] {:<35} : shape={:?}, dtype={:?}", k, info.shape, info.ggml_dtype);
+        println!(
+            "  [MMPROJ TENSOR] {:<35} : shape={:?}, dtype={:?}",
+            k, info.shape, info.ggml_dtype
+        );
     }
     Ok(())
 }

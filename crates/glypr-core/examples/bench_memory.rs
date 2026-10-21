@@ -4,8 +4,8 @@ use glypr_core::{AttentionMode, GlyprEmbedder};
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -71,8 +71,11 @@ fn get_gguf_bf16_path() -> PathBuf {
 }
 
 fn get_gguf_q8_path() -> PathBuf {
-    glypr_core::hub::resolve_file("ggml-org/embeddinggemma-2-GGUF", "embeddinggemma-2-Q8_0.gguf")
-        .expect("Failed to resolve Q8_0 GGUF")
+    glypr_core::hub::resolve_file(
+        "ggml-org/embeddinggemma-2-GGUF",
+        "embeddinggemma-2-Q8_0.gguf",
+    )
+    .expect("Failed to resolve Q8_0 GGUF")
 }
 
 fn run_single_measurement(model_type: &str, mode: &str, token_len: usize) -> Result<()> {
@@ -102,7 +105,11 @@ fn run_single_measurement(model_type: &str, mode: &str, token_len: usize) -> Res
     embedder.set_attention_mode(attn_mode);
 
     let loaded_metal_mb = get_metal_allocated_bytes() as f64 / (1024.0 * 1024.0);
-    let model_metal_ram = if is_cpu { 0.0 } else { loaded_metal_mb - base_metal_mb };
+    let model_metal_ram = if is_cpu {
+        0.0
+    } else {
+        loaded_metal_mb - base_metal_mb
+    };
 
     // Load document from corpus
     let corpus_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -116,7 +123,10 @@ fn run_single_measurement(model_type: &str, mode: &str, token_len: usize) -> Res
     let corpus: CorpusFile = serde_json::from_slice(&corpus_bytes)?;
 
     let doc_id = format!("doc_physics_{}t", token_len);
-    let entry = corpus.entries.iter().find(|e| e.id == doc_id)
+    let entry = corpus
+        .entries
+        .iter()
+        .find(|e| e.id == doc_id)
         .ok_or_else(|| anyhow::anyhow!("Doc {} not found", doc_id))?;
 
     // Background thread sampling Metal VRAM every 1ms
@@ -147,15 +157,37 @@ fn run_single_measurement(model_type: &str, mode: &str, token_len: usize) -> Res
     running.store(false, Ordering::Relaxed);
     sampler_thread.join().unwrap();
 
-    let peak_metal_mb = if is_cpu { 0.0 } else { peak_sampled.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0) };
-    let end_metal_mb = if is_cpu { 0.0 } else { get_metal_allocated_bytes() as f64 / (1024.0 * 1024.0) };
-    let transient_metal_mb = if is_cpu { 0.0 } else { peak_metal_mb - loaded_metal_mb };
+    let peak_metal_mb = if is_cpu {
+        0.0
+    } else {
+        peak_sampled.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0)
+    };
+    let end_metal_mb = if is_cpu {
+        0.0
+    } else {
+        get_metal_allocated_bytes() as f64 / (1024.0 * 1024.0)
+    };
+    let transient_metal_mb = if is_cpu {
+        0.0
+    } else {
+        peak_metal_mb - loaded_metal_mb
+    };
     let peak_rss_mb = get_peak_rss_mb();
 
     // Output machine readable line
     println!(
         "RESULT|{}|{}|{}|{:.1}|{:.1}|{:.1}|{:.1}|{:.1}|{:.2}|{:.2}|{:.1}",
-        model_type, mode, token_len, model_metal_ram, loaded_metal_mb, peak_metal_mb, transient_metal_mb, end_metal_mb, cold_duration_ms, warm_duration_ms, peak_rss_mb
+        model_type,
+        mode,
+        token_len,
+        model_metal_ram,
+        loaded_metal_mb,
+        peak_metal_mb,
+        transient_metal_mb,
+        end_metal_mb,
+        cold_duration_ms,
+        warm_duration_ms,
+        peak_rss_mb
     );
 
     Ok(())
@@ -170,34 +202,131 @@ fn main() -> Result<()> {
         return run_single_measurement(model, mode, tokens);
     }
 
-    println!("========================================================================================================================");
-    println!("                     EmbeddingGemma 2: Hardware Memory & Scaling Benchmark (Apple Silicon)                              ");
-    println!("========================================================================================================================\n");
+    println!(
+        "========================================================================================================================"
+    );
+    println!(
+        "                     EmbeddingGemma 2: Hardware Memory & Scaling Benchmark (Apple Silicon)                              "
+    );
+    println!(
+        "========================================================================================================================\n"
+    );
 
     let metal_configurations = [
-        ("bf16", "standard", 1024, "GGUF BF16 with Standard Attention @ 1,024 tokens"),
-        ("bf16", "chunked",  1024, "GGUF BF16 with Chunked Attention  @ 1,024 tokens"),
-        ("bf16", "flash",    1024, "GGUF BF16 with Metal Flash        @ 1,024 tokens"),
-        ("q8",   "flash",    1024, "GGUF Q8_0 with Metal Flash        @ 1,024 tokens"),
-        ("bf16", "standard", 2048, "GGUF BF16 with Standard Attention @ 2,048 tokens"),
-        ("bf16", "chunked",  2048, "GGUF BF16 with Chunked Attention  @ 2,048 tokens"),
-        ("bf16", "flash",    2048, "GGUF BF16 with Metal Flash        @ 2,048 tokens"),
-        ("q8",   "flash",    2048, "GGUF Q8_0 with Metal Flash        @ 2,048 tokens"),
-        ("bf16", "standard", 4096, "GGUF BF16 with Standard Attention @ 4,096 tokens"),
-        ("bf16", "chunked",  4096, "GGUF BF16 with Chunked Attention  @ 4,096 tokens"),
-        ("bf16", "flash",    4096, "GGUF BF16 with Metal Flash        @ 4,096 tokens"),
-        ("q8",   "flash",    4096, "GGUF Q8_0 with Metal Flash        @ 4,096 tokens"),
-        ("bf16", "standard", 8192, "GGUF BF16 with Standard Attention @ 8,192 tokens"),
-        ("bf16", "chunked",  8192, "GGUF BF16 with Chunked Attention  @ 8,192 tokens"),
-        ("bf16", "flash",    8192, "GGUF BF16 with Metal Flash        @ 8,192 tokens"),
-        ("q8",   "flash",    8192, "GGUF Q8_0 with Metal Flash        @ 8,192 tokens"),
+        (
+            "bf16",
+            "standard",
+            1024,
+            "GGUF BF16 with Standard Attention @ 1,024 tokens",
+        ),
+        (
+            "bf16",
+            "chunked",
+            1024,
+            "GGUF BF16 with Chunked Attention  @ 1,024 tokens",
+        ),
+        (
+            "bf16",
+            "flash",
+            1024,
+            "GGUF BF16 with Metal Flash        @ 1,024 tokens",
+        ),
+        (
+            "q8",
+            "flash",
+            1024,
+            "GGUF Q8_0 with Metal Flash        @ 1,024 tokens",
+        ),
+        (
+            "bf16",
+            "standard",
+            2048,
+            "GGUF BF16 with Standard Attention @ 2,048 tokens",
+        ),
+        (
+            "bf16",
+            "chunked",
+            2048,
+            "GGUF BF16 with Chunked Attention  @ 2,048 tokens",
+        ),
+        (
+            "bf16",
+            "flash",
+            2048,
+            "GGUF BF16 with Metal Flash        @ 2,048 tokens",
+        ),
+        (
+            "q8",
+            "flash",
+            2048,
+            "GGUF Q8_0 with Metal Flash        @ 2,048 tokens",
+        ),
+        (
+            "bf16",
+            "standard",
+            4096,
+            "GGUF BF16 with Standard Attention @ 4,096 tokens",
+        ),
+        (
+            "bf16",
+            "chunked",
+            4096,
+            "GGUF BF16 with Chunked Attention  @ 4,096 tokens",
+        ),
+        (
+            "bf16",
+            "flash",
+            4096,
+            "GGUF BF16 with Metal Flash        @ 4,096 tokens",
+        ),
+        (
+            "q8",
+            "flash",
+            4096,
+            "GGUF Q8_0 with Metal Flash        @ 4,096 tokens",
+        ),
+        (
+            "bf16",
+            "standard",
+            8192,
+            "GGUF BF16 with Standard Attention @ 8,192 tokens",
+        ),
+        (
+            "bf16",
+            "chunked",
+            8192,
+            "GGUF BF16 with Chunked Attention  @ 8,192 tokens",
+        ),
+        (
+            "bf16",
+            "flash",
+            8192,
+            "GGUF BF16 with Metal Flash        @ 8,192 tokens",
+        ),
+        (
+            "q8",
+            "flash",
+            8192,
+            "GGUF Q8_0 with Metal Flash        @ 8,192 tokens",
+        ),
     ];
 
     println!("--- 1. Apple Silicon Metal GPU Memory & Latency Scaling ---");
-    println!("{:<8} | {:<12} | {:<8} | {:<12} | {:<14} | {:<14} | {:<10} | {:<10} | {:<12}",
-        "Model", "Attention", "Tokens", "Model VRAM", "Peak VRAM", "Transient VRAM", "Cold Lat", "Warm Lat", "Process RSS"
+    println!(
+        "{:<8} | {:<12} | {:<8} | {:<12} | {:<14} | {:<14} | {:<10} | {:<10} | {:<12}",
+        "Model",
+        "Attention",
+        "Tokens",
+        "Model VRAM",
+        "Peak VRAM",
+        "Transient VRAM",
+        "Cold Lat",
+        "Warm Lat",
+        "Process RSS"
     );
-    println!("----------------------------------------------------------------------------------------------------------------------------------");
+    println!(
+        "----------------------------------------------------------------------------------------------------------------------------------"
+    );
 
     for (model, mode, tokens, _label) in metal_configurations {
         let output = std::process::Command::new(std::env::current_exe()?)
@@ -226,7 +355,8 @@ fn main() -> Result<()> {
                     let warm_lat = format!("{} ms", parts[10]);
                     let rss = format!("{} MB", parts[11]);
 
-                    println!("{:<8} | {:<12} | {:>8} | {:>12} | {:>14} | {:>14} | {:>10} | {:>10} | {:>12}",
+                    println!(
+                        "{:<8} | {:<12} | {:>8} | {:>12} | {:>14} | {:>14} | {:>10} | {:>10} | {:>12}",
                         m_type, a_mode, t_len, m_ram, p_ram, tr_ram, cold_lat, warm_lat, rss
                     );
                 }
@@ -236,10 +366,13 @@ fn main() -> Result<()> {
 
     println!("\n--- 2. CPU SIMD (pulp NEON/AVX) Latency, Throughput & Memory Scaling ---");
     let cpu_tokens = [64, 256, 512, 1024, 2048, 4096];
-    println!("{:<8} | {:<12} | {:<8} | {:<10} | {:<10} | {:<16} | {:<12}",
+    println!(
+        "{:<8} | {:<12} | {:<8} | {:<10} | {:<10} | {:<16} | {:<12}",
         "Model", "Backend", "Tokens", "Cold Lat", "Warm Lat", "Throughput", "Process RSS"
     );
-    println!("------------------------------------------------------------------------------------------------------------------------");
+    println!(
+        "------------------------------------------------------------------------------------------------------------------------"
+    );
 
     for tokens in cpu_tokens {
         for model in ["q8", "bf16"] {
@@ -264,7 +397,8 @@ fn main() -> Result<()> {
                         let tps = format!("{:.0} tok/s", tok_per_sec);
                         let rss = format!("{} MB", parts[11]);
 
-                        println!("{:<8} | {:<12} | {:>8} | {:>10} | {:>10} | {:>16} | {:>12}",
+                        println!(
+                            "{:<8} | {:<12} | {:>8} | {:>10} | {:>10} | {:>16} | {:>12}",
                             m_type, "CPU SIMD", t_len, cold_lat, warm_lat, tps, rss
                         );
                     }
@@ -273,7 +407,9 @@ fn main() -> Result<()> {
         }
     }
 
-    println!("========================================================================================================================\n");
+    println!(
+        "========================================================================================================================\n"
+    );
 
     Ok(())
 }

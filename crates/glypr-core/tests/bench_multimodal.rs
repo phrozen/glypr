@@ -87,7 +87,10 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
         .join("tests/golden_vectors");
 
     let audio_test_cases = [
-        ("Short (1.0s Synthetic)", golden_dir.join("multimodal_test_audio.wav")),
+        (
+            "Short (1.0s Synthetic)",
+            golden_dir.join("multimodal_test_audio.wav"),
+        ),
         ("Medium (5.0s Music)", golden_dir.join("music_16k.wav")),
         ("Long (12.3s Speech)", golden_dir.join("lena_16k.wav")),
     ];
@@ -104,7 +107,10 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
 
         println!(
             "\n--- Benchmarking Audio: {} ({:.2}s, {} samples -> {} soft tokens) ---",
-            label, audio_dur_secs, samples.len(), num_soft_tokens
+            label,
+            audio_dur_secs,
+            samples.len(),
+            num_soft_tokens
         );
 
         let proj = embedder.multimodal.as_ref().unwrap();
@@ -168,9 +174,10 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
 fn bench_multimodal_pipeline() -> anyhow::Result<()> {
     #[cfg(feature = "metal")]
     if candle_core::utils::metal_is_available()
-        && let Ok(metal_dev) = Device::new_metal(0) {
-            bench_device(metal_dev, DType::BF16, "Apple Silicon Metal GPU")?;
-        }
+        && let Ok(metal_dev) = Device::new_metal(0)
+    {
+        bench_device(metal_dev, DType::BF16, "Apple Silicon Metal GPU")?;
+    }
 
     // Also benchmark CPU track if explicit or on non-metal runs
     if std::env::var("BENCH_CPU").is_ok() {

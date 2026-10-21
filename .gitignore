@@ -1,25 +1,41 @@
-# Python-generated files
+# Rust build artifacts
+target/
+Cargo.lock.backup
+
+# Exported Core ML bundles, local GGUF weights, and models
+models/
+*.mlmodelc/
+*.mlpackage/
+*.gguf
+*.bin
+*.log
+*.tmp
+
+# Python artifacts & virtual environments
 __pycache__/
-*.py[oc]
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+env/
+venv/
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
 
-# Virtual environments
-.venv
-
-# Rust build artifacts
-target/
-
-# OS metadata
+# OS & Editor metadata
 .DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
+.idea/
+.vscode/
+*.swp
+*.swo
 
-# Test fixture data (copyrighted/local assets)
+# Local scratch and test fixtures
 tests/cards/
-
-# Local optimization plan handoff
 OPTIMIZATION_PLAN.md
-
-# Exported Core ML and local model artifacts
-models/
+expressions.txt

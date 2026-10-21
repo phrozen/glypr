@@ -59,10 +59,13 @@ fn test_coreml_text_backbone_ane() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let backbone = CoreMLTextBackbone::from_path(&model_path, CoreMLComputeUnits::CpuAndNeuralEngine)?;
+    let backbone =
+        CoreMLTextBackbone::from_path(&model_path, CoreMLComputeUnits::CpuAndNeuralEngine)?;
     assert_eq!(backbone.seq_len(), 512);
 
-    let sample_tokens = [2i32, 603, 235292, 1146, 235284, 1489, 235292, 235248, 1841, 6496, 573, 11956, 5028, 235336];
+    let sample_tokens = [
+        2i32, 603, 235292, 1146, 235284, 1489, 235292, 235248, 1841, 6496, 573, 11956, 5028, 235336,
+    ];
     let embedding = backbone.embed_token_ids(&sample_tokens)?;
     assert_eq!(embedding.len(), 768);
 
@@ -70,7 +73,11 @@ fn test_coreml_text_backbone_ane() -> anyhow::Result<()> {
     assert_eq!(nan_count, 0, "Text backbone output contains NaNs");
 
     let norm: f32 = embedding.iter().map(|&x| x * x).sum::<f32>().sqrt();
-    assert!((norm - 1.0).abs() < 1e-4, "Embedding norm {} is not 1.0", norm);
+    assert!(
+        (norm - 1.0).abs() < 1e-4,
+        "Embedding norm {} is not 1.0",
+        norm
+    );
 
     Ok(())
 }

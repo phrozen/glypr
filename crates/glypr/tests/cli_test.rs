@@ -67,8 +67,8 @@ fn test_cli_embed_text_json_truncated_dim() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let values: Vec<f32> = serde_json::from_str(stdout.trim())
-        .expect("Output should be valid JSON array of floats");
+    let values: Vec<f32> =
+        serde_json::from_str(stdout.trim()).expect("Output should be valid JSON array of floats");
     assert_eq!(values.len(), 128);
 
     // Verify norm is approximately 1.0 (L2 normalized)
@@ -228,7 +228,11 @@ fn test_cli_embed_multimodal_fails_without_mmproj() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Media input detected in arguments, but no multimodal projector was attached"));
+    assert!(
+        stderr.contains(
+            "Media input detected in arguments, but no multimodal projector was attached"
+        )
+    );
     assert!(stderr.contains("--bf16-mmproj"));
 }
 
@@ -325,5 +329,3 @@ fn test_cli_embed_jpeg_and_webp() {
     let _ = std::fs::remove_file(jpg_path);
     let _ = std::fs::remove_file(webp_path);
 }
-
-

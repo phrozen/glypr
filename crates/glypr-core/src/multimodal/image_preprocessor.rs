@@ -1,5 +1,5 @@
-use anyhow::{bail, Result};
-use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use anyhow::{Result, bail};
+use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use rayon::prelude::*;
 
 /// Standard discrete vision token budget operating points:

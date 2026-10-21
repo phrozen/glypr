@@ -2,11 +2,12 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Device};
 use clap::{Parser, Subcommand, ValueEnum};
 use glypr_core::{
+    GlyprEmbedder, ModalityPart, Task,
     hub::{
-        check_cached_file, resolve_canonical_mmproj, resolve_canonical_model, resolve_file,
         DEFAULT_GGUF_REPO, GGUF_BF16_FILE, GGUF_Q8_0_FILE, MMPROJ_BF16_FILE, MMPROJ_Q8_0_FILE,
+        check_cached_file, resolve_canonical_mmproj, resolve_canonical_model, resolve_file,
     },
-    truncate_mrl, GlyprEmbedder, ModalityPart, Task,
+    truncate_mrl,
 };
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -231,14 +232,19 @@ fn resolve_device_and_dtype(device_arg: DeviceArg, legacy_metal: bool) -> Result
         }
         #[cfg(not(feature = "metal"))]
         {
-            anyhow::bail!("Metal acceleration requested but binary was compiled without --features metal");
+            anyhow::bail!(
+                "Metal acceleration requested but binary was compiled without --features metal"
+            );
         }
     } else {
         Ok((Device::Cpu, DType::F32))
     }
 }
 
-fn resolve_attention_mode(arg: AttentionArg, _device: &Device) -> Result<glypr_core::AttentionMode> {
+fn resolve_attention_mode(
+    arg: AttentionArg,
+    _device: &Device,
+) -> Result<glypr_core::AttentionMode> {
     match arg {
         AttentionArg::Auto => {
             #[cfg(feature = "metal")]
@@ -252,7 +258,9 @@ fn resolve_attention_mode(arg: AttentionArg, _device: &Device) -> Result<glypr_c
             if _device.is_metal() {
                 return Ok(glypr_core::AttentionMode::MetalFlash);
             }
-            eprintln!("Warning: Flash attention requested but running on CPU. Falling back to Chunked Sliding Attention.");
+            eprintln!(
+                "Warning: Flash attention requested but running on CPU. Falling back to Chunked Sliding Attention."
+            );
             Ok(glypr_core::AttentionMode::ChunkedSliding)
         }
         AttentionArg::Chunked => Ok(glypr_core::AttentionMode::ChunkedSliding),
@@ -353,7 +361,10 @@ fn main() -> Result<()> {
             targets.push(MMPROJ_Q8_0_FILE);
         }
 
-        println!("Pulling canonical GGUF models from '{}'...", DEFAULT_GGUF_REPO);
+        println!(
+            "Pulling canonical GGUF models from '{}'...",
+            DEFAULT_GGUF_REPO
+        );
         for file in targets {
             print!("  - Resolving {} ... ", file);
             std::io::stdout().flush()?;
@@ -368,9 +379,13 @@ fn main() -> Result<()> {
     // Handle Info command
     if let Commands::Info = cli.command {
         let cache_dir = glypr_core::hub::get_hf_cache_dir();
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
         println!("  GLYPR ENGINE INFORMATION");
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
         println!("Hugging Face Cache:   {}", cache_dir.display());
         println!("Default Repository:   {}", DEFAULT_GGUF_REPO);
         println!();
@@ -392,10 +407,7 @@ fn main() -> Result<()> {
                     desc
                 );
             } else {
-                println!(
-                    "  [ ] {:<16}: {} (Not cached) [{}]",
-                    flag, file, desc
-                );
+                println!("  [ ] {:<16}: {} (Not cached) [{}]", flag, file, desc);
             }
         }
 
@@ -447,12 +459,25 @@ fn main() -> Result<()> {
         #[cfg(feature = "coreml")]
         {
             println!("  Neural Engine (ANE): Supported (CoreML native runtime)");
-            let coreml_dir = cli.coreml_dir.as_deref().unwrap_or(std::path::Path::new("models/coreml"));
+            let coreml_dir = cli
+                .coreml_dir
+                .as_deref()
+                .unwrap_or(std::path::Path::new("models/coreml"));
             if coreml_dir.is_dir() {
-                if let Ok(tower) = glypr_core::coreml::CoreMLVisionTower::from_dir(coreml_dir, glypr_core::coreml::CoreMLComputeUnits::CpuAndNeuralEngine) {
-                    println!("  ANE Vision Models:  Loaded from {} (patches: {:?})", coreml_dir.display(), tower.supported_patch_counts());
+                if let Ok(tower) = glypr_core::coreml::CoreMLVisionTower::from_dir(
+                    coreml_dir,
+                    glypr_core::coreml::CoreMLComputeUnits::CpuAndNeuralEngine,
+                ) {
+                    println!(
+                        "  ANE Vision Models:  Loaded from {} (patches: {:?})",
+                        coreml_dir.display(),
+                        tower.supported_patch_counts()
+                    );
                 } else {
-                    println!("  ANE Vision Models:  Directory {} present (no compiled models)", coreml_dir.display());
+                    println!(
+                        "  ANE Vision Models:  Directory {} present (no compiled models)",
+                        coreml_dir.display()
+                    );
                 }
             } else {
                 println!("  ANE Vision Models:  None (run scripts/export_coreml.py to export)");
@@ -473,7 +498,9 @@ fn main() -> Result<()> {
         {
             println!();
             println!("Vision Backends (--vision-backend):");
-            println!("  auto                : Apple Neural Engine for portrait, Metal mmproj fallback (default)");
+            println!(
+                "  auto                : Apple Neural Engine for portrait, Metal mmproj fallback (default)"
+            );
             println!("  ane                 : Strict Apple Neural Engine execution");
             println!("  metal               : GPU Metal multimodal projector");
         }
@@ -488,7 +515,9 @@ fn main() -> Result<()> {
         println!();
         println!("Vision Budget (--image-token-budget):");
         println!("  280 (default) [range: 16–2048]");
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
         return Ok(());
     }
 
@@ -516,14 +545,26 @@ fn main() -> Result<()> {
         embedder.set_vision_backend(policy);
 
         if cli.ane || cli.coreml_dir.is_some() || cli.vision_backend == VisionBackendArg::Ane {
-            let coreml_dir = cli.coreml_dir.unwrap_or_else(|| PathBuf::from("models/coreml"));
+            let coreml_dir = cli
+                .coreml_dir
+                .unwrap_or_else(|| PathBuf::from("models/coreml"));
             if coreml_dir.is_dir() {
-                if let Err(e) = embedder.attach_coreml_vision_dir(&coreml_dir, glypr_core::coreml::CoreMLComputeUnits::CpuAndNeuralEngine)
-                    && (cli.ane || cli.vision_backend == VisionBackendArg::Ane) {
-                        anyhow::bail!("Failed to load CoreML vision models from {}: {}", coreml_dir.display(), e);
-                    }
+                if let Err(e) = embedder.attach_coreml_vision_dir(
+                    &coreml_dir,
+                    glypr_core::coreml::CoreMLComputeUnits::CpuAndNeuralEngine,
+                ) && (cli.ane || cli.vision_backend == VisionBackendArg::Ane)
+                {
+                    anyhow::bail!(
+                        "Failed to load CoreML vision models from {}: {}",
+                        coreml_dir.display(),
+                        e
+                    );
+                }
             } else if cli.ane || cli.vision_backend == VisionBackendArg::Ane {
-                anyhow::bail!("CoreML models directory not found at: {}", coreml_dir.display());
+                anyhow::bail!(
+                    "CoreML models directory not found at: {}",
+                    coreml_dir.display()
+                );
             }
         }
     }
@@ -543,9 +584,13 @@ fn main() -> Result<()> {
             // Reject media if no multimodal engine is attached
             let has_coreml = {
                 #[cfg(feature = "coreml")]
-                { embedder.coreml_vision.is_some() }
+                {
+                    embedder.coreml_vision.is_some()
+                }
                 #[cfg(not(feature = "coreml"))]
-                { false }
+                {
+                    false
+                }
             };
 
             if has_media && embedder.multimodal.is_none() && !has_coreml {

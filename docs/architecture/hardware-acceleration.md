@@ -80,7 +80,7 @@ Tiles outside this key range are skipped entirely in the GPU command queue:
 
 ### C. Fused Custom MSL Kernels: RMSNorm & GeGLU
 
-Located in [`crates/glypr-core/src/metal_kernels/fused_ops.metal`](crates/glypr-core/src/metal_kernels/fused_ops.metal):
+Located in [`crates/glypr-core/src/metal_kernels/fused_ops.metal`](../../crates/glypr-core/src/metal_kernels/fused_ops.metal):
 
 #### 1. Fused In-Register RMSNorm (`rms_norm_bf16`)
 Standard RMSNorm implementations allocate intermediate tensors for:
@@ -213,7 +213,7 @@ Rather than maintaining fragile architecture-specific intrinsics (`core::arch::a
 
 Integrated via Candle's `CustomOp1` and `CustomOp2` interfaces, bypassing Candle's default tensor allocation pipeline.
 
-#### 1. Zero-Heap `simd_rmsnorm` ([`rmsnorm.rs`](crates/glypr-core/src/cpu_simd/rmsnorm.rs))
+#### 1. Zero-Heap `simd_rmsnorm` ([`rmsnorm.rs`](../../crates/glypr-core/src/cpu_simd/rmsnorm.rs))
 Operates directly on continuous CPU storage memory using multi-threaded chunking via Rayon:
 1. **Pass 1 (SIMD Fused Multiply-Add):** Accumulates the sum of squares across SIMD registers:
    $$\text{acc} \leftarrow \text{simd.mul\_add\_f32s}(x, x, \text{acc})$$
@@ -223,7 +223,7 @@ Operates directly on continuous CPU storage memory using multi-threaded chunking
 - **Intermediate Tensor Churn:** Reduced from 5 allocations per call down to **0**.
 - **Max Absolute Error vs Reference:** $7.15 \times 10^{-7}$.
 
-#### 2. Streaming `simd_geglu` ([`geglu.rs`](crates/glypr-core/src/cpu_simd/geglu.rs))
+#### 2. Streaming `simd_geglu` ([`geglu.rs`](../../crates/glypr-core/src/cpu_simd/geglu.rs))
 Processes gate and up tensors in-place using SIMD lane unrolling:
 - Reads $x_g$ and $x_u$ from contiguous memory.
 - Evaluates vectorized polynomial GELU approximation with clamped bounds.

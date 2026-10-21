@@ -108,7 +108,7 @@ print("Similarity between 0 and 2:", similarity_matrix[0, 2].item())  # Low
 
 ## 4. Native Rust Engine (`glypr-core`) Unified Task API
 
-`glypr-core` replaces fragmented string parameters with a strongly-typed, compile-time verified [`Task<'a>`](crates/glypr-core/src/task.rs) enum that automates prefix formatting and title conditioning:
+`glypr-core` replaces fragmented string parameters with a strongly-typed, compile-time verified [`Task<'a>`](../../crates/glypr-core/src/task.rs) enum that automates prefix formatting and title conditioning:
 
 ```rust
 use glypr_core::{GlyprEmbedder, Task};

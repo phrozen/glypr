@@ -1,5 +1,5 @@
 pub mod capabilities;
-pub use capabilities::{compile_metal4_library, MetalCapabilities, MetalTier};
+pub use capabilities::{MetalCapabilities, MetalTier, compile_metal4_library};
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_metal_kernels::metal::{ComputePipeline, Device as MtlDevice, Library};
@@ -28,7 +28,9 @@ fn get_or_compile_fused_library(dev: &MtlDevice) -> Result<Library> {
 
     let library = dev
         .new_library_with_source(FUSED_OPS_SOURCE, None)
-        .map_err(|e| candle_core::Error::Metal(format!("Failed to compile fused_ops.metal: {:?}", e).into()))?;
+        .map_err(|e| {
+            candle_core::Error::Metal(format!("Failed to compile fused_ops.metal: {:?}", e).into())
+        })?;
 
     let mut cache = FUSED_LIB_CACHE.write().unwrap();
     cache.insert(dev_ptr, library.clone());
@@ -44,8 +46,9 @@ fn get_or_compile_m5_library(dev: &MtlDevice) -> Result<Library> {
         }
     }
 
-    let library = compile_metal4_library(dev, M5_OPS_SOURCE)
-        .map_err(|e| candle_core::Error::Metal(format!("Failed to compile m5_ops.metal: {:?}", e).into()))?;
+    let library = compile_metal4_library(dev, M5_OPS_SOURCE).map_err(|e| {
+        candle_core::Error::Metal(format!("Failed to compile m5_ops.metal: {:?}", e).into())
+    })?;
 
     let mut cache = M5_LIB_CACHE.write().unwrap();
     cache.insert(dev_ptr, library.clone());
@@ -63,13 +66,17 @@ fn get_or_compile_pipeline(dev: &MtlDevice, fn_name: &'static str) -> Result<Com
 
     let library = get_or_compile_fused_library(dev)?;
 
-    let function = library
-        .get_function(fn_name, None)
-        .map_err(|e| candle_core::Error::Metal(format!("Function {} not found: {:?}", fn_name, e).into()))?;
+    let function = library.get_function(fn_name, None).map_err(|e| {
+        candle_core::Error::Metal(format!("Function {} not found: {:?}", fn_name, e).into())
+    })?;
 
     let pipeline = dev
         .new_compute_pipeline_state_with_function(&function)
-        .map_err(|e| candle_core::Error::Metal(format!("Failed to create {} pipeline: {:?}", fn_name, e).into()))?;
+        .map_err(|e| {
+            candle_core::Error::Metal(
+                format!("Failed to create {} pipeline: {:?}", fn_name, e).into(),
+            )
+        })?;
 
     let mut cache = PIPELINE_CACHE.write().unwrap();
     cache.insert(dev_key, pipeline.clone());
@@ -87,13 +94,17 @@ fn get_or_compile_m5_pipeline(dev: &MtlDevice, fn_name: &'static str) -> Result<
 
     let library = get_or_compile_m5_library(dev)?;
 
-    let function = library
-        .get_function(fn_name, None)
-        .map_err(|e| candle_core::Error::Metal(format!("Function {} not found: {:?}", fn_name, e).into()))?;
+    let function = library.get_function(fn_name, None).map_err(|e| {
+        candle_core::Error::Metal(format!("Function {} not found: {:?}", fn_name, e).into())
+    })?;
 
     let pipeline = dev
         .new_compute_pipeline_state_with_function(&function)
-        .map_err(|e| candle_core::Error::Metal(format!("Failed to create {} pipeline: {:?}", fn_name, e).into()))?;
+        .map_err(|e| {
+            candle_core::Error::Metal(
+                format!("Failed to create {} pipeline: {:?}", fn_name, e).into(),
+            )
+        })?;
 
     let mut cache = PIPELINE_CACHE.write().unwrap();
     cache.insert(dev_key, pipeline.clone());
@@ -107,7 +118,11 @@ pub fn fused_metal_rmsnorm(x: &Tensor, weight: Option<&Tensor>, eps: f64) -> Res
         _ => candle_core::bail!("fused_metal_rmsnorm requires a Metal device"),
     };
 
-    let x = if !x.is_contiguous() { x.contiguous()? } else { x.clone() };
+    let x = if !x.is_contiguous() {
+        x.contiguous()?
+    } else {
+        x.clone()
+    };
     let weight_holder: Option<Tensor> = match weight {
         Some(w) if !w.is_contiguous() => Some(w.contiguous()?),
         Some(w) if w.dtype() != DType::BF16 => Some(w.to_dtype(DType::BF16)?),
@@ -168,8 +183,16 @@ pub fn fused_metal_rmsnorm(x: &Tensor, weight: Option<&Tensor>, eps: f64) -> Res
         enc_ref.set_bytes(4, &d_i32);
         enc_ref.set_bytes(5, &has_weight);
 
-        let grid_dims = MTLSize { width: num_rows, height: 1, depth: 1 };
-        let group_dims = MTLSize { width: 32, height: 1, depth: 1 };
+        let grid_dims = MTLSize {
+            width: num_rows,
+            height: 1,
+            depth: 1,
+        };
+        let group_dims = MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
     }
 
@@ -189,8 +212,16 @@ pub fn fused_metal_rmsnorm_residual_add(
         _ => candle_core::bail!("fused_metal_rmsnorm_residual_add requires a Metal device"),
     };
 
-    let x = if !x.is_contiguous() { x.contiguous()? } else { x.clone() };
-    let residual = if !residual.is_contiguous() { residual.contiguous()? } else { residual.clone() };
+    let x = if !x.is_contiguous() {
+        x.contiguous()?
+    } else {
+        x.clone()
+    };
+    let residual = if !residual.is_contiguous() {
+        residual.contiguous()?
+    } else {
+        residual.clone()
+    };
 
     let weight_holder: Option<Tensor> = match weight {
         Some(w) if !w.is_contiguous() => Some(w.contiguous()?),
@@ -280,8 +311,16 @@ pub fn fused_metal_rmsnorm_residual_add(
         enc_ref.set_bytes(7, &has_weight);
         enc_ref.set_bytes(8, &has_scale);
 
-        let grid_dims = MTLSize { width: num_rows, height: 1, depth: 1 };
-        let group_dims = MTLSize { width: 32, height: 1, depth: 1 };
+        let grid_dims = MTLSize {
+            width: num_rows,
+            height: 1,
+            depth: 1,
+        };
+        let group_dims = MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
     }
 
@@ -306,14 +345,38 @@ pub fn fused_metal_qk_rmsnorm_rope_transpose(
         _ => candle_core::bail!("fused_metal_qk_rmsnorm_rope_transpose requires a Metal device"),
     };
 
-    let x = if !x.is_contiguous() { x.contiguous()? } else { x.clone() };
-    let weight = if !weight.is_contiguous() { weight.contiguous()? } else { weight.clone() };
-    let weight = if weight.dtype() != DType::BF16 { weight.to_dtype(DType::BF16)? } else { weight };
-    let cos = if !cos.is_contiguous() { cos.contiguous()? } else { cos.clone() };
-    let sin = if !sin.is_contiguous() { sin.contiguous()? } else { sin.clone() };
+    let x = if !x.is_contiguous() {
+        x.contiguous()?
+    } else {
+        x.clone()
+    };
+    let weight = if !weight.is_contiguous() {
+        weight.contiguous()?
+    } else {
+        weight.clone()
+    };
+    let weight = if weight.dtype() != DType::BF16 {
+        weight.to_dtype(DType::BF16)?
+    } else {
+        weight
+    };
+    let cos = if !cos.is_contiguous() {
+        cos.contiguous()?
+    } else {
+        cos.clone()
+    };
+    let sin = if !sin.is_contiguous() {
+        sin.contiguous()?
+    } else {
+        sin.clone()
+    };
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_rope_transpose_bf16")?;
-    let out = Tensor::zeros((batch, num_heads, seq_len, head_dim), DType::BF16, x.device())?;
+    let out = Tensor::zeros(
+        (batch, num_heads, seq_len, head_dim),
+        DType::BF16,
+        x.device(),
+    )?;
 
     let eps_f32 = eps as f32;
     let s_i32 = seq_len as i32;
@@ -369,8 +432,16 @@ pub fn fused_metal_qk_rmsnorm_rope_transpose(
         enc_ref.set_bytes(7, &h_i32);
         enc_ref.set_bytes(8, &d_i32);
 
-        let grid_dims = MTLSize { width: num_heads, height: seq_len, depth: batch };
-        let group_dims = MTLSize { width: 32, height: 1, depth: 1 };
+        let grid_dims = MTLSize {
+            width: num_heads,
+            height: seq_len,
+            depth: batch,
+        };
+        let group_dims = MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
     }
 
@@ -392,7 +463,11 @@ pub fn fused_metal_v_rmsnorm_transpose(
         _ => candle_core::bail!("fused_metal_v_rmsnorm_transpose requires a Metal device"),
     };
 
-    let x = if !x.is_contiguous() { x.contiguous()? } else { x.clone() };
+    let x = if !x.is_contiguous() {
+        x.contiguous()?
+    } else {
+        x.clone()
+    };
     let weight_holder: Option<Tensor> = match weight {
         Some(w) if !w.is_contiguous() => Some(w.contiguous()?),
         Some(w) if w.dtype() != DType::BF16 => Some(w.to_dtype(DType::BF16)?),
@@ -402,7 +477,11 @@ pub fn fused_metal_v_rmsnorm_transpose(
     let weight_ref = weight_holder.as_ref();
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_transpose_bf16")?;
-    let out = Tensor::zeros((batch, num_heads, seq_len, head_dim), DType::BF16, x.device())?;
+    let out = Tensor::zeros(
+        (batch, num_heads, seq_len, head_dim),
+        DType::BF16,
+        x.device(),
+    )?;
 
     let eps_f32 = eps as f32;
     let s_i32 = seq_len as i32;
@@ -450,8 +529,16 @@ pub fn fused_metal_v_rmsnorm_transpose(
         enc_ref.set_bytes(6, &d_i32);
         enc_ref.set_bytes(7, &has_weight);
 
-        let grid_dims = MTLSize { width: num_heads, height: seq_len, depth: batch };
-        let group_dims = MTLSize { width: 32, height: 1, depth: 1 };
+        let grid_dims = MTLSize {
+            width: num_heads,
+            height: seq_len,
+            depth: batch,
+        };
+        let group_dims = MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
     }
 
@@ -476,11 +563,24 @@ pub fn fused_metal_ple_scale_rmsnorm_transpose(
         _ => candle_core::bail!("fused_metal_ple_scale_rmsnorm_transpose requires a Metal device"),
     };
 
-    let x = if !x.is_contiguous() { x.contiguous()? } else { x.clone() };
-    let weight = if !weight.is_contiguous() { weight.contiguous()? } else { weight.clone() };
-    let weight = if weight.dtype() != DType::BF16 { weight.to_dtype(DType::BF16)? } else { weight };
+    let x = if !x.is_contiguous() {
+        x.contiguous()?
+    } else {
+        x.clone()
+    };
+    let weight = if !weight.is_contiguous() {
+        weight.contiguous()?
+    } else {
+        weight.clone()
+    };
+    let weight = if weight.dtype() != DType::BF16 {
+        weight.to_dtype(DType::BF16)?
+    } else {
+        weight
+    };
 
-    let pipeline = get_or_compile_pipeline(mdev.metal_device(), "ple_scale_rms_norm_transpose_bf16")?;
+    let pipeline =
+        get_or_compile_pipeline(mdev.metal_device(), "ple_scale_rms_norm_transpose_bf16")?;
     let out = Tensor::zeros((num_layers, batch, seq_len, d), DType::BF16, x.device())?;
 
     let scale_f32 = scale as f32;
@@ -527,8 +627,16 @@ pub fn fused_metal_ple_scale_rmsnorm_transpose(
         enc_ref.set_bytes(7, &l_i32);
         enc_ref.set_bytes(8, &d_i32);
 
-        let grid_dims = MTLSize { width: num_layers, height: seq_len, depth: batch };
-        let group_dims = MTLSize { width: 32, height: 1, depth: 1 };
+        let grid_dims = MTLSize {
+            width: num_layers,
+            height: seq_len,
+            depth: batch,
+        };
+        let group_dims = MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
     }
 
@@ -551,8 +659,16 @@ fn fused_metal_geglu_impl(gate: &Tensor, up: &Tensor, kernel_name: &'static str)
         _ => candle_core::bail!("{} requires a Metal device", kernel_name),
     };
 
-    let gate = if !gate.is_contiguous() { gate.contiguous()? } else { gate.clone() };
-    let up = if !up.is_contiguous() { up.contiguous()? } else { up.clone() };
+    let gate = if !gate.is_contiguous() {
+        gate.contiguous()?
+    } else {
+        gate.clone()
+    };
+    let up = if !up.is_contiguous() {
+        up.contiguous()?
+    } else {
+        up.clone()
+    };
 
     let total_elements = gate.elem_count();
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), kernel_name)?;
@@ -593,8 +709,16 @@ fn fused_metal_geglu_impl(gate: &Tensor, up: &Tensor, kernel_name: &'static str)
 
         let thread_group_size = 256;
         let num_groups = total_elements.div_ceil(thread_group_size);
-        let grid_dims = MTLSize { width: num_groups, height: 1, depth: 1 };
-        let group_dims = MTLSize { width: thread_group_size, height: 1, depth: 1 };
+        let grid_dims = MTLSize {
+            width: num_groups,
+            height: 1,
+            depth: 1,
+        };
+        let group_dims = MTLSize {
+            width: thread_group_size,
+            height: 1,
+            depth: 1,
+        };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
     }
 
@@ -608,10 +732,17 @@ pub fn fused_metal_geglu_gate_up(gate_up: &Tensor) -> Result<Tensor> {
         _ => candle_core::bail!("fused_metal_geglu_gate_up requires a Metal device"),
     };
 
-    let gate_up = if !gate_up.is_contiguous() { gate_up.contiguous()? } else { gate_up.clone() };
+    let gate_up = if !gate_up.is_contiguous() {
+        gate_up.contiguous()?
+    } else {
+        gate_up.clone()
+    };
     let dims = gate_up.dims();
     if dims.is_empty() || dims[dims.len() - 1] % 2 != 0 {
-        candle_core::bail!("fused_metal_geglu_gate_up expects last dim divisible by 2, got {:?}", dims);
+        candle_core::bail!(
+            "fused_metal_geglu_gate_up expects last dim divisible by 2, got {:?}",
+            dims
+        );
     }
     let d = dims[dims.len() - 1] / 2;
     let mut out_dims = dims.to_vec();
@@ -650,8 +781,16 @@ pub fn fused_metal_geglu_gate_up(gate_up: &Tensor) -> Result<Tensor> {
         let thread_group_size = 256;
         let num_rows = total_elements / d;
         let num_groups_x = d.div_ceil(thread_group_size);
-        let grid_dims = MTLSize { width: num_groups_x, height: num_rows, depth: 1 };
-        let group_dims = MTLSize { width: thread_group_size, height: 1, depth: 1 };
+        let grid_dims = MTLSize {
+            width: num_groups_x,
+            height: num_rows,
+            depth: 1,
+        };
+        let group_dims = MTLSize {
+            width: thread_group_size,
+            height: 1,
+            depth: 1,
+        };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
     }
 
@@ -681,11 +820,31 @@ pub fn fused_metal_qkv_rmsnorm_rope_transpose(
         _ => candle_core::bail!("fused_metal_qkv_rmsnorm_rope_transpose requires a Metal device"),
     };
 
-    let qkv = if !qkv.is_contiguous() { qkv.contiguous()? } else { qkv.clone() };
-    let q_weight = if !q_weight.is_contiguous() { q_weight.contiguous()? } else { q_weight.clone() };
-    let q_weight = if q_weight.dtype() != DType::BF16 { q_weight.to_dtype(DType::BF16)? } else { q_weight };
-    let k_weight = if !k_weight.is_contiguous() { k_weight.contiguous()? } else { k_weight.clone() };
-    let k_weight = if k_weight.dtype() != DType::BF16 { k_weight.to_dtype(DType::BF16)? } else { k_weight };
+    let qkv = if !qkv.is_contiguous() {
+        qkv.contiguous()?
+    } else {
+        qkv.clone()
+    };
+    let q_weight = if !q_weight.is_contiguous() {
+        q_weight.contiguous()?
+    } else {
+        q_weight.clone()
+    };
+    let q_weight = if q_weight.dtype() != DType::BF16 {
+        q_weight.to_dtype(DType::BF16)?
+    } else {
+        q_weight
+    };
+    let k_weight = if !k_weight.is_contiguous() {
+        k_weight.contiguous()?
+    } else {
+        k_weight.clone()
+    };
+    let k_weight = if k_weight.dtype() != DType::BF16 {
+        k_weight.to_dtype(DType::BF16)?
+    } else {
+        k_weight
+    };
     let v_weight_holder: Option<Tensor> = match v_weight {
         Some(w) if !w.is_contiguous() => Some(w.contiguous()?),
         Some(w) if w.dtype() != DType::BF16 => Some(w.to_dtype(DType::BF16)?),
@@ -693,13 +852,33 @@ pub fn fused_metal_qkv_rmsnorm_rope_transpose(
         None => None,
     };
     let v_weight_ref = v_weight_holder.as_ref();
-    let cos = if !cos.is_contiguous() { cos.contiguous()? } else { cos.clone() };
-    let sin = if !sin.is_contiguous() { sin.contiguous()? } else { sin.clone() };
+    let cos = if !cos.is_contiguous() {
+        cos.contiguous()?
+    } else {
+        cos.clone()
+    };
+    let sin = if !sin.is_contiguous() {
+        sin.contiguous()?
+    } else {
+        sin.clone()
+    };
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "qkv_rmsnorm_rope_transpose_bf16")?;
-    let q_out = Tensor::zeros((batch, num_q_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
-    let k_out = Tensor::zeros((batch, num_kv_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
-    let v_out = Tensor::zeros((batch, num_kv_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
+    let q_out = Tensor::zeros(
+        (batch, num_q_heads, seq_len, head_dim),
+        DType::BF16,
+        qkv.device(),
+    )?;
+    let k_out = Tensor::zeros(
+        (batch, num_kv_heads, seq_len, head_dim),
+        DType::BF16,
+        qkv.device(),
+    )?;
+    let v_out = Tensor::zeros(
+        (batch, num_kv_heads, seq_len, head_dim),
+        DType::BF16,
+        qkv.device(),
+    )?;
 
     let q_eps_f32 = q_eps as f32;
     let k_eps_f32 = k_eps as f32;
@@ -720,14 +899,38 @@ pub fn fused_metal_qkv_rmsnorm_rope_transpose(
         let (ko_storage, ko_layout) = k_out.storage_and_layout();
         let (vo_storage, vo_layout) = v_out.storage_and_layout();
 
-        let qkv_buf = match &*qkv_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let qw_buf = match &*qw_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let kw_buf = match &*kw_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let cos_buf = match &*cos_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let sin_buf = match &*sin_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let qo_buf = match &*qo_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let ko_buf = match &*ko_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let vo_buf = match &*vo_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
+        let qkv_buf = match &*qkv_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let qw_buf = match &*qw_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let kw_buf = match &*kw_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let cos_buf = match &*cos_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let sin_buf = match &*sin_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let qo_buf = match &*qo_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let ko_buf = match &*ko_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let vo_buf = match &*vo_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
 
         let elem_bytes = DType::BF16.size_in_bytes();
         let qkv_offset = qkv_layout.start_offset() * elem_bytes;
@@ -748,7 +951,10 @@ pub fn fused_metal_qkv_rmsnorm_rope_transpose(
         enc_ref.set_input_buffer(2, Some(kw_buf), kw_offset);
         if let Some(vw) = v_weight_ref {
             let (vw_storage, vw_layout) = vw.storage_and_layout();
-            let vw_buf = match &*vw_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
+            let vw_buf = match &*vw_storage {
+                candle_core::Storage::Metal(m) => m.buffer(),
+                _ => unreachable!(),
+            };
             let vw_offset = vw_layout.start_offset() * elem_bytes;
             enc_ref.set_input_buffer(3, Some(vw_buf), vw_offset);
         } else {
@@ -773,7 +979,11 @@ pub fn fused_metal_qkv_rmsnorm_rope_transpose(
             height: seq_len,
             depth: batch,
         };
-        let group_dims = MTLSize { width: 32, height: 1, depth: 1 };
+        let group_dims = MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
     }
 
@@ -797,14 +1007,36 @@ pub fn fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
 ) -> Result<(Tensor, Tensor, Tensor)> {
     let mdev = match qkv.device() {
         Device::Metal(m) => m,
-        _ => candle_core::bail!("fused_metal_vision_qkv_rmsnorm_rope2d_transpose requires a Metal device"),
+        _ => candle_core::bail!(
+            "fused_metal_vision_qkv_rmsnorm_rope2d_transpose requires a Metal device"
+        ),
     };
 
-    let qkv = if !qkv.is_contiguous() { qkv.contiguous()? } else { qkv.clone() };
-    let q_weight = if !q_weight.is_contiguous() { q_weight.contiguous()? } else { q_weight.clone() };
-    let q_weight = if q_weight.dtype() != DType::BF16 { q_weight.to_dtype(DType::BF16)? } else { q_weight };
-    let k_weight = if !k_weight.is_contiguous() { k_weight.contiguous()? } else { k_weight.clone() };
-    let k_weight = if k_weight.dtype() != DType::BF16 { k_weight.to_dtype(DType::BF16)? } else { k_weight };
+    let qkv = if !qkv.is_contiguous() {
+        qkv.contiguous()?
+    } else {
+        qkv.clone()
+    };
+    let q_weight = if !q_weight.is_contiguous() {
+        q_weight.contiguous()?
+    } else {
+        q_weight.clone()
+    };
+    let q_weight = if q_weight.dtype() != DType::BF16 {
+        q_weight.to_dtype(DType::BF16)?
+    } else {
+        q_weight
+    };
+    let k_weight = if !k_weight.is_contiguous() {
+        k_weight.contiguous()?
+    } else {
+        k_weight.clone()
+    };
+    let k_weight = if k_weight.dtype() != DType::BF16 {
+        k_weight.to_dtype(DType::BF16)?
+    } else {
+        k_weight
+    };
     let v_weight_holder: Option<Tensor> = match v_weight {
         Some(w) if !w.is_contiguous() => Some(w.contiguous()?),
         Some(w) if w.dtype() != DType::BF16 => Some(w.to_dtype(DType::BF16)?),
@@ -812,13 +1044,36 @@ pub fn fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
         None => None,
     };
     let v_weight_ref = v_weight_holder.as_ref();
-    let cos = if !cos.is_contiguous() { cos.contiguous()? } else { cos.clone() };
-    let sin = if !sin.is_contiguous() { sin.contiguous()? } else { sin.clone() };
+    let cos = if !cos.is_contiguous() {
+        cos.contiguous()?
+    } else {
+        cos.clone()
+    };
+    let sin = if !sin.is_contiguous() {
+        sin.contiguous()?
+    } else {
+        sin.clone()
+    };
 
-    let pipeline = get_or_compile_pipeline(mdev.metal_device(), "vision_qkv_rmsnorm_rope2d_transpose_bf16")?;
-    let q_out = Tensor::zeros((batch, num_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
-    let k_out = Tensor::zeros((batch, num_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
-    let v_out = Tensor::zeros((batch, num_heads, seq_len, head_dim), DType::BF16, qkv.device())?;
+    let pipeline = get_or_compile_pipeline(
+        mdev.metal_device(),
+        "vision_qkv_rmsnorm_rope2d_transpose_bf16",
+    )?;
+    let q_out = Tensor::zeros(
+        (batch, num_heads, seq_len, head_dim),
+        DType::BF16,
+        qkv.device(),
+    )?;
+    let k_out = Tensor::zeros(
+        (batch, num_heads, seq_len, head_dim),
+        DType::BF16,
+        qkv.device(),
+    )?;
+    let v_out = Tensor::zeros(
+        (batch, num_heads, seq_len, head_dim),
+        DType::BF16,
+        qkv.device(),
+    )?;
 
     let eps_f32 = eps as f32;
     let s_i32 = seq_len as i32;
@@ -836,14 +1091,38 @@ pub fn fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
         let (ko_storage, ko_layout) = k_out.storage_and_layout();
         let (vo_storage, vo_layout) = v_out.storage_and_layout();
 
-        let qkv_buf = match &*qkv_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let qw_buf = match &*qw_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let kw_buf = match &*kw_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let cos_buf = match &*cos_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let sin_buf = match &*sin_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let qo_buf = match &*qo_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let ko_buf = match &*ko_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let vo_buf = match &*vo_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
+        let qkv_buf = match &*qkv_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let qw_buf = match &*qw_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let kw_buf = match &*kw_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let cos_buf = match &*cos_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let sin_buf = match &*sin_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let qo_buf = match &*qo_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let ko_buf = match &*ko_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let vo_buf = match &*vo_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
 
         let elem_bytes = DType::BF16.size_in_bytes();
         let qkv_offset = qkv_layout.start_offset() * elem_bytes;
@@ -864,7 +1143,10 @@ pub fn fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
         enc_ref.set_input_buffer(2, Some(kw_buf), kw_offset);
         if let Some(vw) = v_weight_ref {
             let (vw_storage, vw_layout) = vw.storage_and_layout();
-            let vw_buf = match &*vw_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
+            let vw_buf = match &*vw_storage {
+                candle_core::Storage::Metal(m) => m.buffer(),
+                _ => unreachable!(),
+            };
             let vw_offset = vw_layout.start_offset() * elem_bytes;
             enc_ref.set_input_buffer(3, Some(vw_buf), vw_offset);
         } else {
@@ -886,7 +1168,11 @@ pub fn fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
             height: seq_len,
             depth: batch,
         };
-        let group_dims = MTLSize { width: 32, height: 1, depth: 1 };
+        let group_dims = MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
     }
 
@@ -900,8 +1186,16 @@ pub fn fused_metal_audio_glu_causal_dwconv5(pw1: &Tensor, dw_weight: &Tensor) ->
         _ => candle_core::bail!("fused_metal_audio_glu_causal_dwconv5 requires a Metal device"),
     };
 
-    let pw1 = if !pw1.is_contiguous() { pw1.contiguous()? } else { pw1.clone() };
-    let dw_weight = if !dw_weight.is_contiguous() { dw_weight.contiguous()? } else { dw_weight.clone() };
+    let pw1 = if !pw1.is_contiguous() {
+        pw1.contiguous()?
+    } else {
+        pw1.clone()
+    };
+    let dw_weight = if !dw_weight.is_contiguous() {
+        dw_weight.contiguous()?
+    } else {
+        dw_weight.clone()
+    };
     let dw_weight = if dw_weight.dtype() != DType::BF16 {
         dw_weight.to_dtype(DType::BF16)?
     } else {
@@ -924,9 +1218,18 @@ pub fn fused_metal_audio_glu_causal_dwconv5(pw1: &Tensor, dw_weight: &Tensor) ->
         let (dw_storage, dw_layout) = dw_weight.storage_and_layout();
         let (out_storage, out_layout) = out.storage_and_layout();
 
-        let pw1_buf = match &*pw1_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let dw_buf = match &*dw_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let out_buf = match &*out_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
+        let pw1_buf = match &*pw1_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let dw_buf = match &*dw_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let out_buf = match &*out_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
 
         let elem_bytes = DType::BF16.size_in_bytes();
         let pw1_offset = pw1_layout.start_offset() * elem_bytes;
@@ -946,8 +1249,16 @@ pub fn fused_metal_audio_glu_causal_dwconv5(pw1: &Tensor, dw_weight: &Tensor) ->
 
         let thread_group_size = 256;
         let num_groups = total_elements.div_ceil(thread_group_size);
-        let grid_dims = MTLSize { width: num_groups, height: 1, depth: 1 };
-        let group_dims = MTLSize { width: thread_group_size, height: 1, depth: 1 };
+        let grid_dims = MTLSize {
+            width: num_groups,
+            height: 1,
+            depth: 1,
+        };
+        let group_dims = MTLSize {
+            width: thread_group_size,
+            height: 1,
+            depth: 1,
+        };
         enc_ref.dispatch_thread_groups(grid_dims, group_dims);
     }
 
@@ -966,7 +1277,11 @@ pub fn fused_metal_q8_0_matmul(
         _ => candle_core::bail!("fused_metal_q8_0_matmul requires a Metal device"),
     };
 
-    let x = if !x.is_contiguous() { x.contiguous()? } else { x.clone() };
+    let x = if !x.is_contiguous() {
+        x.contiguous()?
+    } else {
+        x.clone()
+    };
     let weight_q8_bytes = if !weight_q8_bytes.is_contiguous() {
         weight_q8_bytes.contiguous()?
     } else {
@@ -1018,9 +1333,18 @@ pub fn fused_metal_q8_0_matmul(
         let (x_storage, x_layout) = x.storage_and_layout();
         let (out_storage, out_layout) = out.storage_and_layout();
 
-        let w_buf = match &*w_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let x_buf = match &*x_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
-        let out_buf = match &*out_storage { candle_core::Storage::Metal(m) => m.buffer(), _ => unreachable!() };
+        let w_buf = match &*w_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let x_buf = match &*x_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
+        let out_buf = match &*out_storage {
+            candle_core::Storage::Metal(m) => m.buffer(),
+            _ => unreachable!(),
+        };
 
         let w_offset = w_layout.start_offset() * weight_q8_bytes.dtype().size_in_bytes();
         let x_offset = x_layout.start_offset() * dtype.size_in_bytes();
@@ -1043,7 +1367,11 @@ pub fn fused_metal_q8_0_matmul(
                 height: m,
                 depth: 1,
             };
-            let group_dims = MTLSize { width: 8, height: 8, depth: 1 };
+            let group_dims = MTLSize {
+                width: 8,
+                height: 8,
+                depth: 1,
+            };
             enc_ref.dispatch_thread_groups(grid_dims, group_dims);
         } else {
             let grid_dims = MTLSize {
@@ -1051,7 +1379,11 @@ pub fn fused_metal_q8_0_matmul(
                 height: out_dim.div_ceil(64),
                 depth: 1,
             };
-            let group_dims = MTLSize { width: 128, height: 1, depth: 1 };
+            let group_dims = MTLSize {
+                width: 128,
+                height: 1,
+                depth: 1,
+            };
             enc_ref.dispatch_thread_groups(grid_dims, group_dims);
         }
     }
@@ -1088,7 +1420,10 @@ mod tests {
 
         // Copy row 1 into a fresh offset-0 buffer for reference
         let row1_fresh = Tensor::from_vec(
-            row1_view.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+            row1_view
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
             (1, 512),
             &dev,
         )?
@@ -1103,7 +1438,10 @@ mod tests {
             .to_dtype(DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
-        assert_eq!(norm_view, norm_fresh, "fused_metal_rmsnorm ignored start_offset!");
+        assert_eq!(
+            norm_view, norm_fresh,
+            "fused_metal_rmsnorm ignored start_offset!"
+        );
 
         let geglu_view = fused_metal_geglu(&row1_view, &row1_view)?
             .to_dtype(DType::F32)?
@@ -1113,7 +1451,10 @@ mod tests {
             .to_dtype(DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
-        assert_eq!(geglu_view, geglu_fresh, "fused_metal_geglu ignored start_offset!");
+        assert_eq!(
+            geglu_view, geglu_fresh,
+            "fused_metal_geglu ignored start_offset!"
+        );
 
         Ok(())
     }
@@ -1127,8 +1468,12 @@ mod tests {
         let eps = 1e-6;
 
         // 1. Test fused_metal_rmsnorm_residual_add (with and without scalar) across wide dynamic range
-        let x_vec: Vec<f32> = (0..(20 * 512)).map(|i| ((i as f32) * 0.137).sin() * 12.0).collect();
-        let res_vec: Vec<f32> = (0..(20 * 512)).map(|i| ((i as f32) * 0.029).cos() * 8.0).collect();
+        let x_vec: Vec<f32> = (0..(20 * 512))
+            .map(|i| ((i as f32) * 0.137).sin() * 12.0)
+            .collect();
+        let res_vec: Vec<f32> = (0..(20 * 512))
+            .map(|i| ((i as f32) * 0.029).cos() * 8.0)
+            .collect();
         let w_vec: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.073).sin() * 3.0).collect();
         let x = Tensor::from_vec(x_vec, (2, 10, 512), &dev)?.to_dtype(DType::BF16)?;
         let res = Tensor::from_vec(res_vec, (2, 10, 512), &dev)?.to_dtype(DType::BF16)?;
@@ -1138,23 +1483,38 @@ mod tests {
         let ref_no_scale = res.add(&fused_metal_rmsnorm(&x, Some(&w), eps)?)?;
         let got_no_scale = fused_metal_rmsnorm_residual_add(&x, &res, Some(&w), None, eps)?;
         assert_eq!(
-            ref_no_scale.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-            got_no_scale.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+            ref_no_scale
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            got_no_scale
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
             "fused_metal_rmsnorm_residual_add (no scale) mismatch!"
         );
 
         let ref_with_scale = ref_no_scale.broadcast_mul(&scalar)?;
-        let got_with_scale = fused_metal_rmsnorm_residual_add(&x, &res, Some(&w), Some(&scalar), eps)?;
+        let got_with_scale =
+            fused_metal_rmsnorm_residual_add(&x, &res, Some(&w), Some(&scalar), eps)?;
         assert_eq!(
-            ref_with_scale.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-            got_with_scale.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+            ref_with_scale
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            got_with_scale
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
             "fused_metal_rmsnorm_residual_add (with scale) mismatch!"
         );
 
         // 2. Test fused_metal_qk_rmsnorm_rope_transpose & fused_metal_v_rmsnorm_transpose for d=256 and d=512
         for &d in &[256usize, 512usize] {
             let (b, s, h) = (2, 17, 4);
-            let q_vec: Vec<f32> = (0..(b * s * h * d)).map(|i| ((i as f32) * 0.117).sin() * 15.0).collect();
+            let q_vec: Vec<f32> = (0..(b * s * h * d))
+                .map(|i| ((i as f32) * 0.117).sin() * 15.0)
+                .collect();
             let qw_vec: Vec<f32> = (0..d).map(|i| ((i as f32) * 0.053).cos() * 2.5).collect();
             let q_in = Tensor::from_vec(q_vec, (b, s, h * d), &dev)?.to_dtype(DType::BF16)?;
             let qw = Tensor::from_vec(qw_vec, (d,), &dev)?.to_dtype(DType::BF16)?;
@@ -1166,10 +1526,17 @@ mod tests {
             let q_unfused = fused_metal_rmsnorm(&q_unfused, Some(&qw), eps)?;
             let q_unfused = crate::rope::apply_rotary_pos_emb(&q_unfused, &cos, &sin)?;
 
-            let q_fused = fused_metal_qk_rmsnorm_rope_transpose(&q_in, &qw, &cos, &sin, b, s, h, d, eps)?;
+            let q_fused =
+                fused_metal_qk_rmsnorm_rope_transpose(&q_in, &qw, &cos, &sin, b, s, h, d, eps)?;
             assert_eq!(
-                q_unfused.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                q_fused.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                q_unfused
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+                q_fused
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
                 "fused_metal_qk_rmsnorm_rope_transpose mismatch for d={d}!"
             );
 
@@ -1177,8 +1544,14 @@ mod tests {
             let v_unfused = fused_metal_rmsnorm(&v_unfused, None, eps)?;
             let v_fused = fused_metal_v_rmsnorm_transpose(&q_in, None, b, s, h, d, eps)?;
             assert_eq!(
-                v_unfused.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                v_fused.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                v_unfused
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+                v_fused
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
                 "fused_metal_v_rmsnorm_transpose mismatch for d={d}!"
             );
         }
@@ -1191,15 +1564,22 @@ mod tests {
         let ple_in = Tensor::from_vec(ple_vec, (b, s, l * d_ple), &dev)?.to_dtype(DType::BF16)?;
         let scale = (d_ple as f64).powf(-0.5);
 
-        let ple_fused = fused_metal_ple_scale_rmsnorm_transpose(&ple_in, &w, scale, eps, b, s, l, d_ple)?;
+        let ple_fused =
+            fused_metal_ple_scale_rmsnorm_transpose(&ple_in, &w, scale, eps, b, s, l, d_ple)?;
         let scaled_unfused = (&ple_in * scale)?.reshape((b, s, l, d_ple))?;
         for layer_idx in 0..l {
             let slice_unfused = scaled_unfused.narrow(2, layer_idx, 1)?.squeeze(2)?;
             let norm_unfused = fused_metal_rmsnorm(&slice_unfused, Some(&w), eps)?;
             let slice_fused = ple_fused.get(layer_idx)?;
             assert!(slice_fused.is_contiguous());
-            let v_unfused = norm_unfused.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-            let v_fused = slice_fused.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let v_unfused = norm_unfused
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let v_fused = slice_fused
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
             assert_eq!(
                 v_unfused, v_fused,
                 "fused_metal_ple_scale_rmsnorm_transpose mismatch at layer {layer_idx}!"
@@ -1207,12 +1587,20 @@ mod tests {
         }
 
         // 4. Test fused_metal_ple_geglu vs unfused gelu_tanh + broadcast_mul across [-20, 20]
-        let x_wide_vec: Vec<f32> = (0..(20 * 512)).map(|i| ((i as f32) * 0.071).sin() * 20.0).collect();
+        let x_wide_vec: Vec<f32> = (0..(20 * 512))
+            .map(|i| ((i as f32) * 0.071).sin() * 20.0)
+            .collect();
         let x_wide = Tensor::from_vec(x_wide_vec, (2, 10, 512), &dev)?.to_dtype(DType::BF16)?;
         let ref_ple_geglu = crate::ple::gelu_tanh(&x_wide)?.broadcast_mul(&res)?;
         let got_ple_geglu = fused_metal_ple_geglu(&x_wide, &res)?;
-        let v_ref_geglu = ref_ple_geglu.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-        let v_got_geglu = got_ple_geglu.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let v_ref_geglu = ref_ple_geglu
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let v_got_geglu = got_ple_geglu
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         assert_eq!(v_ref_geglu.len(), v_got_geglu.len());
         for (idx, (&a, &b)) in v_ref_geglu.iter().zip(v_got_geglu.iter()).enumerate() {
             assert_eq!(a, b, "ple_geglu mismatch at idx {idx}: {a} vs {b}");
@@ -1234,16 +1622,34 @@ mod tests {
             let inv_freq = Tensor::from_vec(inv_freq, (1, 1, half_dim), &dev)?;
             let freqs = pos_direct.broadcast_mul(&inv_freq)?;
             let emb = Tensor::cat(&[&freqs, &freqs], candle_core::D::Minus1)?;
-            let cos_direct = emb.cos()?.reshape((1, 1, seq_test, d))?.to_dtype(DType::BF16)?;
-            let sin_direct = emb.sin()?.reshape((1, 1, seq_test, d))?.to_dtype(DType::BF16)?;
+            let cos_direct = emb
+                .cos()?
+                .reshape((1, 1, seq_test, d))?
+                .to_dtype(DType::BF16)?;
+            let sin_direct = emb
+                .sin()?
+                .reshape((1, 1, seq_test, d))?
+                .to_dtype(DType::BF16)?;
             assert_eq!(
-                cos_cached.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                cos_direct.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                cos_cached
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+                cos_direct
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
                 "cos_cached vs cos_direct mismatch for d={d}!"
             );
             assert_eq!(
-                sin_cached.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                sin_direct.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                sin_cached
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+                sin_direct
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
                 "sin_cached vs sin_direct mismatch for d={d}!"
             );
         }
@@ -1255,7 +1661,10 @@ mod tests {
         assert_eq!(a.len(), b.len(), "{label}: len mismatch");
         for (i, (&va, &vb)) in a.iter().zip(b.iter()).enumerate() {
             if va != vb {
-                panic!("{label} mismatch at idx {i}: ref={va} vs got={vb} (diff={})", (va - vb).abs());
+                panic!(
+                    "{label} mismatch at idx {i}: ref={va} vs got={vb} (diff={})",
+                    (va - vb).abs()
+                );
             }
         }
     }
@@ -1270,8 +1679,12 @@ mod tests {
 
         // 1. Test fused_metal_geglu_gate_up vs fused_metal_geglu
         let (b, s, d_mlp) = (2, 13, 2048);
-        let gate_vec: Vec<f32> = (0..(b * s * d_mlp)).map(|i| ((i as f32) * 0.091).sin() * 14.0).collect();
-        let up_vec: Vec<f32> = (0..(b * s * d_mlp)).map(|i| ((i as f32) * 0.047).cos() * 9.0).collect();
+        let gate_vec: Vec<f32> = (0..(b * s * d_mlp))
+            .map(|i| ((i as f32) * 0.091).sin() * 14.0)
+            .collect();
+        let up_vec: Vec<f32> = (0..(b * s * d_mlp))
+            .map(|i| ((i as f32) * 0.047).cos() * 9.0)
+            .collect();
         let gate = Tensor::from_vec(gate_vec, (b, s, d_mlp), &dev)?.to_dtype(DType::BF16)?;
         let up = Tensor::from_vec(up_vec, (b, s, d_mlp), &dev)?.to_dtype(DType::BF16)?;
         let gate_up = Tensor::cat(&[&gate, &up], candle_core::D::Minus1)?;
@@ -1279,19 +1692,35 @@ mod tests {
         let ref_geglu = fused_metal_geglu(&gate, &up)?;
         let got_geglu = fused_metal_geglu_gate_up(&gate_up)?;
         assert_vec_eq(
-            &ref_geglu.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-            &got_geglu.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+            &ref_geglu
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            &got_geglu
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
             "fused_metal_geglu_gate_up",
         );
 
         // 2. Test fused_metal_qkv_rmsnorm_rope_transpose vs separate Q/K/V fused kernels
         for &(h_q, h_kv, d) in &[(4usize, 2usize, 256usize), (4usize, 1usize, 512usize)] {
             let (b, s) = (2, 19);
-            let q_vec: Vec<f32> = (0..(b * s * h_q * d)).map(|i| ((i as f32) * 0.113).sin() * 11.0).collect();
-            let k_vec: Vec<f32> = (0..(b * s * h_kv * d)).map(|i| ((i as f32) * 0.079).cos() * 10.0).collect();
-            let v_vec: Vec<f32> = (0..(b * s * h_kv * d)).map(|i| ((i as f32) * 0.053).sin() * 8.0).collect();
-            let qw_vec: Vec<f32> = (0..d).map(|i| ((i as f32) * 0.037).cos() * 2.0 + 1.0).collect();
-            let kw_vec: Vec<f32> = (0..d).map(|i| ((i as f32) * 0.061).sin() * 2.0 + 1.0).collect();
+            let q_vec: Vec<f32> = (0..(b * s * h_q * d))
+                .map(|i| ((i as f32) * 0.113).sin() * 11.0)
+                .collect();
+            let k_vec: Vec<f32> = (0..(b * s * h_kv * d))
+                .map(|i| ((i as f32) * 0.079).cos() * 10.0)
+                .collect();
+            let v_vec: Vec<f32> = (0..(b * s * h_kv * d))
+                .map(|i| ((i as f32) * 0.053).sin() * 8.0)
+                .collect();
+            let qw_vec: Vec<f32> = (0..d)
+                .map(|i| ((i as f32) * 0.037).cos() * 2.0 + 1.0)
+                .collect();
+            let kw_vec: Vec<f32> = (0..d)
+                .map(|i| ((i as f32) * 0.061).sin() * 2.0 + 1.0)
+                .collect();
 
             let q_in = Tensor::from_vec(q_vec, (b, s, h_q * d), &dev)?.to_dtype(DType::BF16)?;
             let k_in = Tensor::from_vec(k_vec, (b, s, h_kv * d), &dev)?.to_dtype(DType::BF16)?;
@@ -1303,8 +1732,10 @@ mod tests {
             let rope = crate::rope::RotaryEmbedding::new(d, 10_000.0, &dev)?;
             let (cos, sin) = rope.get_cos_sin(s, &dev, DType::BF16)?;
 
-            let q_ref = fused_metal_qk_rmsnorm_rope_transpose(&q_in, &qw, &cos, &sin, b, s, h_q, d, eps)?;
-            let k_ref = fused_metal_qk_rmsnorm_rope_transpose(&k_in, &kw, &cos, &sin, b, s, h_kv, d, eps)?;
+            let q_ref =
+                fused_metal_qk_rmsnorm_rope_transpose(&q_in, &qw, &cos, &sin, b, s, h_q, d, eps)?;
+            let k_ref =
+                fused_metal_qk_rmsnorm_rope_transpose(&k_in, &kw, &cos, &sin, b, s, h_kv, d, eps)?;
             let v_ref = fused_metal_v_rmsnorm_transpose(&v_in, None, b, s, h_kv, d, eps)?;
 
             let (q_got, k_got, v_got) = fused_metal_qkv_rmsnorm_rope_transpose(
@@ -1312,18 +1743,36 @@ mod tests {
             )?;
 
             assert_vec_eq(
-                &q_ref.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                &q_got.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                &q_ref
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+                &q_got
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
                 &format!("qkv_rmsnorm_rope_transpose Q d={d}"),
             );
             assert_vec_eq(
-                &k_ref.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                &k_got.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                &k_ref
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+                &k_got
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
                 &format!("qkv_rmsnorm_rope_transpose K d={d}"),
             );
             assert_vec_eq(
-                &v_ref.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                &v_got.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                &v_ref
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+                &v_got
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
                 &format!("qkv_rmsnorm_rope_transpose V d={d}"),
             );
         }
@@ -1331,11 +1780,21 @@ mod tests {
         // 3. Test fused_metal_vision_qkv_rmsnorm_rope2d_transpose vs unfused VisionAttention path
         {
             let (b, s, h, d) = (1, 36, 12, 64);
-            let q_vec: Vec<f32> = (0..(b * s * h * d)).map(|i| ((i as f32) * 0.083).sin() * 9.0).collect();
-            let k_vec: Vec<f32> = (0..(b * s * h * d)).map(|i| ((i as f32) * 0.067).cos() * 7.0).collect();
-            let v_vec: Vec<f32> = (0..(b * s * h * d)).map(|i| ((i as f32) * 0.041).sin() * 6.0).collect();
-            let qw_vec: Vec<f32> = (0..d).map(|i| ((i as f32) * 0.031).cos() * 1.5 + 1.0).collect();
-            let kw_vec: Vec<f32> = (0..d).map(|i| ((i as f32) * 0.059).sin() * 1.5 + 1.0).collect();
+            let q_vec: Vec<f32> = (0..(b * s * h * d))
+                .map(|i| ((i as f32) * 0.083).sin() * 9.0)
+                .collect();
+            let k_vec: Vec<f32> = (0..(b * s * h * d))
+                .map(|i| ((i as f32) * 0.067).cos() * 7.0)
+                .collect();
+            let v_vec: Vec<f32> = (0..(b * s * h * d))
+                .map(|i| ((i as f32) * 0.041).sin() * 6.0)
+                .collect();
+            let qw_vec: Vec<f32> = (0..d)
+                .map(|i| ((i as f32) * 0.031).cos() * 1.5 + 1.0)
+                .collect();
+            let kw_vec: Vec<f32> = (0..d)
+                .map(|i| ((i as f32) * 0.059).sin() * 1.5 + 1.0)
+                .collect();
 
             let q_in = Tensor::from_vec(q_vec, (b, s, h * d), &dev)?.to_dtype(DType::BF16)?;
             let k_in = Tensor::from_vec(k_vec, (b, s, h * d), &dev)?.to_dtype(DType::BF16)?;
@@ -1371,18 +1830,36 @@ mod tests {
             )?;
 
             assert_vec_eq(
-                &q_ref.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                &q_got.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                &q_ref
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+                &q_got
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
                 "vision_qkv_rmsnorm_rope2d_transpose Q",
             );
             assert_vec_eq(
-                &k_ref.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                &k_got.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                &k_ref
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+                &k_got
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
                 "vision_qkv_rmsnorm_rope2d_transpose K",
             );
             assert_vec_eq(
-                &v_ref.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                &v_got.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                &v_ref
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+                &v_got
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
                 "vision_qkv_rmsnorm_rope2d_transpose V",
             );
         }
@@ -1390,8 +1867,12 @@ mod tests {
         // 4. Test fused_metal_audio_glu_causal_dwconv5 vs unfused AudioLightConv1d GLU + 5-tap conv
         {
             let (b, s, c) = (1, 25, 1024);
-            let pw1_vec: Vec<f32> = (0..(b * s * 2 * c)).map(|i| ((i as f32) * 0.043).sin() * 5.0).collect();
-            let dw_vec: Vec<f32> = (0..(c * 5)).map(|i| ((i as f32) * 0.071).cos() * 0.5).collect();
+            let pw1_vec: Vec<f32> = (0..(b * s * 2 * c))
+                .map(|i| ((i as f32) * 0.043).sin() * 5.0)
+                .collect();
+            let dw_vec: Vec<f32> = (0..(c * 5))
+                .map(|i| ((i as f32) * 0.071).cos() * 0.5)
+                .collect();
             let pw1 = Tensor::from_vec(pw1_vec, (b, s, 2 * c), &dev)?.to_dtype(DType::BF16)?;
             let dw_w = Tensor::from_vec(dw_vec, (1, c, 5), &dev)?.to_dtype(DType::BF16)?;
 
@@ -1399,18 +1880,32 @@ mod tests {
             let half1 = pw1.narrow(candle_core::D::Minus1, c, c)?;
             let sig = candle_nn::ops::sigmoid(&half1)?;
             let glu_out = (half0 * sig)?;
-            let dw_in = glu_out.transpose(1, 2)?.contiguous()?.pad_with_zeros(candle_core::D::Minus1, 4, 0)?;
-            let mut dw_ref = dw_in.narrow(2, 0, s)?.broadcast_mul(&dw_w.narrow(2, 0, 1)?)?;
+            let dw_in = glu_out.transpose(1, 2)?.contiguous()?.pad_with_zeros(
+                candle_core::D::Minus1,
+                4,
+                0,
+            )?;
+            let mut dw_ref = dw_in
+                .narrow(2, 0, s)?
+                .broadcast_mul(&dw_w.narrow(2, 0, 1)?)?;
             for k in 1..5 {
-                let term = dw_in.narrow(2, k, s)?.broadcast_mul(&dw_w.narrow(2, k, 1)?)?;
+                let term = dw_in
+                    .narrow(2, k, s)?
+                    .broadcast_mul(&dw_w.narrow(2, k, 1)?)?;
                 dw_ref = (dw_ref + term)?;
             }
             let dw_ref = dw_ref.transpose(1, 2)?.contiguous()?;
 
             let dw_got = fused_metal_audio_glu_causal_dwconv5(&pw1, &dw_w)?;
             assert_vec_eq(
-                &dw_ref.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
-                &dw_got.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                &dw_ref
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+                &dw_got
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
                 "fused_metal_audio_glu_causal_dwconv5",
             );
         }
@@ -1418,9 +1913,14 @@ mod tests {
         // 5. Test fused_metal_q8_0_matmul (both MV m=1 and MM m=19) vs Candle QMatMul F32->BF16
         {
             let (out_dim, in_dim) = (128, 256);
-            let w_f32_vec: Vec<f32> = (0..(out_dim * in_dim)).map(|i| ((i as f32) * 0.031).sin() * 1.5).collect();
+            let w_f32_vec: Vec<f32> = (0..(out_dim * in_dim))
+                .map(|i| ((i as f32) * 0.031).sin() * 1.5)
+                .collect();
             let w_cpu = Tensor::from_vec(w_f32_vec, (out_dim, in_dim), &Device::Cpu)?;
-            let qt_cpu = candle_core::quantized::QTensor::quantize(&w_cpu, candle_core::quantized::GgmlDType::Q8_0)?;
+            let qt_cpu = candle_core::quantized::QTensor::quantize(
+                &w_cpu,
+                candle_core::quantized::GgmlDType::Q8_0,
+            )?;
             let raw_bytes = qt_cpu.data()?.into_owned();
             let row_bytes = (in_dim / 32) * 34;
             let q8_bytes_metal = Tensor::from_slice(&raw_bytes, (out_dim, row_bytes), &dev)?;
@@ -1433,14 +1933,24 @@ mod tests {
             let qm_ref = candle_core::quantized::QMatMul::from_qtensor(qt_metal)?;
 
             for &m in &[1usize, 19usize, 64usize] {
-                let x_vec: Vec<f32> = (0..(m * in_dim)).map(|i| ((i as f32) * 0.059).cos() * 3.0).collect();
-                let x_bf16 = Tensor::from_vec(x_vec, (1, m, in_dim), &dev)?.to_dtype(DType::BF16)?;
+                let x_vec: Vec<f32> = (0..(m * in_dim))
+                    .map(|i| ((i as f32) * 0.059).cos() * 3.0)
+                    .collect();
+                let x_bf16 =
+                    Tensor::from_vec(x_vec, (1, m, in_dim), &dev)?.to_dtype(DType::BF16)?;
 
-                let ref_out = candle_core::Module::forward(&qm_ref, &x_bf16.to_dtype(DType::F32)?)?.to_dtype(DType::BF16)?;
+                let ref_out = candle_core::Module::forward(&qm_ref, &x_bf16.to_dtype(DType::F32)?)?
+                    .to_dtype(DType::BF16)?;
                 let got_out = fused_metal_q8_0_matmul(&q8_bytes_metal, &x_bf16, out_dim, in_dim)?;
 
-                let ref_vec = ref_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-                let got_vec = got_out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let ref_vec = ref_out
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?;
+                let got_vec = got_out
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?;
                 if m == 1 {
                     assert_vec_eq(&ref_vec, &got_vec, "fused_metal_q8_0_matmul m=1");
                 } else {
@@ -1460,5 +1970,3 @@ mod tests {
         Ok(())
     }
 }
-
-

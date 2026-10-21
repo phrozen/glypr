@@ -1,7 +1,6 @@
 use glypr_core::util::{
-    binary_cosine_similarity, cosine_similarity, hamming_distance,
-    int8_cosine_similarity, int8_dot_product, l2_normalize, quantize_binary,
-    quantize_int8,
+    binary_cosine_similarity, cosine_similarity, hamming_distance, int8_cosine_similarity,
+    int8_dot_product, l2_normalize, quantize_binary, quantize_int8,
 };
 use std::time::Instant;
 
@@ -9,16 +8,24 @@ use std::time::Instant;
 fn bench_quantization_and_similarity_across_dimensions() {
     let dimensions = [768, 512, 256, 128];
 
-    println!("\n==========================================================================================");
-    println!("                           QUANTIZATION & DISTANCE BENCHMARKS                             ");
-    println!("==========================================================================================");
+    println!(
+        "\n=========================================================================================="
+    );
+    println!(
+        "                           QUANTIZATION & DISTANCE BENCHMARKS                             "
+    );
+    println!(
+        "=========================================================================================="
+    );
 
     // =========================================================================
     // PART 1: QUANTIZATION ENCODING BENCHMARK (Float32 -> Quantized format)
     // =========================================================================
     println!("\n--- Part 1: Quantization Encoding Latency & Throughput ---");
-    println!("{:<6} | {:<16} | {:<14} | {:<14} | {:<12}",
-        "Dim", "Quant Scheme", "Latency (ns)", "Throughput (Mv/s)", "Relative Speed");
+    println!(
+        "{:<6} | {:<16} | {:<14} | {:<14} | {:<12}",
+        "Dim", "Quant Scheme", "Latency (ns)", "Throughput (Mv/s)", "Relative Speed"
+    );
     println!("{}", "-".repeat(74));
 
     let enc_iters = 50_000;
@@ -47,10 +54,18 @@ fn bench_quantization_and_similarity_across_dimensions() {
         let bin_ns = t0.elapsed().as_nanos() as f64 / enc_iters as f64;
         let bin_mvecs = 1_000.0 / bin_ns;
 
-        println!("{:<6} | {:<16} | {:<14.1} | {:<14.2} | {:<12}",
-            dim, "INT8 (1 byte/d)", int8_ns, int8_mvecs, "1.00x (baseline)");
-        println!("{:<6} | {:<16} | {:<14.1} | {:<14.2} | {:<10.2}x",
-            dim, "Binary (1 bit/d)", bin_ns, bin_mvecs, bin_ns / int8_ns);
+        println!(
+            "{:<6} | {:<16} | {:<14.1} | {:<14.2} | {:<12}",
+            dim, "INT8 (1 byte/d)", int8_ns, int8_mvecs, "1.00x (baseline)"
+        );
+        println!(
+            "{:<6} | {:<16} | {:<14.1} | {:<14.2} | {:<10.2}x",
+            dim,
+            "Binary (1 bit/d)",
+            bin_ns,
+            bin_mvecs,
+            bin_ns / int8_ns
+        );
         println!("{}", "-".repeat(74));
     }
 
@@ -58,8 +73,10 @@ fn bench_quantization_and_similarity_across_dimensions() {
     // PART 2: DISTANCE & SIMILARITY COMPUTE BENCHMARK
     // =========================================================================
     println!("\n--- Part 2: Similarity & Distance Compute Latency & Throughput ---");
-    println!("{:<6} | {:<22} | {:<14} | {:<14} | {:<12}",
-        "Dim", "Distance / Similarity", "Latency (ns)", "Throughput (Mop/s)", "Speedup vs F32");
+    println!(
+        "{:<6} | {:<22} | {:<14} | {:<14} | {:<12}",
+        "Dim", "Distance / Similarity", "Latency (ns)", "Throughput (Mop/s)", "Speedup vs F32"
+    );
     println!("{}", "-".repeat(80));
 
     let sim_iters = 500_000;
@@ -122,16 +139,42 @@ fn bench_quantization_and_similarity_across_dimensions() {
         let bin_cos_ns = t0.elapsed().as_nanos() as f64 / sim_iters as f64;
         let bin_cos_mops = 1_000.0 / bin_cos_ns;
 
-        println!("{:<6} | {:<22} | {:<14.2} | {:<14.1} | {:<12}",
-            dim, "Float32 Cosine", f32_ns, f32_mops, "1.00x");
-        println!("{:<6} | {:<22} | {:<14.2} | {:<14.1} | {:<12.2}x",
-            dim, "INT8 Dot (SIMD)", int8_dot_ns, int8_dot_mops, f32_ns / int8_dot_ns);
-        println!("{:<6} | {:<22} | {:<14.2} | {:<14.1} | {:<12.2}x",
-            dim, "INT8 Cosine (3x dots)", int8_cos_ns, int8_cos_mops, f32_ns / int8_cos_ns);
-        println!("{:<6} | {:<22} | {:<14.2} | {:<14.1} | {:<12.2}x",
-            dim, "Binary POPCNT Hamming", bin_hamm_ns, bin_hamm_mops, f32_ns / bin_hamm_ns);
-        println!("{:<6} | {:<22} | {:<14.2} | {:<14.1} | {:<12.2}x",
-            dim, "Binary Angular Cosine", bin_cos_ns, bin_cos_mops, f32_ns / bin_cos_ns);
+        println!(
+            "{:<6} | {:<22} | {:<14.2} | {:<14.1} | {:<12}",
+            dim, "Float32 Cosine", f32_ns, f32_mops, "1.00x"
+        );
+        println!(
+            "{:<6} | {:<22} | {:<14.2} | {:<14.1} | {:<12.2}x",
+            dim,
+            "INT8 Dot (SIMD)",
+            int8_dot_ns,
+            int8_dot_mops,
+            f32_ns / int8_dot_ns
+        );
+        println!(
+            "{:<6} | {:<22} | {:<14.2} | {:<14.1} | {:<12.2}x",
+            dim,
+            "INT8 Cosine (3x dots)",
+            int8_cos_ns,
+            int8_cos_mops,
+            f32_ns / int8_cos_ns
+        );
+        println!(
+            "{:<6} | {:<22} | {:<14.2} | {:<14.1} | {:<12.2}x",
+            dim,
+            "Binary POPCNT Hamming",
+            bin_hamm_ns,
+            bin_hamm_mops,
+            f32_ns / bin_hamm_ns
+        );
+        println!(
+            "{:<6} | {:<22} | {:<14.2} | {:<14.1} | {:<12.2}x",
+            dim,
+            "Binary Angular Cosine",
+            bin_cos_ns,
+            bin_cos_mops,
+            f32_ns / bin_cos_ns
+        );
         println!("{}", "-".repeat(80));
     }
 }

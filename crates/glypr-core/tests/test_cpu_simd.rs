@@ -30,7 +30,11 @@ fn test_cpu_rmsnorm_parity_with_candle() -> anyhow::Result<()> {
     }
 
     println!("RMSNorm max diff: {:e}", max_diff);
-    assert!(max_diff < 1e-5, "Max diff {:e} exceeded tolerance 1e-5", max_diff);
+    assert!(
+        max_diff < 1e-5,
+        "Max diff {:e} exceeded tolerance 1e-5",
+        max_diff
+    );
     Ok(())
 }
 
@@ -69,6 +73,10 @@ fn test_cpu_geglu_parity_with_candle() -> anyhow::Result<()> {
     }
 
     println!("GeGLU max diff: {:e}", max_diff);
-    assert!(max_diff < 1e-5, "Max diff {:e} exceeded tolerance 1e-5", max_diff);
+    assert!(
+        max_diff < 1e-5,
+        "Max diff {:e} exceeded tolerance 1e-5",
+        max_diff
+    );
     Ok(())
 }

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use candle_core::{DType, Device};
-use glypr_core::{cosine_similarity, GlyprEmbedder};
+use glypr_core::{GlyprEmbedder, cosine_similarity};
 use safetensors::SafeTensors;
 use std::fs;
 use std::path::PathBuf;
@@ -60,7 +60,10 @@ fn test_golden_parity_queries_and_docs() -> Result<()> {
         Ok(f32_slice.to_vec())
     };
 
-    println!("Initializing GlyprEmbedder on CPU (F32) from {:?}", snapshot_dir);
+    println!(
+        "Initializing GlyprEmbedder on CPU (F32) from {:?}",
+        snapshot_dir
+    );
     let device = Device::Cpu;
     let embedder = GlyprEmbedder::load(&snapshot_dir, &device, DType::F32)?;
 
@@ -71,14 +74,20 @@ fn test_golden_parity_queries_and_docs() -> Result<()> {
     let golden_768 = load_golden("search_query_1_768d")?;
 
     let sim_to_golden = cosine_similarity(&rust_768, &golden_768);
-    println!("  search_query_1 (768d) Cosine similarity to Golden: {:.6}", sim_to_golden);
+    println!(
+        "  search_query_1 (768d) Cosine similarity to Golden: {:.6}",
+        sim_to_golden
+    );
 
     let max_abs_diff = rust_768
         .iter()
         .zip(golden_768.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
-    println!("  search_query_1 (768d) Max absolute diff: {:.6}", max_abs_diff);
+    println!(
+        "  search_query_1 (768d) Max absolute diff: {:.6}",
+        max_abs_diff
+    );
 
     // Tightened four-9s parity assertion: cosine similarity with Python golden reference >= 0.9999
     assert!(
@@ -95,7 +104,10 @@ fn test_golden_parity_queries_and_docs() -> Result<()> {
     let golden_doc_768 = load_golden("search_doc_1_titled_768d")?;
 
     let doc_sim_to_golden = cosine_similarity(&rust_doc_768, &golden_doc_768);
-    println!("  search_doc_1_titled (768d) Cosine similarity to Golden: {:.6}", doc_sim_to_golden);
+    println!(
+        "  search_doc_1_titled (768d) Cosine similarity to Golden: {:.6}",
+        doc_sim_to_golden
+    );
     assert!(
         doc_sim_to_golden >= 0.9999,
         "search_doc_1_titled cosine similarity to golden ({:.6}) below four-9s threshold 0.9999",
@@ -108,7 +120,10 @@ fn test_golden_parity_queries_and_docs() -> Result<()> {
         let golden_mrl = load_golden(&format!("search_query_1_{}d", dim))?;
         assert_eq!(rust_mrl.len(), dim);
         let mrl_sim = cosine_similarity(&rust_mrl, &golden_mrl);
-        println!("  search_query_1 ({}d) Cosine similarity to Golden: {:.6}", dim, mrl_sim);
+        println!(
+            "  search_query_1 ({}d) Cosine similarity to Golden: {:.6}",
+            dim, mrl_sim
+        );
         assert!(
             mrl_sim >= 0.9999,
             "search_query_1 ({}d) cosine similarity ({:.6}) below four-9s threshold 0.9999",
@@ -119,7 +134,10 @@ fn test_golden_parity_queries_and_docs() -> Result<()> {
 
     // Test Case 4: Semantic Retrieval Cosine Similarity Separation
     let query_doc_sim = cosine_similarity(&rust_768, &rust_doc_768);
-    println!("  Query vs Titled Doc semantic similarity: {:.6}", query_doc_sim);
+    println!(
+        "  Query vs Titled Doc semantic similarity: {:.6}",
+        query_doc_sim
+    );
     assert!(
         query_doc_sim > 0.80,
         "Expected high semantic similarity between query and relevant document (> 0.80), got {:.4}",
@@ -139,7 +157,10 @@ fn test_golden_parity_metal() -> Result<()> {
     };
     let golden_dir = get_golden_dir();
     let golden_weights_path = golden_dir.join("baseline_vectors.safetensors");
-    assert!(golden_weights_path.exists(), "baseline_vectors.safetensors missing");
+    assert!(
+        golden_weights_path.exists(),
+        "baseline_vectors.safetensors missing"
+    );
 
     let golden_bytes = fs::read(&golden_weights_path)?;
     let golden_tensors = SafeTensors::deserialize(&golden_bytes)?;
@@ -155,7 +176,10 @@ fn test_golden_parity_metal() -> Result<()> {
     embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
     let rust_chunked = embedder.embed_query(query_text, "SearchQuery", Some(768))?;
     let sim_chunked = cosine_similarity(&rust_chunked, &golden_768);
-    println!("  Metal (BF16, ChunkedSliding) Cosine similarity to Golden: {:.6}", sim_chunked);
+    println!(
+        "  Metal (BF16, ChunkedSliding) Cosine similarity to Golden: {:.6}",
+        sim_chunked
+    );
     assert!(
         sim_chunked >= 0.9999,
         "Metal ChunkedSliding cosine similarity to golden ({:.6}) below 0.9999",
@@ -167,7 +191,10 @@ fn test_golden_parity_metal() -> Result<()> {
         embedder.set_attention_mode(glypr_core::AttentionMode::MetalFlash);
         let rust_flash = embedder.embed_query(query_text, "SearchQuery", Some(768))?;
         let sim_flash = cosine_similarity(&rust_flash, &golden_768);
-        println!("  Metal (BF16, MetalFlash)     Cosine similarity to Golden: {:.6}", sim_flash);
+        println!(
+            "  Metal (BF16, MetalFlash)     Cosine similarity to Golden: {:.6}",
+            sim_flash
+        );
         assert!(
             sim_flash >= 0.9999,
             "MetalFlash cosine similarity to golden ({:.6}) below 0.9999",

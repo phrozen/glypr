@@ -18,7 +18,11 @@ fn bench_latencies(embedder: &GlyprEmbedder, name: &str) -> Result<serde_json::V
     println!("\n--- Benchmarking Latencies on {} ---", name);
 
     let test_corpora = [
-        ("short_query (~10 words)", "What is the capital and largest city of France?", true),
+        (
+            "short_query (~10 words)",
+            "What is the capital and largest city of France?",
+            true,
+        ),
         (
             "medium_passage (~50 words)",
             "Photosynthesis is the biological process used by plants, algae, and certain bacteria to harness energy from sunlight and turn it into chemical energy. Photosynthesis in green plants involves the chlorophyll pigment absorbing light energy.",
