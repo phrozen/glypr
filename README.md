@@ -47,14 +47,14 @@ Unlike typical runtime wrappers, `glypr` deploys from a **single self-contained 
 
 ## Performance Highlights
 
-| Benchmark Target | Metric | PyTorch MPS (Golden) | `glypr` Engine | Relative Gain | Full Empirical Data |
+| Benchmark Target | Metric | Baseline / Reference | `glypr` Engine | Relative Gain | Full Empirical Data |
 | :--- | :--- | :---: | :---: | :---: | :---: |
-| **8K Context Tokens** | Latency / Throughput | 875.00 ms (9,360 tok/s) | **615.30 ms (13,314 tok/s)** | **1.42× faster** 🏆 | [Leaderboards](docs/benchmarks/leaderboards.md#head-to-head-hardware-performance-8192-tokens) |
-| **Peak Metal VRAM (8K)** | Unified Memory Usage | 6,592.8 MB (6.44 GB) | **1,473.5 MB (1.44 GB)** | **5.1 GB saved (-77%)** | [Memory Guide](docs/benchmarks/memory-and-vram.md#3-empirical-hardware-memory-scorecard-apple-silicon) |
-| **Vision Tower (140 Budget)**| Image Encoding Latency | 24.03 ms (Metal ViT) | **11.17 ms (Apple Neural Engine)**| **2.2× faster** 🚀 | [ANE Scorecard](docs/benchmarks/leaderboards.md#6-apple-neural-engine-ane-hardware-scorecard--mathematical-parity) |
+| **8K Context Tokens** | Latency / Throughput | 875.00 ms (PyTorch MPS) | **615.30 ms (Q8_0 Flash)** | **1.42× faster** 🏆 | [Leaderboards](docs/benchmarks/leaderboards.md#head-to-head-hardware-performance-8192-tokens) |
+| **Peak Metal VRAM (8K)** | Unified Memory Usage | 6,592.8 MB (PyTorch MPS) | **1,473.5 MB (Metal Flash)** | **5.1 GB saved (-77%)** | [Memory Guide](docs/benchmarks/memory-and-vram.md#3-empirical-hardware-memory-scorecard-apple-silicon) |
+| **Vision Tower (140 Budget)**| Image Encoding Latency | 24.03 ms (Metal GPU ViT) | **11.17 ms (Apple Neural Engine)** | **2.2× faster** 🚀 | [ANE Scorecard](docs/benchmarks/leaderboards.md#6-apple-neural-engine-ane-hardware-scorecard--mathematical-parity) |
 | **Text Backbone (512 RAG)** | Fixed Sequence Latency | 21.81 ms (Metal GPU) | **8.24 ms (Apple Neural Engine)** | **2.6× faster** 🚀 | [ANE Scorecard](docs/benchmarks/leaderboards.md#b-resident-text-backbone-static-512-tokens) |
 | **CPU SIMD GeGLU Kernel** | Isolated Operator Time | 21.51 ms (Candle CPU) | **2.05 ms (`pulp` SIMD)** | **10.49× faster** | [CPU Benchmarks](docs/benchmarks/leaderboards.md#universal-cross-platform-cpu-simd-scaling-pulp--rayon) |
-| **Multilingual Parity (292)**| Cosine Similarity | 1.000000 (Reference) | **0.999951 (Average)** | **Exact Parity (Four-9s)** | [Parity Suite](docs/benchmarks/leaderboards.md#total-execution-time-scorecard-292-golden-parity-vectors) |
+| **Multilingual Parity (292)**| Cosine Similarity | 1.000000 (PyTorch Golden) | **0.999951 (Average)** | **Exact Parity (Four-9s)** | [Parity Suite](docs/benchmarks/leaderboards.md#total-execution-time-scorecard-292-golden-parity-vectors) |
 
 > 📖 **Full Benchmark Reports:** See [`docs/benchmarks/leaderboards.md`](docs/benchmarks/leaderboards.md) for context scaling sweeps, MTEB/MMEB comparisons, and the 24-case multimodal parity scorecard.
 
