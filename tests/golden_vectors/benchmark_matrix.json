@@ -1,0 +1,56 @@
+{
+  "python": {
+    "text_512": {
+      "latency_ms": 24.65
+    },
+    "text_8192": {
+      "latency_ms": 845.83
+    },
+    "peak_memory_8k_mb": 1744.9,
+    "vision_140": {
+      "latency_ms": 74.66
+    },
+    "vision_280": {
+      "latency_ms": 73.06
+    },
+    "vision_560": {
+      "latency_ms": 73.84
+    },
+    "hybrid_512": {
+      "latency_ms": 74.38
+    },
+    "hybrid_long": {
+      "latency_ms": 165.2
+    }
+  },
+  "metal": {
+    "text_512_ms": 25.72,
+    "vision_140_ms": 4.66,
+    "vision_280_ms": 36.54,
+    "hybrid_512_ms": 50.79,
+    "text_8192_ms": 644.36,
+    "vision_560_ms": 86.29,
+    "hybrid_long_ms": 145.28,
+    "peak_memory_8k_mb": 2130.9
+  },
+  "ane": {
+    "text_512_ms": 8.27,
+    "vision_140_ms": 11.07,
+    "vision_280_ms": 23.36,
+    "hybrid_512_ms": 24.67,
+    "text_8192_ms": null,
+    "vision_560_ms": null,
+    "hybrid_long_ms": 122.76,
+    "peak_memory_8k_mb": null
+  },
+  "cpu": {
+    "text_512_ms": 497.61,
+    "vision_140_ms": 1276.56,
+    "vision_280_ms": 3757.4,
+    "hybrid_512_ms": null,
+    "text_8192_ms": null,
+    "vision_560_ms": null,
+    "hybrid_long_ms": null,
+    "peak_memory_8k_mb": 7769.9
+  }
+}

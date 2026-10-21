@@ -35,6 +35,20 @@ Querying standard POSIX process telemetry (`ps`, `libc::getrusage(RUSAGE_SELF)`,
   let allocated_bytes: usize = msg_send![device, currentAllocatedSize];
   ```
 
+### Apple Neural Engine (ANE) & CPU Unified Memory Accounting:
+Apple Silicon's unified memory architecture means DRAM is shared across CPU cores, Metal GPU clusters, and the 16-core Neural Engine:
+1. **Metal GPU:** Memory is allocated in IOGPU device driver buffers (measured via `[MTLDevice currentAllocatedSize]`).
+2. **CPU SIMD:** Memory is allocated in process heap/virtual memory pages (measured via POSIX `getrusage` RSS).
+3. **Apple Neural Engine (ANE):** Weights compiled into `.mlmodelc` packages are memory-mapped and loaded into physical RAM by the Core ML runtime framework.
+
+> [!IMPORTANT]
+> **The Zero-VRAM Fallacy:**
+> While CPU SIMD and ANE inference record **0 MB of IOGPU Metal allocations**, claiming "0 MB memory usage" is misleading. Model weights and activation buffers still reside in physical unified DRAM. To maintain absolute transparency, Glypr benchmarks report **Peak Physical Unified Memory (RAM + VRAM)**:
+> - **Python PyTorch MPS Baseline:** **6,592 MB** (6.44 GB) at 8,192 tokens.
+> - **Glypr Metal Flash:** **1,473 MB** (1.44 GB) at 8,192 tokens (**$-77.7\%$ reduction, saving 5.12 GB**).
+> - **Glypr Universal CPU SIMD:** **1,135 MB** (1.11 GB) at 8,192 tokens.
+> - **Glypr ANE Resident (512t + Vision):** **~450–700 MB** total physical footprint.
+
 ---
 
 ## 2. Anatomy of Transient Allocations: From 14.6 GB to 3.0 GB

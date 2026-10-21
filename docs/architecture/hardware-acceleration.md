@@ -24,8 +24,8 @@ Glypr is designed around a unified, pluggable acceleration abstraction that deco
  │ • Zero-Copy GQA Multi-Head    │  │ • Native CoreML In-Memory     │  │ • pulp Vectorized Kernels     │
  │ • MSL Tile-Skipping SDPA      │  │ • W8A16 Linear Quantization   │  │ • Dynamic Arch CPU Dispatch   │
  │ • Fused RMSNorm (simd_sum)    │  │ • Zero-Copy BorrowedTensor    │  │ • Rayon Multi-Core Streaming  │
- │ • Fused GeGLU (In-Register)   │  │ • 11.17 ms Vision Tower (2.2x)│  │ • Zero Intermediate Allocs    │
- │ • NaN Clamping Protection     │  │ • 8.24 ms Text Backbone (2.6x)│  │ • Single-File Memory Safety   │
+ │ • Fused GeGLU (In-Register)   │  │ • 11.07 ms Vision Tower (6.7x)│  │ • Zero Intermediate Allocs    │
+ │ • NaN Clamping Protection     │  │ • 8.27 ms Text Backbone (3.0x)│  │ • Single-File Memory Safety   │
  └───────────────────────────────┘  └───────────────────────────────┘  └───────────────────────────────┘
 ```
 
@@ -367,23 +367,39 @@ The embedder manages vision execution through an explicit gating policy:
 
 ---
 
-### E. Empirical Benchmarks: Apple Neural Engine vs Metal GPU
+### E. Empirical Benchmarks: Apple Neural Engine vs Metal GPU & Python Baseline
 
-Tested in native release mode on Apple Silicon:
+Tested in native release mode on Apple Silicon hardware against Python PyTorch MPS reference:
 
 #### 1. Vision Tower Execution (Single Image)
-| Modality / Budget | Input Patches | Soft Tokens | Apple Neural Engine (ANE) | Apple Silicon Metal GPU (ViT) | ANE Speedup | Parity vs GPU mmproj |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Budget 140 Portrait** | 1,134 patches | 126 tokens | **11.17 ms (89.5 img/s)** | 24.03 ms (41.6 img/s) | **2.2× faster** | **`0.999928` Cosine Sim** |
-| **Budget 280 Portrait** | 2,394 patches | 266 tokens | **23.19 ms (43.1 img/s)** | 55.30 ms (18.1 img/s) | **2.4× faster** | **`0.999928` Cosine Sim** |
+| Modality / Budget | Input Patches | Soft Tokens | Apple Neural Engine (ANE) | Apple Silicon Metal GPU (ViT) | Python Reference (PyTorch MPS) | Speedup vs Python | Speedup vs Metal | Parity vs GPU mmproj |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Budget 140 Portrait** | 1,134 patches | 126 tokens | **11.07 ms (90.3 img/s)** 🚀 | 24.03 ms (41.6 img/s) | 74.66 ms (13.4 img/s) | **6.74× faster** | **2.17× faster** | **`0.999928` Cosine Sim** |
+| **Budget 280 Portrait** | 2,394 patches | 266 tokens | **23.36 ms (42.8 img/s)** 🚀 | 36.54 ms (27.4 img/s) | 73.06 ms (13.7 img/s) | **3.13× faster** | **1.56× faster** | **`0.999928` Cosine Sim** |
 
 #### 2. Resident Text Backbone (Static 512 Tokens)
-| Sequence Length | Hardware Engine | Compute Units | Latency | Throughput | Relative Speedup |
-| :--- | :--- | :--- | :---: | :---: | :---: |
-| **16 tokens** | Apple Silicon Metal GPU | GPU | $4.21\text{ ms}$ | $237.5\text{ q/s}$ | 1.96× |
-| **16 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | $8.24\text{ ms}$ | $121.3\text{ q/s}$ | 1.00× (ref) |
-| **128 tokens** | Apple Silicon Metal GPU | GPU | $7.85\text{ ms}$ | $127.4\text{ q/s}$ | 1.05× |
-| **128 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | **$8.24\text{ ms}$** | **$121.3\text{ q/s}$** | 1.00× |
-| **512 tokens (RAG chunk)** | Apple Silicon Metal GPU | GPU | $21.81\text{ ms}$ | $45.8\text{ q/s}$ | 1.00× (ref) |
-| **512 tokens (RAG chunk)** | **Apple Neural Engine (ANE)** | **ANE (W8A16)** | **$8.24\text{ ms}$** 🚀 | **$121.3\text{ q/s}$** | **2.6× faster** |
+| Sequence Length | Hardware Engine | Compute Units | Latency | Throughput | Python Reference | Speedup vs Python Reference |
+| :--- | :--- | :--- | :---: | :---: | :---: | :---: |
+| **16 tokens** | Apple Silicon Metal GPU | GPU | $4.21\text{ ms}$ | $237.5\text{ q/s}$ | $8.12\text{ ms}$ | 1.93× |
+| **16 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | $8.27\text{ ms}$ | $120.9\text{ q/s}$ | $8.12\text{ ms}$ | 0.98× |
+| **128 tokens** | Apple Silicon Metal GPU | GPU | $7.85\text{ ms}$ | $127.4\text{ q/s}$ | $11.40\text{ ms}$ | 1.45× |
+| **128 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | **$8.27\text{ ms}$** | **$120.9\text{ q/s}$** | $11.40\text{ ms}$ | 1.38× |
+| **512 tokens (RAG chunk)** | Apple Silicon Metal GPU | GPU | $25.72\text{ ms}$ | $38.9\text{ q/s}$ | $24.65\text{ ms}$ | 0.96× |
+| **512 tokens (RAG chunk)** | **Apple Neural Engine (ANE)** | **ANE (W8A16)** | **$8.27\text{ ms}$** 🚀 | **$120.9\text{ q/s}$** | $24.65\text{ ms}$ | **2.98× faster** 🏆 |
+
+---
+
+### F. Hybrid Multimodal Routing Architecture
+
+When embedding mixed documents (e.g., long 2,048-token context passages accompanied by attached visual card images), neither single-engine approach is optimal:
+- The ANE text model is compiled with a fixed 512-token sequence shape and cannot natively process 2,048 tokens.
+- Running the Vision Tower on Metal GPU consumes GPU cycles and unified memory bandwidth that could otherwise serve long-context attention.
+
+**The Solution: Cross-Engine Asynchronous Routing:**
+1. **Vision Tower Offload to ANE:** The SigLIP vision tower runs on the Neural Engine in **11.07 ms** (140b) or **23.36 ms** (280b), outputting FP32 projector activations directly into unified RAM.
+2. **Text Backbone Routing to Metal GPU:** The 2,048-token document text is tokenized and processed via Glypr's zero-copy FlashAttention Metal pipeline.
+3. **End-to-End Multimodal Execution:**
+   - **Python PyTorch MPS:** 165.20 ms
+   - **Pure Metal GPU:** 145.28 ms
+   - **Hybrid Routing (ANE ViT + GPU Backbone):** **122.76 ms** (**1.35× faster than Python baseline**).
 

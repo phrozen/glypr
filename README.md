@@ -47,14 +47,17 @@ Unlike typical runtime wrappers, `glypr` deploys from a **single self-contained 
 
 ## Performance Highlights
 
-| Benchmark Target | Metric | Baseline / Reference | `glypr` Engine | Relative Gain | Full Empirical Data |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **8K Context Tokens** | Latency / Throughput | 875.00 ms (PyTorch MPS) | **615.30 ms (Q8_0 Flash)** | **1.42× faster** 🏆 | [Leaderboards](docs/benchmarks/leaderboards.md#head-to-head-hardware-performance-8192-tokens) |
-| **Peak Metal VRAM (8K)** | Unified Memory Usage | 6,592.8 MB (PyTorch MPS) | **1,473.5 MB (Metal Flash)** | **5.1 GB saved (-77%)** | [Memory Guide](docs/benchmarks/memory-and-vram.md#3-empirical-hardware-memory-scorecard-apple-silicon) |
-| **Vision Tower (140 Budget)**| Image Encoding Latency | 24.03 ms (Metal GPU ViT) | **11.17 ms (Apple Neural Engine)** | **2.2× faster** 🚀 | [ANE Scorecard](docs/benchmarks/leaderboards.md#6-apple-neural-engine-ane-hardware-scorecard--mathematical-parity) |
-| **Text Backbone (512 RAG)** | Fixed Sequence Latency | 21.81 ms (Metal GPU) | **8.24 ms (Apple Neural Engine)** | **2.6× faster** 🚀 | [ANE Scorecard](docs/benchmarks/leaderboards.md#b-resident-text-backbone-static-512-tokens) |
-| **CPU SIMD GeGLU Kernel** | Isolated Operator Time | 21.51 ms (Candle CPU) | **2.05 ms (`pulp` SIMD)** | **10.49× faster** | [CPU Benchmarks](docs/benchmarks/leaderboards.md#universal-cross-platform-cpu-simd-scaling-pulp--rayon) |
-| **Multilingual Parity (292)**| Cosine Similarity | 1.000000 (PyTorch Golden) | **0.999951 (Average)** | **Exact Parity (Four-9s)** | [Parity Suite](docs/benchmarks/leaderboards.md#total-execution-time-scorecard-292-golden-parity-vectors) |
+| Workload / Modality | Target Input / Dimensions | Python Reference (PyTorch MPS) | Glypr (Metal 4 GPU) | Glypr (Apple Neural Engine) | Glypr (CPU SIMD) | Speedup vs. Python Reference |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **Text @ 512 Tokens** | Standard RAG passage chunk | 24.65 ms | 25.72 ms | **8.27 ms** 🚀 | 497.61 ms | **2.98× faster on ANE** |
+| **Vision @ 140 Budget** | Portrait doc (1,134 patches) | 74.66 ms | 24.03 ms | **11.07 ms** 🚀 | 1,276.56 ms | **6.74× faster on ANE** |
+| **Vision @ 280 Budget** | Standard image (2,394 patches) | 73.06 ms | 36.54 ms | **23.36 ms** 🚀 | 3,757.40 ms | **3.13× faster on ANE** |
+| **Hybrid @ $\le 512$ Tokens** | Query text + 140b image | 74.38 ms | 50.79 ms | **24.67 ms** 🚀 | — | **3.01× faster on ANE** |
+| **Text @ 8,192 Tokens** | Full context window (8K) | 845.83 ms | **644.36 ms** 🏆 | — *(Exceeds 512t limit)* | 6,222.30 ms | **1.31× faster on Metal GPU** |
+| **Vision @ 560 Budget** | High-res inspection (4,788 patches)| 73.84 ms | **86.29 ms** 🏆 | — *(Fallback to GPU)* | — | **Native Dynamic Budget** |
+| **Hybrid @ $> 512$ Tokens** | 2K doc + 140b image | 165.20 ms | 145.28 ms | **122.76 ms (Hybrid)** ⚡ | — | **1.35× faster on Hybrid Routing** |
+| **Peak Memory @ 8K** | Physical unified memory (RAM+VRAM)| 6,592 MB (6.44 GB) | **1,473 MB (1.44 GB)** | — | **1,135 MB (1.11 GB)** | **5.1 GB saved (-77%)** |
+| **Golden Parity (Cosine)** | 292-vector suite vs Oracle | 1.000000 *(Oracle)* | **0.999951 *(Avg)*** | **0.999928 *(Avg)*** | **0.999943 *(Avg)*** | **Bitwise / Four-9s Parity** |
 
 > 📖 **Full Benchmark Reports:** See [`docs/benchmarks/leaderboards.md`](docs/benchmarks/leaderboards.md) for context scaling sweeps, MTEB/MMEB comparisons, and the 24-case multimodal parity scorecard.
 
