@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_m5_flash_attention_parity_and_speed() -> Result<()> {
-        if !candle_core::utils::metal_is_available() {
+        if !crate::metal_kernels::is_metal_device_available() {
             return Ok(());
         }
         let dev = Device::new_metal(0)?;

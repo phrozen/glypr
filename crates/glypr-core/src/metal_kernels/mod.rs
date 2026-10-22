@@ -1,5 +1,7 @@
 pub mod capabilities;
-pub use capabilities::{MetalCapabilities, MetalTier, compile_metal4_library};
+pub use capabilities::{
+    MetalCapabilities, MetalTier, compile_metal4_library, is_metal_device_available,
+};
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_metal_kernels::metal::{ComputePipeline, Device as MtlDevice, Library};
@@ -1397,7 +1399,7 @@ mod tests {
 
     #[test]
     fn test_metal_kernels_respect_start_offset() -> Result<()> {
-        if !candle_core::utils::metal_is_available() {
+        if !is_metal_device_available() {
             return Ok(());
         }
         let dev = Device::new_metal(0)?;
@@ -1461,7 +1463,7 @@ mod tests {
 
     #[test]
     fn test_phase2_fused_kernels_bit_exact_parity() -> Result<()> {
-        if !candle_core::utils::metal_is_available() {
+        if !is_metal_device_available() {
             return Ok(());
         }
         let dev = Device::new_metal(0)?;
@@ -1671,7 +1673,7 @@ mod tests {
 
     #[test]
     fn test_phase3_fused_kernels_bit_exact_parity() -> Result<()> {
-        if !candle_core::utils::metal_is_available() {
+        if !is_metal_device_available() {
             return Ok(());
         }
         let dev = Device::new_metal(0)?;

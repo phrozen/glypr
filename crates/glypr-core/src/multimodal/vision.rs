@@ -703,11 +703,14 @@ mod tests {
         let patch_width = 18;
         let patch_height = 27;
         let num_patches = patch_width * patch_height;
-        let device = if candle_core::utils::metal_is_available() {
+        #[cfg(feature = "metal")]
+        let device = if crate::metal_kernels::is_metal_device_available() {
             Device::new_metal(0).unwrap_or(Device::Cpu)
         } else {
             Device::Cpu
         };
+        #[cfg(not(feature = "metal"))]
+        let device = Device::Cpu;
         let t = Tensor::randn(0.0f32, 1.0f32, (1, num_patches, 768), &device)?;
         let k = 3;
         let out_w = patch_width / k;

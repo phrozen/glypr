@@ -37,6 +37,31 @@ impl MetalTier {
     }
 }
 
+/// Returns true if a Metal device can be safely initialized by `candle-metal-kernels`.
+///
+/// In `candle-metal-kernels 0.11.0`, `Device::new_metal(0)` unconditionally references
+/// `MTLResidencySetDescriptor`, which was introduced in macOS 15.0 Sequoia.
+/// On macOS 14 (Sonoma) or virtualized CI runners without residency sets, attempting
+/// to instantiate a Metal device will panic in `objc2::CachedClass::fetch`.
+pub fn is_metal_device_available() -> bool {
+    if !candle_core::utils::metal_is_available() {
+        return false;
+    }
+    #[cfg(feature = "metal")]
+    {
+        unsafe extern "C" {
+            fn objc_getClass(name: *const libc::c_char) -> *const libc::c_void;
+        }
+        unsafe {
+            let cls = objc_getClass(c"MTLResidencySetDescriptor".as_ptr());
+            if cls.is_null() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Runtime hardware and compiler capability profile for the active Apple Silicon Metal GPU.
 #[derive(Debug, Clone)]
 pub struct MetalCapabilities {
@@ -166,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_metal_capabilities_detection_and_probe() -> anyhow::Result<()> {
-        if !candle_core::utils::metal_is_available() {
+        if !is_metal_device_available() {
             return Ok(());
         }
         let dev = Device::new_metal(0)?;
