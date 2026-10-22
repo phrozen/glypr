@@ -47,6 +47,8 @@ Unlike typical runtime wrappers, `glypr` deploys from a **single self-contained 
 
 ## Performance Highlights
 
+### Single-Sequence Real-Time Latency (Ground-Truth Hardware Telemetry)
+
 | Workload / Modality | Target Input / Dimensions | Python Reference (PyTorch MPS) | Glypr (Metal 4 GPU) | Glypr (Apple Neural Engine) | Glypr (CPU SIMD) | Speedup vs. Python Reference |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Text @ 512 Tokens** | Standard RAG passage chunk | 24.65 ms | 25.72 ms | **8.27 ms** 🚀 | 497.61 ms | **2.98× faster on ANE** |
@@ -54,10 +56,25 @@ Unlike typical runtime wrappers, `glypr` deploys from a **single self-contained 
 | **Vision @ 280 Budget** | Standard image (2,394 patches) | 73.06 ms | 36.54 ms | **23.36 ms** 🚀 | 3,757.40 ms | **3.13× faster on ANE** |
 | **Hybrid @ $\le 512$ Tokens** | Query text + 140b image | 74.38 ms | 50.79 ms | **24.67 ms** 🚀 | — | **3.01× faster on ANE** |
 | **Text @ 8,192 Tokens** | Full context window (8K) | 845.83 ms | **644.36 ms** 🏆 | — *(Exceeds 512t limit)* | 6,222.30 ms | **1.31× faster on Metal GPU** |
-| **Vision @ 560 Budget** | High-res inspection (4,788 patches)| 73.84 ms | **86.29 ms** 🏆 | — *(Fallback to GPU)* | — | **Native Dynamic Budget** |
+| **Vision @ 560 Budget** | High-res inspection (4,788 patches)| 73.84 ms *(Clamped to 280t)* | **86.29 ms** | — *(Fallback to GPU)* | — | **Native Dynamic Budget** |
 | **Hybrid @ $> 512$ Tokens** | 2K doc + 140b image | 165.20 ms | 145.28 ms | **122.76 ms (Hybrid)** ⚡ | — | **1.35× faster on Hybrid Routing** |
 | **Peak Memory @ 8K** | Physical unified memory (RAM+VRAM)| 6,592 MB (6.44 GB) | **1,473 MB (1.44 GB)** | — | **1,135 MB (1.11 GB)** | **5.1 GB saved (-77%)** |
 | **Golden Parity (Cosine)** | 292-vector suite vs Oracle | 1.000000 *(Oracle)* | **0.999951 *(Avg)*** | **0.999928 *(Avg)*** | **0.999943 *(Avg)*** | **Bitwise / Four-9s Parity** |
+
+### High-Throughput Batch Inference Highlights (Batch Size = 8)
+
+| Workload / Modality | Batch Input ($B = 8$) | Python Reference (PyTorch MPS) | Glypr (Metal 4 GPU) | Throughput (Glypr) | Speedup vs. Python Reference |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Text @ 512 Tokens** | 8 × 512t passages (4,096 tokens) | 125.30 ms | **161.05 ms** (20.1 ms/item) | **49.7 items/s** | Near-native parity |
+| **Text @ 2,048 Tokens** | 8 × 2Kt documents (16,384 tokens) | 730.06 ms | **839.33 ms** (104.9 ms/item) | **9.5 items/s** | Near-native parity |
+| **Text @ 4,096 Tokens** | 8 × 4Kt documents (32,768 tokens) | 2,110.59 ms | **2,161.63 ms** (270.2 ms/item) | **3.7 items/s** | Near-native parity |
+| **Text @ 8,192 Tokens** | 8 × 8Kt full contexts (65,536 tokens) | 6,860.00 ms | **6,340.92 ms** (792.6 ms/item) 🏆 | **1.3 items/s** | **1.08× faster on Metal** |
+| **Vision @ 70 Budget** | 8 × compact images (4,536 patches) | 508.53 ms *(Clamped to 280t)* | **153.83 ms** (19.2 ms/item) 🚀 | **52.0 items/s** | **3.31× faster on Metal** |
+| **Vision @ 140 Budget** | 8 × portrait docs (9,072 patches) | 506.73 ms *(Clamped to 280t)* | **321.53 ms** (40.2 ms/item) 🚀 | **24.9 items/s** | **1.58× faster on Metal** |
+| **Vision @ 280 Budget** | 8 × standard images (19,152 patches) | 494.74 ms | **718.34 ms** (89.8 ms/item) | **11.1 items/s** | Full-resolution extraction |
+| **Vision @ 560 Budget** | 8 × high-res images (38,304 patches) | 497.63 ms *(Clamped to 280t)* | **1,837.45 ms** (229.7 ms/item) | **4.4 items/s** | **Native Dynamic Budget** |
+| **Hybrid: Text + Vision** | 8 × [Query text + 140b image] | 508.55 ms | **322.60 ms** (40.3 ms/item) 🚀 | **24.8 items/s** | **1.58× faster on Metal** |
+| **Hybrid: Text + Vision + Audio** | 8 × [Text + 140b image + 1.0s audio] | 540.90 ms | **447.08 ms** (55.9 ms/item) 🚀 | **17.9 items/s** | **1.21× faster on Metal** |
 
 > 📖 **Full Benchmark Reports:** See [`docs/benchmarks/leaderboards.md`](docs/benchmarks/leaderboards.md) for context scaling sweeps, MTEB/MMEB comparisons, and the 24-case multimodal parity scorecard.
 

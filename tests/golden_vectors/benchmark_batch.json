@@ -1,0 +1,115 @@
+{
+  "batch_size": 8,
+  "results": [
+    {
+      "key": "text_512_b8",
+      "category": "Text Batch (B=8)",
+      "name": "**Text @ 512 Tokens**",
+      "details": "8 \u00d7 512t passages (4,096 total tokens)",
+      "python_mps_ms": 125.3,
+      "glypr_metal_ms": 161.05,
+      "glypr_per_item_ms": 20.13,
+      "glypr_throughput": 49.7,
+      "speedup_vs_python": 0.78
+    },
+    {
+      "key": "text_2048_b8",
+      "category": "Text Batch (B=8)",
+      "name": "**Text @ 2,048 Tokens**",
+      "details": "8 \u00d7 2Kt documents (16,384 total tokens)",
+      "python_mps_ms": 730.06,
+      "glypr_metal_ms": 839.33,
+      "glypr_per_item_ms": 104.92,
+      "glypr_throughput": 9.5,
+      "speedup_vs_python": 0.87
+    },
+    {
+      "key": "text_4096_b8",
+      "category": "Text Batch (B=8)",
+      "name": "**Text @ 4,096 Tokens**",
+      "details": "8 \u00d7 4Kt documents (32,768 total tokens)",
+      "python_mps_ms": 2110.59,
+      "glypr_metal_ms": 2161.63,
+      "glypr_per_item_ms": 270.2,
+      "glypr_throughput": 3.7,
+      "speedup_vs_python": 0.98
+    },
+    {
+      "key": "text_8192_b8",
+      "category": "Text Batch (B=8)",
+      "name": "**Text @ 8,192 Tokens**",
+      "details": "8 \u00d7 8Kt full contexts (65,536 total tokens)",
+      "python_mps_ms": 6860.0,
+      "glypr_metal_ms": 6340.92,
+      "glypr_per_item_ms": 792.61,
+      "glypr_throughput": 1.3,
+      "speedup_vs_python": 1.08
+    },
+    {
+      "key": "vision_70_b8",
+      "category": "Vision Batch (B=8)",
+      "name": "**Vision @ 70 Budget**",
+      "details": "8 \u00d7 compact images (4,536 total patches)",
+      "python_mps_ms": 508.53,
+      "glypr_metal_ms": 153.83,
+      "glypr_per_item_ms": 19.23,
+      "glypr_throughput": 52.0,
+      "speedup_vs_python": 3.31
+    },
+    {
+      "key": "vision_140_b8",
+      "category": "Vision Batch (B=8)",
+      "name": "**Vision @ 140 Budget**",
+      "details": "8 \u00d7 portrait docs (9,072 total patches)",
+      "python_mps_ms": 506.73,
+      "glypr_metal_ms": 321.53,
+      "glypr_per_item_ms": 40.19,
+      "glypr_throughput": 24.9,
+      "speedup_vs_python": 1.58
+    },
+    {
+      "key": "vision_280_b8",
+      "category": "Vision Batch (B=8)",
+      "name": "**Vision @ 280 Budget**",
+      "details": "8 \u00d7 standard images (19,152 total patches)",
+      "python_mps_ms": 494.74,
+      "glypr_metal_ms": 718.34,
+      "glypr_per_item_ms": 89.79,
+      "glypr_throughput": 11.1,
+      "speedup_vs_python": 0.69
+    },
+    {
+      "key": "vision_560_b8",
+      "category": "Vision Batch (B=8)",
+      "name": "**Vision @ 560 Budget**",
+      "details": "8 \u00d7 high-res images (38,304 total patches)",
+      "python_mps_ms": 497.63,
+      "glypr_metal_ms": 1837.45,
+      "glypr_per_item_ms": 229.68,
+      "glypr_throughput": 4.4,
+      "speedup_vs_python": 0.27
+    },
+    {
+      "key": "hybrid_text_vision_b8",
+      "category": "Hybrid Multimodal (B=8)",
+      "name": "**Hybrid: Text + Vision**",
+      "details": "8 \u00d7 [Query text + 140b image]",
+      "python_mps_ms": 508.55,
+      "glypr_metal_ms": 322.6,
+      "glypr_per_item_ms": 40.32,
+      "glypr_throughput": 24.8,
+      "speedup_vs_python": 1.58
+    },
+    {
+      "key": "hybrid_text_vision_audio_b8",
+      "category": "Hybrid Multimodal (B=8)",
+      "name": "**Hybrid: Text + Vision + Audio**",
+      "details": "8 \u00d7 [Text + 140b image + 1.0s audio]",
+      "python_mps_ms": 540.9,
+      "glypr_metal_ms": 447.08,
+      "glypr_per_item_ms": 55.88,
+      "glypr_throughput": 17.9,
+      "speedup_vs_python": 1.21
+    }
+  ]
+}

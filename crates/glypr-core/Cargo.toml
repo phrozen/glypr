@@ -82,3 +82,7 @@ required-features = ["metal", "coreml"]
 name = "bench_matrix"
 required-features = ["metal", "coreml"]
 
+[[example]]
+name = "bench_batch"
+required-features = ["metal"]
+
