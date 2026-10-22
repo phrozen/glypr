@@ -210,17 +210,13 @@ fn resolve_device_and_dtype(device_arg: DeviceArg, legacy_metal: bool) -> Result
         DeviceArg::Metal => true,
         DeviceArg::Cpu => false,
         DeviceArg::Auto => {
-            if legacy_metal {
-                true
-            } else {
-                #[cfg(feature = "metal")]
-                {
-                    candle_core::utils::metal_is_available()
-                }
-                #[cfg(not(feature = "metal"))]
-                {
-                    false
-                }
+            #[cfg(feature = "metal")]
+            {
+                legacy_metal || candle_core::utils::metal_is_available()
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                legacy_metal
             }
         }
     };
