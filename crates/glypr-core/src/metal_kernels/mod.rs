@@ -1473,6 +1473,13 @@ mod tests {
         Ok(())
     }
 
+    // NOTE(Hardware Invariance):
+    // Apple Silicon M3/M4/M5 contains native hardware bfloat16 ALUs (__HAVE_BFLOAT__), whereas
+    // M1/M2 silicon (e.g. M1, M2, M2 Max) emulates bfloat16 with float32 intermediates in MSL shaders.
+    // Due to differing Fused Multiply-Add (FMA) instruction contraction order, element-wise differences
+    // of exactly 1 bfloat16 ULP (0.015625 for magnitude ~2.8, 0.03125 for magnitude ~7.0) occur between
+    // fused single-pass shaders and multi-pass unfused reference pipelines on M1/M2 hardware.
+    // See docs/architecture/hardware-acceleration.md (Section 8) for detailed analysis and M2 Max debug plan.
     #[test]
     fn test_phase2_fused_kernels_bit_exact_parity() -> Result<()> {
         if !is_metal_device_available() {
@@ -1669,6 +1676,10 @@ mod tests {
         Ok(())
     }
 
+    // NOTE(Hardware Invariance):
+    // See test_phase2 note and docs/architecture/hardware-acceleration.md (Section 8).
+    // On M1/M2 silicon, 2D RoPE + RMSNorm fused vision transpositions exhibit 1-ULP differences
+    // (diff=0.015625 for values ~2.8125) due to software bfloat16 emulation vs hardware bfloat on M3+.
     #[test]
     fn test_phase3_fused_kernels_bit_exact_parity() -> Result<()> {
         if !is_metal_device_available() {
