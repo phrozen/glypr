@@ -4,8 +4,7 @@ use glypr_core::util::{
 };
 use std::time::Instant;
 
-#[test]
-fn bench_quantization_and_similarity_across_dimensions() {
+fn main() -> anyhow::Result<()> {
     let dimensions = [768, 512, 256, 128];
 
     println!(
@@ -177,4 +176,6 @@ fn bench_quantization_and_similarity_across_dimensions() {
         );
         println!("{}", "-".repeat(80));
     }
+
+    Ok(())
 }

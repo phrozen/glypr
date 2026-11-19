@@ -6,7 +6,11 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[tokio::test]
+fn main() -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(bench_http_server_latencies())
+}
+
 async fn bench_http_server_latencies() -> Result<()> {
     let device = if candle_core::utils::metal_is_available() {
         Device::new_metal(0).unwrap_or(Device::Cpu)

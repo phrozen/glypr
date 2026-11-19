@@ -1397,15 +1397,34 @@ pub fn fused_metal_q8_0_matmul(
 mod tests {
     use super::*;
 
-    fn assert_vec_eq(a: &[f32], b: &[f32], label: &str) {
+    fn assert_bf16_ulp_eq(a: &[f32], b: &[f32], label: &str) {
         assert_eq!(a.len(), b.len(), "{label}: len mismatch");
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
         for (i, (&va, &vb)) in a.iter().zip(b.iter()).enumerate() {
+            assert!(
+                va.is_finite() && vb.is_finite(),
+                "{label} non-finite at idx {i}: {va} vs {vb}"
+            );
+            let mag = va.abs().max(vb.abs());
+            // BF16 has 7 mantissa bits (1 ULP = 2^-7 ~ 0.0078125). Allow 2 ULPs + 1e-2 floor.
+            let tol = (0.01f32).max(mag * 0.016);
             let diff = (va - vb).abs();
-            // Allow up to 1-2 BF16 ULPs (0.01) across different GPU hardware generations
-            // (e.g. M1/M2 software emulation vs M3/M4/M5 hardware bfloat ALU).
-            if diff > 1e-2 {
-                panic!("{label} mismatch at idx {i}: ref={va} vs got={vb} (diff={diff} > 0.01)");
-            }
+            assert!(
+                diff <= tol,
+                "{label} mismatch at idx {i}: ref={va} vs got={vb} (diff={diff} > tol={tol})"
+            );
+            dot += (va as f64) * (vb as f64);
+            na += (va as f64) * (va as f64);
+            nb += (vb as f64) * (vb as f64);
+        }
+        if na > 0.0 && nb > 0.0 {
+            let cos = dot / (na.sqrt() * nb.sqrt());
+            assert!(
+                cos >= 0.99995,
+                "{label} cosine similarity {cos:.6} < 0.99995"
+            );
         }
     }
 
@@ -1503,7 +1522,7 @@ mod tests {
 
         let ref_no_scale = res.add(&fused_metal_rmsnorm(&x, Some(&w), eps)?)?;
         let got_no_scale = fused_metal_rmsnorm_residual_add(&x, &res, Some(&w), None, eps)?;
-        assert_vec_eq(
+        assert_bf16_ulp_eq(
             &ref_no_scale
                 .to_dtype(DType::F32)?
                 .flatten_all()?
@@ -1518,7 +1537,7 @@ mod tests {
         let ref_with_scale = ref_no_scale.broadcast_mul(&scalar)?;
         let got_with_scale =
             fused_metal_rmsnorm_residual_add(&x, &res, Some(&w), Some(&scalar), eps)?;
-        assert_vec_eq(
+        assert_bf16_ulp_eq(
             &ref_with_scale
                 .to_dtype(DType::F32)?
                 .flatten_all()?
@@ -1549,7 +1568,7 @@ mod tests {
 
             let q_fused =
                 fused_metal_qk_rmsnorm_rope_transpose(&q_in, &qw, &cos, &sin, b, s, h, d, eps)?;
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &q_unfused
                     .to_dtype(DType::F32)?
                     .flatten_all()?
@@ -1564,7 +1583,7 @@ mod tests {
             let v_unfused = q_in.reshape((b, s, h, d))?.transpose(1, 2)?.contiguous()?;
             let v_unfused = fused_metal_rmsnorm(&v_unfused, None, eps)?;
             let v_fused = fused_metal_v_rmsnorm_transpose(&q_in, None, b, s, h, d, eps)?;
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &v_unfused
                     .to_dtype(DType::F32)?
                     .flatten_all()?
@@ -1601,7 +1620,7 @@ mod tests {
                 .to_dtype(DType::F32)?
                 .flatten_all()?
                 .to_vec1::<f32>()?;
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &v_unfused,
                 &v_fused,
                 &format!("fused_metal_ple_scale_rmsnorm_transpose layer {layer_idx}"),
@@ -1623,7 +1642,7 @@ mod tests {
             .to_dtype(DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
-        assert_vec_eq(&v_ref_geglu, &v_got_geglu, "ple_geglu");
+        assert_bf16_ulp_eq(&v_ref_geglu, &v_got_geglu, "ple_geglu");
 
         // 5. Test cached RoPE vs direct seq_len RoPE for both sliding and full attention
         let seq_test = 315usize;
@@ -1649,7 +1668,7 @@ mod tests {
                 .sin()?
                 .reshape((1, 1, seq_test, d))?
                 .to_dtype(DType::BF16)?;
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &cos_cached
                     .to_dtype(DType::F32)?
                     .flatten_all()?
@@ -1660,7 +1679,7 @@ mod tests {
                     .to_vec1::<f32>()?,
                 &format!("cos_cached vs cos_direct d={d}"),
             );
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &sin_cached
                     .to_dtype(DType::F32)?
                     .flatten_all()?
@@ -1702,7 +1721,7 @@ mod tests {
 
         let ref_geglu = fused_metal_geglu(&gate, &up)?;
         let got_geglu = fused_metal_geglu_gate_up(&gate_up)?;
-        assert_vec_eq(
+        assert_bf16_ulp_eq(
             &ref_geglu
                 .to_dtype(DType::F32)?
                 .flatten_all()?
@@ -1753,7 +1772,7 @@ mod tests {
                 &qkv_in, &qw, &kw, None, &cos, &sin, b, s, h_q, h_kv, d, eps, eps, eps,
             )?;
 
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &q_ref
                     .to_dtype(DType::F32)?
                     .flatten_all()?
@@ -1764,7 +1783,7 @@ mod tests {
                     .to_vec1::<f32>()?,
                 &format!("qkv_rmsnorm_rope_transpose Q d={d}"),
             );
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &k_ref
                     .to_dtype(DType::F32)?
                     .flatten_all()?
@@ -1775,7 +1794,7 @@ mod tests {
                     .to_vec1::<f32>()?,
                 &format!("qkv_rmsnorm_rope_transpose K d={d}"),
             );
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &v_ref
                     .to_dtype(DType::F32)?
                     .flatten_all()?
@@ -1840,7 +1859,7 @@ mod tests {
                 &qkv_in, &qw, &kw, None, &cos, &sin, b, s, h, d, eps,
             )?;
 
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &q_ref
                     .to_dtype(DType::F32)?
                     .flatten_all()?
@@ -1851,7 +1870,7 @@ mod tests {
                     .to_vec1::<f32>()?,
                 "vision_qkv_rmsnorm_rope2d_transpose Q",
             );
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &k_ref
                     .to_dtype(DType::F32)?
                     .flatten_all()?
@@ -1862,7 +1881,7 @@ mod tests {
                     .to_vec1::<f32>()?,
                 "vision_qkv_rmsnorm_rope2d_transpose K",
             );
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &v_ref
                     .to_dtype(DType::F32)?
                     .flatten_all()?
@@ -1908,7 +1927,7 @@ mod tests {
             let dw_ref = dw_ref.transpose(1, 2)?.contiguous()?;
 
             let dw_got = fused_metal_audio_glu_causal_dwconv5(&pw1, &dw_w)?;
-            assert_vec_eq(
+            assert_bf16_ulp_eq(
                 &dw_ref
                     .to_dtype(DType::F32)?
                     .flatten_all()?
@@ -1962,19 +1981,11 @@ mod tests {
                     .to_dtype(DType::F32)?
                     .flatten_all()?
                     .to_vec1::<f32>()?;
-                if m == 1 {
-                    assert_vec_eq(&ref_vec, &got_vec, "fused_metal_q8_0_matmul m=1");
-                } else {
-                    // On M5 Neural Accelerators (mpp::tensor_ops::matmul2d), bfloat x half -> float
-                    // vs legacy float x half -> float can differ by at most 1 BF16 ULP (~0.78% rel or 5e-4 abs).
-                    for (i, (&va, &vb)) in ref_vec.iter().zip(got_vec.iter()).enumerate() {
-                        let diff = (va - vb).abs();
-                        assert!(
-                            diff <= 1e-2,
-                            "fused_metal_q8_0_matmul m={m} mismatch at idx {i}: ref={va} vs got={vb} (diff={diff})"
-                        );
-                    }
-                }
+                assert_bf16_ulp_eq(
+                    &ref_vec,
+                    &got_vec,
+                    &format!("fused_metal_q8_0_matmul m={m}"),
+                );
             }
         }
 

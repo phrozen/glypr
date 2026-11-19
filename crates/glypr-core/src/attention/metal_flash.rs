@@ -176,14 +176,15 @@ fn get_or_compile_pipeline(
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MetalFlashAttention;
 
-impl AttentionBackend for MetalFlashAttention {
-    fn compute_attention(
+impl MetalFlashAttention {
+    pub(crate) fn compute_attention_with_tier(
         &self,
         q: &Tensor,
         k: &Tensor,
         v: &Tensor,
         attention_mask: Option<&Tensor>,
         sliding_window: Option<usize>,
+        tier: crate::metal_kernels::MetalTier,
     ) -> Result<Tensor> {
         let mdev = match q.device() {
             Device::Metal(m) => m,
@@ -272,7 +273,7 @@ impl AttentionBackend for MetalFlashAttention {
         };
 
         let use_m5 = crate::metal_kernels::MetalCapabilities::detect(mdev.metal_device())
-            .use_m5_tensor_ops()
+            .use_m5_tensor_ops_for_tier(tier)
             && (s % 64 == 0);
 
         let (bq, bk, wm, wn) = if use_m5 {
@@ -413,6 +414,26 @@ impl AttentionBackend for MetalFlashAttention {
     }
 }
 
+impl AttentionBackend for MetalFlashAttention {
+    fn compute_attention(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        attention_mask: Option<&Tensor>,
+        sliding_window: Option<usize>,
+    ) -> Result<Tensor> {
+        self.compute_attention_with_tier(
+            q,
+            k,
+            v,
+            attention_mask,
+            sliding_window,
+            crate::metal_kernels::MetalTier::from_env(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,19 +477,22 @@ mod tests {
                 let mask = Tensor::from_vec(mask_vec, (b, 1, 1, s), &dev)?.to_dtype(DType::BF16)?;
 
                 for mask_opt in [None, Some(&mask)] {
-                    unsafe {
-                        std::env::set_var("GLYPR_METAL_TIER", "legacy");
-                    }
-                    let ref_out =
-                        MetalFlashAttention.compute_attention(&q, &k, &v, mask_opt, sliding)?;
-                    unsafe {
-                        std::env::set_var("GLYPR_METAL_TIER", "m5");
-                    }
-                    let m5_out =
-                        MetalFlashAttention.compute_attention(&q, &k, &v, mask_opt, sliding)?;
-                    unsafe {
-                        std::env::remove_var("GLYPR_METAL_TIER");
-                    }
+                    let ref_out = MetalFlashAttention.compute_attention_with_tier(
+                        &q,
+                        &k,
+                        &v,
+                        mask_opt,
+                        sliding,
+                        crate::metal_kernels::MetalTier::Legacy,
+                    )?;
+                    let m5_out = MetalFlashAttention.compute_attention_with_tier(
+                        &q,
+                        &k,
+                        &v,
+                        mask_opt,
+                        sliding,
+                        crate::metal_kernels::MetalTier::M5,
+                    )?;
 
                     let ref_v = ref_out
                         .to_dtype(DType::F32)?
@@ -479,25 +503,42 @@ mod tests {
                         .flatten_all()?
                         .to_vec1::<f32>()?;
                     let mut max_diff = 0.0f32;
+                    let mut dot = 0.0f64;
+                    let mut na = 0.0f64;
+                    let mut nb = 0.0f64;
                     for (i, (&a, &b_val)) in ref_v.iter().zip(m5_v.iter()).enumerate() {
-                        if a.is_nan() || b_val.is_nan() {
-                            panic!(
-                                "NaN at d={d} s={s} masked={} idx={i}: ref={a} m5={b_val}",
-                                mask_opt.is_some()
-                            );
-                        }
+                        assert!(
+                            a.is_finite() && b_val.is_finite(),
+                            "Non-finite at d={d} s={s} masked={} idx={i}: ref={a} m5={b_val}",
+                            mask_opt.is_some()
+                        );
+                        let mag = a.abs().max(b_val.abs());
+                        let tol = (0.01f32).max(mag * 0.016);
                         let diff = (a - b_val).abs();
                         if diff > max_diff {
                             max_diff = diff;
                         }
+                        assert!(
+                            diff <= tol,
+                            "M5 FlashAttention mismatch at d={d} s={s} masked={} idx={i}: ref={a} m5={b_val} (diff={diff} > tol={tol})",
+                            mask_opt.is_some()
+                        );
+                        dot += (a as f64) * (b_val as f64);
+                        na += (a as f64) * (a as f64);
+                        nb += (b_val as f64) * (b_val as f64);
                     }
+                    let cos = if na > 0.0 && nb > 0.0 {
+                        dot / (na.sqrt() * nb.sqrt())
+                    } else {
+                        1.0
+                    };
                     println!(
-                        "M5 FlashAttention d={d} s={s} masked={} max_diff={max_diff:.6e}",
+                        "M5 FlashAttention d={d} s={s} masked={} max_diff={max_diff:.6e} cos={cos:.6}",
                         mask_opt.is_some(),
                     );
                     assert!(
-                        max_diff < 3e-3,
-                        "M5 FlashAttention mismatch at d={d} s={s} masked={}: max_diff={max_diff}",
+                        cos >= 0.99995,
+                        "M5 FlashAttention cosine similarity {cos:.6} < 0.99995 at d={d} s={s} masked={}",
                         mask_opt.is_some()
                     );
                 }

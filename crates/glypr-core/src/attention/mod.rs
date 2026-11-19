@@ -252,14 +252,6 @@ impl SelfAttention {
                         attention_mask,
                         self.sliding_window,
                     )?,
-                    #[cfg(feature = "cuda-flash-attn")]
-                    AttentionMode::CudaFlash => ChunkedSlidingAttention.compute_attention(
-                        &q,
-                        &k_rep,
-                        &v_rep,
-                        attention_mask,
-                        self.sliding_window,
-                    )?,
                     #[allow(unreachable_patterns)]
                     _ => unreachable!(),
                 }

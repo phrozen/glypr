@@ -5,7 +5,6 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -16,7 +15,7 @@ default = []
 metal = ["glypr-core/metal"]
 accelerate = ["glypr-core/accelerate"]
 coreml = ["glypr-core/coreml"]
-ane = ["coreml"]
+ane = ["glypr-core/ane"]
 
 [dependencies]
 glypr-core = { path = "../glypr-core" }
@@ -38,3 +37,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
+
+[[bench]]
+name = "bench_server"
+harness = false

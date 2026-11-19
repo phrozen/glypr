@@ -169,17 +169,24 @@ impl MetalCapabilities {
     }
 
     /// Returns `true` if M5 Neural Accelerator (`mpp::tensor_ops`) kernels should be used
-    /// after accounting for hardware support, compiler probe, and `GLYPR_METAL_TIER`.
+    /// for the specified [`MetalTier`] after accounting for hardware support and compiler probe.
     #[inline]
-    pub fn use_m5_tensor_ops(&self) -> bool {
+    pub fn use_m5_tensor_ops_for_tier(&self, tier: MetalTier) -> bool {
         if !self.has_tensor_ops_compiler {
             return false;
         }
-        match MetalTier::from_env() {
+        match tier {
             MetalTier::Legacy => false,
             MetalTier::M5 => true,
             MetalTier::Auto => self.has_apple10_m5 && self.has_metal4_family,
         }
+    }
+
+    /// Returns `true` if M5 Neural Accelerator (`mpp::tensor_ops`) kernels should be used
+    /// after accounting for hardware support, compiler probe, and `GLYPR_METAL_TIER`.
+    #[inline]
+    pub fn use_m5_tensor_ops(&self) -> bool {
+        self.use_m5_tensor_ops_for_tier(MetalTier::from_env())
     }
 }
 

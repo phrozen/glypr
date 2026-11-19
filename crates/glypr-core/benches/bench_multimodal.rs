@@ -170,8 +170,7 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
     Ok(())
 }
 
-#[test]
-fn bench_multimodal_pipeline() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     #[cfg(feature = "metal")]
     if candle_core::utils::metal_is_available()
         && let Ok(metal_dev) = Device::new_metal(0)

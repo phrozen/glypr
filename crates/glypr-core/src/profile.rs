@@ -314,16 +314,6 @@ impl EmbeddingGemma2Model {
                                 layer.self_attn.sliding_window,
                             )?
                         }
-                        #[cfg(feature = "cuda-flash-attn")]
-                        crate::attention::AttentionMode::CudaFlash => {
-                            crate::attention::ChunkedSlidingAttention.compute_attention(
-                                &q,
-                                &k_rep,
-                                &v_rep,
-                                mask,
-                                layer.self_attn.sliding_window,
-                            )?
-                        }
                         #[allow(unreachable_patterns)]
                         _ => unreachable!(),
                     }

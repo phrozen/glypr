@@ -5,7 +5,6 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -16,7 +15,7 @@ default = []
 metal = ["glypr-core/metal", "glypr-server/metal"]
 accelerate = ["glypr-core/accelerate", "glypr-server/accelerate"]
 coreml = ["glypr-core/coreml", "glypr-server/coreml"]
-ane = ["coreml"]
+ane = ["glypr-core/ane", "glypr-server/ane"]
 
 [dependencies]
 glypr-core = { path = "../glypr-core" }

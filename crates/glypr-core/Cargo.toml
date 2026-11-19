@@ -5,7 +5,6 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 keywords.workspace = true
@@ -17,7 +16,6 @@ default = []
 metal = ["candle-core/metal", "candle-nn/metal", "dep:candle-metal-kernels", "dep:objc2-metal"]
 accelerate = ["candle-core/accelerate"]
 metal-flash-attn = ["metal"]
-cuda-flash-attn = []
 coreml = ["dep:coreml-native"]
 ane = ["coreml"]
 
@@ -85,4 +83,16 @@ required-features = ["metal", "coreml"]
 [[example]]
 name = "bench_batch"
 required-features = ["metal"]
+
+[[bench]]
+name = "bench_cpu_ops"
+harness = false
+
+[[bench]]
+name = "bench_multimodal"
+harness = false
+
+[[bench]]
+name = "bench_quantization"
+harness = false
 
