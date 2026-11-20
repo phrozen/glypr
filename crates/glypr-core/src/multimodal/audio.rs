@@ -219,6 +219,34 @@ impl AudioAttention {
     pub fn forward(&self, hidden_states: &Tensor, mask_tensor: &Tensor) -> Result<Tensor> {
         let (batch, seq_len, _hidden_size) = hidden_states.dims3()?;
 
+        #[cfg(feature = "metal")]
+        if hidden_states.device().is_metal()
+            && hidden_states.dtype() == DType::BF16
+            && self.head_dim <= 256
+        {
+            let q = self.q_proj.forward(hidden_states)?;
+            let k = self.k_proj.forward(hidden_states)?;
+            let v = self.v_proj.forward(hidden_states)?;
+            let context_size = self.chunk_size + self.max_past_horizon + self.context_right;
+            let attn_out = crate::metal_kernels::fused_metal_audio_chunked_rel_attn(
+                &q,
+                &k,
+                &v,
+                &self.per_dim_scale,
+                &self.precomputed_rel_k,
+                mask_tensor,
+                self.num_heads,
+                self.head_dim,
+                self.chunk_size,
+                self.max_past_horizon,
+                context_size,
+                self.q_scale,
+                self.k_scale,
+                self.softcap,
+            )?;
+            return self.post.forward(&attn_out);
+        }
+
         let q = self.q_proj.forward(hidden_states)?.to_dtype(DType::F32)?;
         let k = self.k_proj.forward(hidden_states)?.to_dtype(DType::F32)?;
         let v = self.v_proj.forward(hidden_states)?.to_dtype(DType::F32)?;

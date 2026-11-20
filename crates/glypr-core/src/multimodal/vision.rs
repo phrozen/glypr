@@ -32,27 +32,48 @@ fn load_gguf_linear_op<R: std::io::Read + std::io::Seek>(
 /// 2D Patch Embedder: Linear projection + 2D table coordinate embedding lookup
 pub struct VisionPatchEmbedder {
     pub input_proj: LinearOp,
-    pub position_embedding_table: Tensor,
+    pub pos_table_x: Embedding,
+    pub pos_table_y: Embedding,
     pub hidden_size: usize,
 }
 
 impl VisionPatchEmbedder {
-    pub fn forward(&self, pixel_values: &Tensor, position_ids: &Tensor) -> Result<Tensor> {
-        // 1. Project patches: [1, num_patches, 768]
+    pub fn new(
+        input_proj: LinearOp,
+        position_embedding_table: &Tensor,
+        hidden_size: usize,
+    ) -> Result<Self> {
+        let t0 = position_embedding_table.get(0)?.contiguous()?;
+        let t1 = position_embedding_table.get(1)?.contiguous()?;
+        Ok(Self {
+            input_proj,
+            pos_table_x: Embedding::new(t0, hidden_size),
+            pos_table_y: Embedding::new(t1, hidden_size),
+            hidden_size,
+        })
+    }
+
+    pub fn forward_xy(
+        &self,
+        pixel_values: &Tensor,
+        x_pos: &Tensor,
+        y_pos: &Tensor,
+    ) -> Result<Tensor> {
+        // 1. Project patches: [b, num_patches, 768]
         let hidden_states = self.input_proj.forward(pixel_values)?;
 
-        // 2. Position lookup: position_ids is [num_patches, 2] (px, py)
-        let x_pos = position_ids.narrow(1, 0, 1)?.squeeze(1)?.contiguous()?;
-        let y_pos = position_ids.narrow(1, 1, 1)?.squeeze(1)?.contiguous()?;
-
-        let t0 = self.position_embedding_table.get(0)?; // [10240, 768]
-        let t1 = self.position_embedding_table.get(1)?; // [10240, 768]
-
-        let x_emb = Embedding::new(t0, self.hidden_size).forward(&x_pos)?;
-        let y_emb = Embedding::new(t1, self.hidden_size).forward(&y_pos)?;
+        // 2. Position lookup using pre-split tables and contiguous 1D indices
+        let x_emb = self.pos_table_x.forward(x_pos)?;
+        let y_emb = self.pos_table_y.forward(y_pos)?;
 
         let pos_emb = (x_emb + y_emb)?.unsqueeze(0)?; // [1, num_patches, 768]
         hidden_states.broadcast_add(&pos_emb)
+    }
+
+    pub fn forward(&self, pixel_values: &Tensor, position_ids: &Tensor) -> Result<Tensor> {
+        let x_pos = position_ids.narrow(1, 0, 1)?.squeeze(1)?.contiguous()?;
+        let y_pos = position_ids.narrow(1, 1, 1)?.squeeze(1)?.contiguous()?;
+        self.forward_xy(pixel_values, &x_pos, &y_pos)
     }
 }
 
@@ -317,8 +338,17 @@ impl VisionAttention {
         };
 
         // Non-causal Bidirectional Attention (scaling = 1.0, softcapping = 1.0 / disabled)
-        // On Metal GPU: dispatch to fused hardware SDPA kernel (zero matrix materialization)
-        // On CPU: standard high-precision float32 softmax attention
+        // On Metal BF16: dispatch M5 NAX / Steel FlashAttention directly in [B, S, H, D] layout
+        // (zero permute/contiguous copy churn and BD=64 M5 Neural Accelerator execution).
+        #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
+        if q.device().is_metal() && q.dtype() == DType::BF16 {
+            let attn_output = crate::attention::MetalFlashAttention
+                .compute_attention_bshd(&q, &k, &v, None, None)?
+                .reshape((batch, seq_len, self.num_heads * self.head_dim))?;
+            return self.o_proj.forward(&attn_output);
+        }
+
+        // On Metal non-BF16: dispatch Candle SDPA; on CPU: float32 softmax attention
         let attn_output = if q.device().is_metal() {
             candle_nn::ops::sdpa(&q, &k, &v, None, false, 1.0, 1.0)?
         } else {
@@ -395,6 +425,23 @@ impl VisionPooler {
         patch_height: usize,
     ) -> Result<Tensor> {
         let k = self.pooling_kernel_size;
+        #[cfg(feature = "metal")]
+        if hidden_states.device().is_metal()
+            && hidden_states.dtype() == DType::BF16
+            && k > 0
+            && patch_width.is_multiple_of(k)
+            && patch_height.is_multiple_of(k)
+        {
+            let scale = self.root_hidden_size / ((k * k) as f64);
+            return crate::metal_kernels::fused_metal_vision_spatial_pool(
+                hidden_states,
+                patch_width,
+                patch_height,
+                k,
+                scale,
+            );
+        }
+
         let out_w = patch_width / k;
         let out_h = patch_height / k;
         let hidden_size = hidden_states.dim(D::Minus1)?;
@@ -452,13 +499,19 @@ pub struct VisionTower {
 impl VisionTower {
     /// Encode a single processed image into soft tokens [num_soft_tokens, 512]
     pub fn encode(&self, processed: &ProcessedImage) -> Result<Tensor> {
-        let batched = self.encode_batch(std::slice::from_ref(processed))?;
+        let batched = self.encode_batch_refs(&[processed])?;
         batched.squeeze(0)
     }
 
     /// Encode a batch of homogeneous processed images in a single batched ViT pass.
     /// Returns [b, num_soft_tokens, 512].
     pub fn encode_batch(&self, batch: &[ProcessedImage]) -> Result<Tensor> {
+        let refs: Vec<&ProcessedImage> = batch.iter().collect();
+        self.encode_batch_refs(&refs)
+    }
+
+    /// Zero-clone batch encoder over borrowed `ProcessedImage` slices.
+    pub(crate) fn encode_batch_refs(&self, batch: &[&ProcessedImage]) -> Result<Tensor> {
         if batch.is_empty() {
             candle_core::bail!("Cannot encode empty vision batch");
         }
@@ -469,8 +522,6 @@ impl VisionTower {
         let patch_height = batch[0].patch_height;
         let patch_pixels = 768;
 
-        // Flatten all pixel values into a contiguous buffer
-        let mut all_pixels = Vec::with_capacity(b * num_patches * patch_pixels);
         for img in batch {
             if img.num_patches != num_patches
                 || img.patch_width != patch_width
@@ -486,22 +537,52 @@ impl VisionTower {
                     img.patch_height
                 );
             }
-            all_pixels.extend_from_slice(&img.pixel_values);
         }
 
-        let pixel_tensor =
+        let total_pixels = b * num_patches * patch_pixels;
+        let pixel_tensor = if self.dtype == DType::BF16 {
+            use rayon::prelude::*;
+            let mut all_pixels_bf16 = Vec::with_capacity(total_pixels);
+            for img in batch {
+                if img.pixel_values.len() >= 65536 {
+                    let start = all_pixels_bf16.len();
+                    all_pixels_bf16.resize(start + img.pixel_values.len(), half::bf16::ZERO);
+                    all_pixels_bf16[start..]
+                        .par_iter_mut()
+                        .zip(img.pixel_values.par_iter())
+                        .for_each(|(dst, &src)| *dst = half::bf16::from_f32(src));
+                } else {
+                    all_pixels_bf16
+                        .extend(img.pixel_values.iter().map(|&v| half::bf16::from_f32(v)));
+                }
+            }
+            Tensor::from_vec(
+                all_pixels_bf16,
+                (b, num_patches, patch_pixels),
+                &self.device,
+            )?
+        } else {
+            let mut all_pixels = Vec::with_capacity(total_pixels);
+            for img in batch {
+                all_pixels.extend_from_slice(&img.pixel_values);
+            }
             Tensor::from_vec(all_pixels, (b, num_patches, patch_pixels), &self.device)?
-                .to_dtype(self.dtype)?;
+                .to_dtype(self.dtype)?
+        };
 
-        let pos_tensor = Tensor::from_vec(
-            batch[0].position_ids.clone(),
-            (num_patches, 2),
-            &self.device,
-        )?
-        .to_dtype(DType::U32)?;
+        let mut x_vec = Vec::with_capacity(num_patches);
+        let mut y_vec = Vec::with_capacity(num_patches);
+        for &[px, py] in batch[0].position_ids.as_chunks::<2>().0 {
+            x_vec.push(px);
+            y_vec.push(py);
+        }
+        let x_pos = Tensor::from_vec(x_vec, (num_patches,), &self.device)?;
+        let y_pos = Tensor::from_vec(y_vec, (num_patches,), &self.device)?;
 
         // 1. Batch patch projection: [b, num_patches, 768]
-        let mut hidden_states = self.patch_embedder.forward(&pixel_tensor, &pos_tensor)?;
+        let mut hidden_states = self
+            .patch_embedder
+            .forward_xy(&pixel_tensor, &x_pos, &y_pos)?;
 
         // 2. Precompute 2D Axial RoPE directly from CPU position_ids without GPU->CPU readback
         let (cos, sin) = self.rotary_emb.precompute_from_slice(
@@ -547,11 +628,7 @@ impl VisionTower {
             .tensor(reader, "v.position_embd.weight", device)?
             .dequantize(device)?
             .to_dtype(dtype)?;
-        let patch_embedder = VisionPatchEmbedder {
-            input_proj,
-            position_embedding_table: pos_table,
-            hidden_size: config.hidden_size,
-        };
+        let patch_embedder = VisionPatchEmbedder::new(input_proj, &pos_table, config.hidden_size)?;
 
         // 2. Rotary embedding
         let rotary_emb = VisionRotaryEmbedding::new(config.head_dim, config.rope_theta);
@@ -787,12 +864,9 @@ mod tests {
             Tensor::zeros((1, 1), DType::F32, &Device::Cpu)?,
             None,
         ));
+        let zero_pos = Tensor::zeros((2, 1, 1), DType::F32, &Device::Cpu)?;
         let tower = VisionTower {
-            patch_embedder: VisionPatchEmbedder {
-                input_proj: zero_linear.clone(),
-                position_embedding_table: Tensor::zeros((2, 1, 1), DType::F32, &Device::Cpu)?,
-                hidden_size: 1,
-            },
+            patch_embedder: VisionPatchEmbedder::new(zero_linear.clone(), &zero_pos, 1)?,
             rotary_emb: VisionRotaryEmbedding::new(64, 100.0),
             layers: Vec::new(),
             pooler: VisionPooler::new(3, 768),

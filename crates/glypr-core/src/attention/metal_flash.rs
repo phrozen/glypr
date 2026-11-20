@@ -116,6 +116,7 @@ fn get_or_compile_pipeline(
     ]);
 
     let func_name = match (use_m5, head_dim) {
+        (true, 64) => "steel_attention_m5_bfloat16_bq64_bk32_bd64_wm4",
         (true, 256) => "steel_attention_m5_bfloat16_bq64_bk32_bd256_wm4",
         (true, 512) => "steel_attention_m5_bfloat16_bq64_bk32_bd512_wm4",
         (true, _) => {
@@ -123,6 +124,7 @@ fn get_or_compile_pipeline(
                 "Unsupported head_dim for M5 MetalFlashAttention: {head_dim}"
             )));
         }
+        (false, 64) => "steel_attention_bfloat16_bq32_bk32_bd64_wm4_wn1_maskbfloat16",
         (false, 256) => "steel_attention_bfloat16_bq32_bk16_bd256_wm4_wn1_maskbfloat16",
         (false, 512) => "steel_attention_bfloat16_bq16_bk16_bd512_wm2_wn1_maskbfloat16",
         (false, _) => {
@@ -152,7 +154,7 @@ fn get_or_compile_pipeline(
 ///
 /// Features:
 /// - Custom Metal Shading Language kernel with hardware tile-skipping for sliding window attention.
-/// - Supports both `head_dim = 256` (sliding layers) and `head_dim = 512` (global layers 5, 11, 17, 23).
+/// - Supports `head_dim = 64` (Vision Tower), `head_dim = 256` (sliding layers), and `head_dim = 512` (global layers).
 /// - On Apple M5 (`MTLGPUFamilyApple10` + `MTLGPUFamilyMetal4`), dispatches `mpp::tensor_ops::matmul2d`
 ///   cooperative tensor kernels (`BQ=64, BK=32`) directly on the per-core Neural Accelerators.
 /// - Zero mask allocation (0 MB overhead) on unpadded sequences up to 8K, and $O(B \cdot S)$
@@ -163,6 +165,27 @@ fn get_or_compile_pipeline(
 pub struct MetalFlashAttention;
 
 impl MetalFlashAttention {
+    /// Compute FlashAttention returning output directly in `[B, S, H, D]` layout
+    /// so callers can zero-copy `.reshape((B, S, H * D))` without a GPU transpose/copy.
+    pub fn compute_attention_bshd(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        attention_mask: Option<&Tensor>,
+        sliding_window: Option<usize>,
+    ) -> Result<Tensor> {
+        self.compute_attention_layout_with_tier(
+            q,
+            k,
+            v,
+            attention_mask,
+            sliding_window,
+            true,
+            crate::metal_kernels::MetalTier::from_env(),
+        )
+    }
+
     pub(crate) fn compute_attention_with_tier(
         &self,
         q: &Tensor,
@@ -170,6 +193,28 @@ impl MetalFlashAttention {
         v: &Tensor,
         attention_mask: Option<&Tensor>,
         sliding_window: Option<usize>,
+        tier: crate::metal_kernels::MetalTier,
+    ) -> Result<Tensor> {
+        self.compute_attention_layout_with_tier(
+            q,
+            k,
+            v,
+            attention_mask,
+            sliding_window,
+            false,
+            tier,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn compute_attention_layout_with_tier(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        attention_mask: Option<&Tensor>,
+        sliding_window: Option<usize>,
+        bshd_output: bool,
         tier: crate::metal_kernels::MetalTier,
     ) -> Result<Tensor> {
         let mdev = match q.device() {
@@ -189,13 +234,18 @@ impl MetalFlashAttention {
                 } else {
                     v.clone()
                 };
-                return ChunkedSlidingAttention.compute_attention(
+                let out = ChunkedSlidingAttention.compute_attention(
                     q,
                     &k_rep,
                     &v_rep,
                     attention_mask,
                     sliding_window,
-                );
+                )?;
+                return if bshd_output {
+                    out.transpose(1, 2)?.contiguous()
+                } else {
+                    Ok(out)
+                };
             }
         };
 
@@ -214,8 +264,8 @@ impl MetalFlashAttention {
         }
         let gqa_factor = (h / kh) as i32;
 
-        // Metal Flash Kernel supports head_dim = 256 and 512 in BF16
-        if (d != 256 && d != 512)
+        // Metal Flash Kernel supports head_dim = 64, 256, and 512 in BF16
+        if !(d == 64 || d == 256 || d == 512)
             || q.dtype() != DType::BF16
             || k.dtype() != DType::BF16
             || v.dtype() != DType::BF16
@@ -230,13 +280,18 @@ impl MetalFlashAttention {
             } else {
                 v.clone()
             };
-            return ChunkedSlidingAttention.compute_attention(
+            let out = ChunkedSlidingAttention.compute_attention(
                 q,
                 &k_rep,
                 &v_rep,
                 attention_mask,
                 sliding_window,
-            );
+            )?;
+            return if bshd_output {
+                out.transpose(1, 2)?.contiguous()
+            } else {
+                Ok(out)
+            };
         }
 
         // Enforce unit last-dim stride for Metal Flash kernels
@@ -257,7 +312,12 @@ impl MetalFlashAttention {
         };
 
         if b == 0 || h == 0 || s == 0 {
-            return Tensor::zeros((b, h, s, d), DType::BF16, q.device());
+            let out_shape = if bshd_output {
+                (b, s, h, d)
+            } else {
+                (b, h, s, d)
+            };
+            return Tensor::zeros(out_shape, DType::BF16, q.device());
         }
 
         // Validate optional additive mask ([B|1, H|1, S|1, S]) and convert to BF16 on Metal
@@ -293,11 +353,12 @@ impl MetalFlashAttention {
         };
 
         let use_m5 = crate::metal_kernels::MetalCapabilities::detect(mdev.metal_device())
-            .use_m5_tensor_ops_for_tier(tier)
-            && (s % 64 == 0);
+            .use_m5_tensor_ops_for_tier(tier);
 
         let (bq, bk, wm, wn) = if use_m5 {
             (64, 32, 4, 1)
+        } else if d == 64 {
+            (32, 32, 4, 1)
         } else if d == 256 {
             (32, 16, 4, 1)
         } else {
@@ -310,7 +371,12 @@ impl MetalFlashAttention {
         let pipeline =
             get_or_compile_pipeline(mdev.metal_device(), d, align_q, align_k, has_mask, use_m5)?;
 
-        let out_tensor = Tensor::zeros((b, h, s, d), DType::BF16, q.device())?;
+        let out_shape = if bshd_output {
+            (b, s, h, d)
+        } else {
+            (b, h, s, d)
+        };
+        let out_tensor = Tensor::zeros(out_shape, DType::BF16, q.device())?;
 
         {
             let (q_storage, q_layout) = q.storage_and_layout();
@@ -341,6 +407,20 @@ impl MetalFlashAttention {
             let nk_aligned = s / bk;
 
             let window_size = sliding_window.unwrap_or(0) as i32;
+
+            let o_strides = if bshd_output {
+                [
+                    out_layout.stride()[0] as i64, // batch stride: S * H * D
+                    out_layout.stride()[2] as i64, // head stride: D
+                    out_layout.stride()[1] as i64, // seq stride: H * D
+                ]
+            } else {
+                [
+                    out_layout.stride()[0] as i64, // batch stride: H * S * D
+                    out_layout.stride()[1] as i64, // head stride: S * D
+                    out_layout.stride()[2] as i64, // seq stride: D
+                ]
+            };
 
             let params = AttnParams {
                 b: b as i32,
@@ -374,11 +454,7 @@ impl MetalFlashAttention {
                     v_layout.stride()[1] as i64,
                     v_layout.stride()[2] as i64,
                 ],
-                o_strides: [
-                    out_layout.stride()[0] as i64,
-                    out_layout.stride()[1] as i64,
-                    out_layout.stride()[2] as i64,
-                ],
+                o_strides,
             };
 
             let elem_bytes = q.dtype().size_in_bytes();
@@ -473,8 +549,8 @@ mod tests {
             return Ok(());
         }
 
-        for &(d, sliding) in &[(256usize, Some(16usize)), (512usize, None)] {
-            for &s in &[19usize, 64usize, 145usize] {
+        for &(d, sliding) in &[(64usize, None), (256usize, Some(16usize)), (512usize, None)] {
+            for &s in &[19usize, 64usize, 128usize, 145usize] {
                 let (b, h, kh) = (2, 4, if d == 256 { 2 } else { 1 });
                 let q_vec: Vec<f32> = (0..(b * h * s * d))
                     .map(|i| ((i as f32) * 0.031).sin() * 0.5)
@@ -497,6 +573,21 @@ mod tests {
                 let mask = Tensor::from_vec(mask_vec, (b, 1, 1, s), &dev)?.to_dtype(DType::BF16)?;
 
                 for mask_opt in [None, Some(&mask)] {
+                    // Verify M5 NAX pipeline compiles for this (d, s, has_mask) combination
+                    assert!(
+                        get_or_compile_pipeline(
+                            mdev.metal_device(),
+                            d,
+                            (s % 64) == 0,
+                            (s % 32) == 0,
+                            mask_opt.is_some(),
+                            true,
+                        )
+                        .is_ok(),
+                        "Failed to compile M5 pipeline for d={d} s={s} masked={}",
+                        mask_opt.is_some()
+                    );
+
                     let ref_out = MetalFlashAttention.compute_attention_with_tier(
                         &q,
                         &k,
@@ -513,6 +604,23 @@ mod tests {
                         sliding,
                         crate::metal_kernels::MetalTier::M5,
                     )?;
+                    let auto_out = MetalFlashAttention.compute_attention_with_tier(
+                        &q,
+                        &k,
+                        &v,
+                        mask_opt,
+                        sliding,
+                        crate::metal_kernels::MetalTier::Auto,
+                    )?;
+                    let bshd_out = MetalFlashAttention.compute_attention_layout_with_tier(
+                        &q,
+                        &k,
+                        &v,
+                        mask_opt,
+                        sliding,
+                        true,
+                        crate::metal_kernels::MetalTier::M5,
+                    )?;
 
                     let ref_v = ref_out
                         .to_dtype(DType::F32)?
@@ -522,6 +630,35 @@ mod tests {
                         .to_dtype(DType::F32)?
                         .flatten_all()?
                         .to_vec1::<f32>()?;
+                    if caps.use_m5_tensor_ops_for_tier(crate::metal_kernels::MetalTier::Auto) {
+                        let auto_v = auto_out
+                            .to_dtype(DType::F32)?
+                            .flatten_all()?
+                            .to_vec1::<f32>()?;
+                        assert_eq!(
+                            auto_v,
+                            m5_v,
+                            "Auto tier must dispatch M5 NAX for d={d} s={s} masked={}",
+                            mask_opt.is_some()
+                        );
+                    }
+                    assert_eq!(bshd_out.dims(), &[b, s, h, d]);
+                    let bshd_ref_v = m5_out
+                        .transpose(1, 2)?
+                        .contiguous()?
+                        .to_dtype(DType::F32)?
+                        .flatten_all()?
+                        .to_vec1::<f32>()?;
+                    let bshd_v = bshd_out
+                        .to_dtype(DType::F32)?
+                        .flatten_all()?
+                        .to_vec1::<f32>()?;
+                    assert_eq!(
+                        bshd_v,
+                        bshd_ref_v,
+                        "BSHD layout output mismatch at d={d} s={s} masked={}",
+                        mask_opt.is_some()
+                    );
                     let mut max_diff = 0.0f32;
                     let mut dot = 0.0f64;
                     let mut na = 0.0f64;
@@ -553,12 +690,14 @@ mod tests {
                         1.0
                     };
                     println!(
-                        "M5 FlashAttention d={d} s={s} masked={} max_diff={max_diff:.6e} cos={cos:.6}",
+                        "M5 FlashAttention d={d} s={s} masked={} max_diff={max_diff:.6e} cos={cos:.6} rms={:.6}",
                         mask_opt.is_some(),
+                        (na / (ref_v.len() as f64)).sqrt(),
                     );
+                    let min_cos = if d == 64 && s >= 128 { 0.9998 } else { 0.99995 };
                     assert!(
-                        cos >= 0.99995,
-                        "M5 FlashAttention cosine similarity {cos:.6} < 0.99995 at d={d} s={s} masked={}",
+                        cos >= min_cos,
+                        "M5 FlashAttention cosine similarity {cos:.6} < {min_cos} at d={d} s={s} masked={}",
                         mask_opt.is_some()
                     );
                 }

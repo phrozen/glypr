@@ -148,6 +148,26 @@ const fn make_pixel_norm_lut() -> [f32; 256] {
 
 pub const PIXEL_NORM_LUT: [f32; 256] = make_pixel_norm_lut();
 
+/// Precomputed 256-entry BF16 lookup table matching `half::bf16::from_f32(PIXEL_NORM_LUT[i])`.
+const fn f32_to_bf16_const(x: f32) -> half::bf16 {
+    let bits = x.to_bits();
+    let lsb = (bits >> 16) & 1;
+    let rounding_bias = 0x7fff + lsb;
+    half::bf16::from_bits(((bits + rounding_bias) >> 16) as u16)
+}
+
+const fn make_pixel_norm_lut_bf16() -> [half::bf16; 256] {
+    let mut lut = [half::bf16::ZERO; 256];
+    let mut i = 0;
+    while i < 256 {
+        lut[i] = f32_to_bf16_const(PIXEL_NORM_LUT[i]);
+        i += 1;
+    }
+    lut
+}
+
+pub const PIXEL_NORM_LUT_BF16: [half::bf16; 256] = make_pixel_norm_lut_bf16();
+
 /// Preprocess image matching Google Gemma 4 Vision Image Processor
 pub fn preprocess_image(
     img: &DynamicImage,
@@ -261,6 +281,14 @@ mod tests {
         // Verify bounds [-1.0, 1.0]
         for &v in &processed.pixel_values {
             assert!((-1.0..=1.0).contains(&v));
+        }
+
+        // Verify BF16 LUT matches half::bf16::from_f32 bit-for-bit
+        for i in 0..256 {
+            assert_eq!(
+                PIXEL_NORM_LUT_BF16[i].to_bits(),
+                half::bf16::from_f32(PIXEL_NORM_LUT[i]).to_bits()
+            );
         }
 
         Ok(())

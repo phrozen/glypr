@@ -270,14 +270,13 @@ impl EmbeddingGemma2Model {
             let context = match layer.self_attn.attention_mode {
                 #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
                 crate::attention::AttentionMode::MetalFlash => {
-                    use crate::attention::AttentionBackend;
-                    crate::attention::MetalFlashAttention.compute_attention(
-                        &q,
-                        &k,
-                        &v,
-                        mask,
-                        layer.self_attn.sliding_window,
-                    )?
+                    crate::attention::MetalFlashAttention
+                        .compute_attention_bshd(&q, &k, &v, mask, layer.self_attn.sliding_window)?
+                        .reshape((
+                            batch,
+                            seq_len,
+                            layer.self_attn.num_attention_heads * layer.self_attn.head_dim,
+                        ))?
                 }
                 _ => {
                     use crate::attention::AttentionBackend;
@@ -285,7 +284,7 @@ impl EmbeddingGemma2Model {
                         layer.self_attn.num_attention_heads / layer.self_attn.num_key_value_heads;
                     let k_rep = repeat_kv(&k, num_groups)?;
                     let v_rep = repeat_kv(&v, num_groups)?;
-                    match layer.self_attn.attention_mode {
+                    let attn = match layer.self_attn.attention_mode {
                         crate::attention::AttentionMode::Standard => {
                             crate::attention::StandardAttention.compute_attention(
                                 &q,
@@ -316,14 +315,14 @@ impl EmbeddingGemma2Model {
                         }
                         #[allow(unreachable_patterns)]
                         _ => unreachable!(),
-                    }
+                    };
+                    attn.transpose(1, 2)?.contiguous()?.reshape((
+                        batch,
+                        seq_len,
+                        layer.self_attn.num_attention_heads * layer.self_attn.head_dim,
+                    ))?
                 }
             };
-            let context = context.transpose(1, 2)?.contiguous()?.reshape((
-                batch,
-                seq_len,
-                layer.self_attn.num_attention_heads * layer.self_attn.head_dim,
-            ))?;
             sync(&context)?;
             let attn_core_ms = elapsed_ms(t0);
 

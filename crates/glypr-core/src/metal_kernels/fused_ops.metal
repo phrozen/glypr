@@ -322,6 +322,39 @@ kernel void ple_scale_rms_norm_transpose_bf16(
 }
 
 // =========================================================================
+// 6b. Fused Single-Layer PLE Scale + RMSNorm ([B, S, D] -> [B, S, D])
+// =========================================================================
+kernel void ple_scale_rms_norm_bf16(
+    device const MLX_BF16* x [[buffer(0)]],
+    device const MLX_BF16* weight [[buffer(1)]],
+    device MLX_BF16* out [[buffer(2)]],
+    constant float& scale [[buffer(3)]],
+    constant float& eps [[buffer(4)]],
+    constant int& D [[buffer(5)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    #pragma clang fp reassociate(off)
+    device const MLX_BF16* x_row = x + size_t(row) * size_t(D);
+    device MLX_BF16* out_row = out + size_t(row) * size_t(D);
+
+    float thread_sum_sq = 0.0f;
+    for (int i = int(tid); i < D; i += 32) {
+        float v = float(MLX_BF16(float(x_row[i]) * scale));
+        thread_sum_sq += v * v;
+    }
+
+    float sum_sq = simd_sum(thread_sum_sq);
+    float inv_rms = rsqrt(sum_sq / float(D) + eps);
+
+    for (int i = int(tid); i < D; i += 32) {
+        float v = float(MLX_BF16(float(x_row[i]) * scale));
+        float normed = (v * inv_rms) * float(weight[i]);
+        out_row[i] = MLX_BF16(normed);
+    }
+}
+
+// =========================================================================
 // 7. Fused Gate+Up GeGLU Kernel (Reads Concatenated [rows, 2*D] Directly)
 // =========================================================================
 kernel void geglu_gate_up_bf16(
@@ -817,5 +850,300 @@ kernel void q8_0_mm_f32(
 ) {
     threadgroup uchar shared_memory[8192];
     q8_0_mm_impl<float>(src0, src1, dst, ne00, ne0, ne1, shared_memory, tgpig, tiitg, sgitg);
+}
+
+// =========================================================================
+// 12. Fused Mean Pooling (FP32 Accum) + L2 Normalization Kernels
+// =========================================================================
+kernel void pool_mean_bf16_to_f32(
+    device const MLX_BF16* x [[buffer(0)]],
+    device const float* mask [[buffer(1)]],
+    device float* pooled_out [[buffer(2)]],
+    constant int& S [[buffer(3)]],
+    constant int& H [[buffer(4)]],
+    constant int& out_dim [[buffer(5)]],
+    constant int& has_mask [[buffer(6)]],
+    uint2 tgpig [[threadgroup_position_in_grid]],
+    uint2 tid2 [[thread_position_in_threadgroup]]
+) {
+    uint lx = tid2.x; // 0..15
+    uint ly = tid2.y; // 0..15
+    int d = int(tgpig.x) * 16 + int(lx);
+    int b = int(tgpig.y);
+
+    threadgroup float smem[16][16];
+    threadgroup float smem_denom[16];
+
+    float sum = 0.0f;
+    float denom_sum = 0.0f;
+    size_t batch_base = size_t(b) * size_t(S) * size_t(H);
+    size_t mask_base = size_t(b) * size_t(S);
+
+    for (int s = int(ly); s < S; s += 16) {
+        float m = has_mask ? mask[mask_base + size_t(s)] : 1.0f;
+        if (d < out_dim) {
+            sum += float(x[batch_base + size_t(s) * size_t(H) + size_t(d)]) * m;
+        }
+        if (lx == 0 && has_mask) {
+            denom_sum += m;
+        }
+    }
+
+    smem[ly][lx] = sum;
+    if (lx == 0 && has_mask) {
+        smem_denom[ly] = denom_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (ly == 0 && d < out_dim) {
+        float total = 0.0f;
+        #pragma unroll(16)
+        for (int i = 0; i < 16; ++i) {
+            total += smem[i][lx];
+        }
+        float denom;
+        if (has_mask) {
+            float m_tot = 0.0f;
+            #pragma unroll(16)
+            for (int i = 0; i < 16; ++i) {
+                m_tot += smem_denom[i];
+            }
+            denom = metal::max(m_tot, 1e-9f);
+        } else {
+            denom = float(S);
+        }
+        pooled_out[size_t(b) * size_t(out_dim) + size_t(d)] = total / denom;
+    }
+}
+
+kernel void l2norm_f32_to_bf16(
+    device const float* pooled [[buffer(0)]],
+    device MLX_BF16* out [[buffer(1)]],
+    constant int& out_dim [[buffer(2)]],
+    uint tgpig [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    int b = int(tgpig);
+    uint sg_id = tid / 32;
+    uint lane = tid % 32;
+
+    threadgroup float sg_sums[8];
+    threadgroup float inv_norm_shared;
+
+    float sq = 0.0f;
+    device const float* row_in = pooled + size_t(b) * size_t(out_dim);
+    device MLX_BF16* row_out = out + size_t(b) * size_t(out_dim);
+
+    for (int d = int(tid); d < out_dim; d += 256) {
+        float v = row_in[d];
+        sq += v * v;
+    }
+
+    float warp_sum = simd_sum(sq);
+    if (lane == 0) {
+        sg_sums[sg_id] = warp_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0) {
+        float tot = 0.0f;
+        #pragma unroll(8)
+        for (int s = 0; s < 8; ++s) {
+            tot += sg_sums[s];
+        }
+        inv_norm_shared = rsqrt(metal::max(tot, 1e-24f));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float inv_norm = inv_norm_shared;
+    for (int d = int(tid); d < out_dim; d += 256) {
+        row_out[d] = MLX_BF16(row_in[d] * inv_norm);
+    }
+}
+
+// =========================================================================
+// 13. Direct Q8_0 -> BF16 Dequantization (Zero F32 Load Spike for Embeddings)
+// =========================================================================
+kernel void q8_0_dequant_bf16(
+    device const uchar* src0 [[buffer(0)]],
+    device MLX_BF16* dst [[buffer(1)]],
+    constant uint& total_blocks [[buffer(2)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    uint blk_id = tid / 8u;
+    if (blk_id >= total_blocks) return;
+
+    uint sub = tid % 8u;
+    device const block_q8_0* blk = (device const block_q8_0*)(src0 + size_t(blk_id) * 34u);
+    float d = float(blk->d);
+    device const packed_char4* qs4 = (device const packed_char4*)(blk->qs + sub * 4u);
+    char4 q4 = char4(*qs4);
+
+    size_t out_base = size_t(blk_id) * 32u + size_t(sub) * 4u;
+    dst[out_base + 0] = MLX_BF16(float(q4.x) * d);
+    dst[out_base + 1] = MLX_BF16(float(q4.y) * d);
+    dst[out_base + 2] = MLX_BF16(float(q4.z) * d);
+    dst[out_base + 3] = MLX_BF16(float(q4.w) * d);
+}
+
+// =========================================================================
+// 14. Fused Vision 2D Spatial Average Pooling (3x3 -> BF16, Zero F32 Buffer)
+// =========================================================================
+kernel void vision_spatial_pool_3x3_bf16(
+    device const MLX_BF16* x [[buffer(0)]],
+    device MLX_BF16* out [[buffer(1)]],
+    constant int& patch_w [[buffer(2)]],
+    constant int& patch_h [[buffer(3)]],
+    constant int& k [[buffer(4)]],
+    constant int& hidden_size [[buffer(5)]],
+    constant float& scale [[buffer(6)]],
+    uint3 tgpig [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    int d = int(tgpig.x) * 256 + int(tid);
+    if (d >= hidden_size) return;
+
+    int out_w = patch_w / k;
+    int out_h = patch_h / k;
+    int out_tok = int(tgpig.y);
+    int b = int(tgpig.z);
+    int oy = out_tok / out_w;
+    int ox = out_tok % out_w;
+
+    size_t in_batch_base = size_t(b) * size_t(patch_h) * size_t(patch_w) * size_t(hidden_size);
+    float acc = 0.0f;
+    for (int ky = 0; ky < k; ++ky) {
+        size_t py = size_t(oy * k + ky);
+        for (int kx = 0; kx < k; ++kx) {
+            size_t px = size_t(ox * k + kx);
+            size_t patch_idx = py * size_t(patch_w) + px;
+            acc += float(x[in_batch_base + patch_idx * size_t(hidden_size) + size_t(d)]);
+        }
+    }
+    size_t out_idx = (size_t(b) * size_t(out_h * out_w) + size_t(out_tok)) * size_t(hidden_size) + size_t(d);
+    out[out_idx] = MLX_BF16(acc * scale);
+}
+
+// =========================================================================
+// 15. Fused Audio Conformer Chunked Relative Attention (BF16 I/O, F32 Softmax)
+// =========================================================================
+kernel void audio_chunked_rel_attn_bf16(
+    device const MLX_BF16* q [[buffer(0)]],
+    device const MLX_BF16* k [[buffer(1)]],
+    device const MLX_BF16* v [[buffer(2)]],
+    device const float* per_dim_scale [[buffer(3)]],
+    device const float* rel_k [[buffer(4)]],
+    device const float* mask [[buffer(5)]],
+    device MLX_BF16* out [[buffer(6)]],
+    constant int& S [[buffer(7)]],
+    constant int& H [[buffer(8)]],
+    constant int& D [[buffer(9)]],
+    constant int& chunk_size [[buffer(10)]],
+    constant int& max_past_horizon [[buffer(11)]],
+    constant int& context_size [[buffer(12)]],
+    constant int& num_rel_pos [[buffer(13)]],
+    constant float& q_scale [[buffer(14)]],
+    constant float& k_scale [[buffer(15)]],
+    constant float& softcap [[buffer(16)]],
+    uint3 tgpig [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    int blk = int(tgpig.x);
+    int h = int(tgpig.y);
+    int b = int(tgpig.z);
+    uint sg_id = tid / 32u;
+    uint lane = tid % 32u;
+
+    device const float* rel_k_h = rel_k + size_t(h) * size_t(D) * size_t(num_rel_pos);
+
+    for (int q_idx = int(sg_id); q_idx < chunk_size; q_idx += 4) {
+        int t_q = blk * chunk_size + q_idx;
+        if (t_q >= S) continue;
+
+        float q_reg[8];
+        float o_reg[8];
+        size_t q_base = (size_t(b) * size_t(S) + size_t(t_q)) * size_t(H * D) + size_t(h * D);
+        #pragma clang loop unroll(full)
+        for (int e = 0; e < 8; ++e) {
+            int d = int(lane) + e * 32;
+            if (d < D) {
+                q_reg[e] = float(q[q_base + size_t(d)]) * per_dim_scale[d] * q_scale;
+                o_reg[e] = 0.0f;
+            } else {
+                q_reg[e] = 0.0f;
+                o_reg[e] = 0.0f;
+            }
+        }
+
+        float m_old = -metal::numeric_limits<float>::infinity();
+        float sum_exp = 0.0f;
+        size_t mask_base = (size_t(blk) * size_t(chunk_size) + size_t(q_idx)) * size_t(context_size);
+
+        for (int c = 0; c < context_size; ++c) {
+            int t_k = blk * chunk_size - max_past_horizon + c;
+            float mask_val = mask[mask_base + size_t(c)];
+            if (mask_val <= -1e8f || t_k < 0 || t_k >= S) {
+                continue;
+            }
+
+            float partial_ac = 0.0f;
+            float partial_bd = 0.0f;
+
+            int flat = q_idx * context_size + c;
+            int rel_row = flat / (context_size + 1);
+            int rel_r = flat % (context_size + 1);
+            int t_q_rel = blk * chunk_size + rel_row;
+            bool valid_rel = (rel_r < num_rel_pos) && (t_q_rel < S);
+            bool same_q_rel = (rel_row == q_idx);
+
+            size_t k_base = (size_t(b) * size_t(S) + size_t(t_k)) * size_t(H * D) + size_t(h * D);
+            size_t q_rel_base = (size_t(b) * size_t(S) + size_t(t_q_rel)) * size_t(H * D) + size_t(h * D);
+
+            #pragma clang loop unroll(full)
+            for (int e = 0; e < 8; ++e) {
+                int d = int(lane) + e * 32;
+                if (d < D) {
+                    float kv = float(k[k_base + size_t(d)]) * k_scale;
+                    partial_ac += q_reg[e] * kv;
+                    if (valid_rel) {
+                        float qv_rel = same_q_rel
+                            ? q_reg[e]
+                            : (float(q[q_rel_base + size_t(d)]) * per_dim_scale[d] * q_scale);
+                        partial_bd += qv_rel * rel_k_h[size_t(d) * size_t(num_rel_pos) + size_t(rel_r)];
+                    }
+                }
+            }
+
+            float score = simd_sum(partial_ac + partial_bd);
+            if (softcap > 0.0f) {
+                score = softcap * metal::tanh(score / softcap);
+            }
+            score += mask_val;
+
+            float m_new = metal::max(m_old, score);
+            float factor = (m_old == -metal::numeric_limits<float>::infinity()) ? 0.0f : metal::exp(m_old - m_new);
+            float p = metal::exp(score - m_new);
+            m_old = m_new;
+            sum_exp = sum_exp * factor + p;
+
+            #pragma clang loop unroll(full)
+            for (int e = 0; e < 8; ++e) {
+                int d = int(lane) + e * 32;
+                if (d < D) {
+                    float vv = float(v[k_base + size_t(d)]);
+                    o_reg[e] = o_reg[e] * factor + p * vv;
+                }
+            }
+        }
+
+        float inv_sum = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
+        #pragma clang loop unroll(full)
+        for (int e = 0; e < 8; ++e) {
+            int d = int(lane) + e * 32;
+            if (d < D) {
+                out[q_base + size_t(d)] = MLX_BF16(o_reg[e] * inv_sum);
+            }
+        }
+    }
 }
 

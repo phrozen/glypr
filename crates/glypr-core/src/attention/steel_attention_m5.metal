@@ -328,6 +328,19 @@ void steel_attention_m5(
     }
 }
 
+template [[host_name("steel_attention_m5_bfloat16_bq64_bk32_bd64_wm4")]]
+[[kernel]] void steel_attention_m5<64, 32, 64, 4>(
+    device bfloat* Q [[buffer(0)]],
+    device bfloat* K [[buffer(1)]],
+    device bfloat* V [[buffer(2)]],
+    device bfloat* O [[buffer(3)]],
+    const constant AttnParams* params [[buffer(4)]],
+    const constant AttnMaskParams* mask_params [[buffer(5), function_constant(has_mask)]],
+    const device bfloat* mask [[buffer(6), function_constant(has_mask)]],
+    uint simd_group_id [[simdgroup_index_in_threadgroup]],
+    uint3 tid [[threadgroup_position_in_grid]]
+);
+
 template [[host_name("steel_attention_m5_bfloat16_bq64_bk32_bd256_wm4")]]
 [[kernel]] void steel_attention_m5<64, 32, 256, 4>(
     device bfloat* Q [[buffer(0)]],
