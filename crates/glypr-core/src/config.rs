@@ -217,8 +217,13 @@ impl TextConfig {
             },
         );
 
+        // llama.cpp exports gemma-embedding2.attention.sliding_window as the full
+        // bidirectional span (2 * radius = 1024), whereas HF config.json and glypr's
+        // attention masks / FlashAttention kernels use the one-sided half-window radius (512).
         let sliding_window = get_u32(metadata.get("gemma-embedding2.attention.sliding_window"))
-            .unwrap_or(512) as usize;
+            .filter(|&w| w > 0)
+            .map(|w| (w as usize / 2).max(1))
+            .unwrap_or(512);
 
         let config = Self {
             hidden_size,
@@ -538,7 +543,7 @@ mod tests {
         );
 
         let cfg = TextConfig::from_gguf_metadata(&meta).unwrap();
-        assert_eq!(cfg.sliding_window, 1024);
+        assert_eq!(cfg.sliding_window, 512);
         assert_eq!(cfg.layer_types.len(), 6);
 
         // Mismatched sliding_window_pattern length must fail

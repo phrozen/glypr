@@ -149,33 +149,7 @@ impl LinearOp {
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {
-            Self::Standard(l) => {
-                #[cfg(feature = "metal")]
-                if l.bias().is_none()
-                    && x.device().is_metal()
-                    && x.dtype() == DType::BF16
-                    && l.weight().dtype() == DType::BF16
-                    && l.weight().rank() == 2
-                {
-                    let (_n, k) = l.weight().dims2()?;
-                    let x_dims = x.dims();
-                    if k > 0
-                        && k.is_multiple_of(32)
-                        && !x_dims.is_empty()
-                        && x_dims[x_dims.len() - 1] == k
-                    {
-                        let m = x.elem_count() / k;
-                        if m >= 32
-                            && let Device::Metal(mdev) = x.device()
-                            && crate::metal_kernels::MetalCapabilities::detect(mdev.metal_device())
-                                .use_m5_tensor_ops()
-                        {
-                            return crate::metal_kernels::fused_metal_bf16_matmul(l.weight(), x);
-                        }
-                    }
-                }
-                l.forward(x)
-            }
+            Self::Standard(l) => l.forward(x),
             Self::Quantized(q) => {
                 let orig_dtype = x.dtype();
                 if orig_dtype != DType::F32 {

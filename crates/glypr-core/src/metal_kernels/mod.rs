@@ -1020,7 +1020,7 @@ pub fn fused_metal_pool_and_l2norm(
             let m_offset = m_layout.start_offset() * DType::F32.size_in_bytes();
             enc_ref.set_input_buffer(1, Some(m_buf), m_offset);
         } else {
-            enc_ref.set_input_buffer(1, Some(p_buf), p_offset);
+            enc_ref.set_input_buffer(1, Some(x_buf), x_offset);
         }
         enc_ref.set_output_buffer(2, Some(p_buf), p_offset);
         enc_ref.set_bytes(3, &s_i32);

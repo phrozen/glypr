@@ -338,17 +338,10 @@ impl VisionAttention {
         };
 
         // Non-causal Bidirectional Attention (scaling = 1.0, softcapping = 1.0 / disabled)
-        // On Metal BF16: dispatch M5 NAX / Steel FlashAttention directly in [B, S, H, D] layout
-        // (zero permute/contiguous copy churn and BD=64 M5 Neural Accelerator execution).
-        #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
-        if q.device().is_metal() && q.dtype() == DType::BF16 {
-            let attn_output = crate::attention::MetalFlashAttention
-                .compute_attention_bshd(&q, &k, &v, None, None)?
-                .reshape((batch, seq_len, self.num_heads * self.head_dim))?;
-            return self.o_proj.forward(&attn_output);
-        }
-
-        // On Metal non-BF16: dispatch Candle SDPA; on CPU: float32 softmax attention
+        // On Metal GPU: dispatch Candle SDPA (keeps softmax probabilities in F32 for P @ V and
+        // preserves BF16 golden parity across both M5 and legacy tiers; Steel M5 FlashAttention
+        // quantizes P to BF16 before P @ V, which degrades long-sequence d=64 vision attention).
+        // On CPU: standard float32 softmax attention.
         let attn_output = if q.device().is_metal() {
             candle_nn::ops::sdpa(&q, &k, &v, None, false, 1.0, 1.0)?
         } else {
