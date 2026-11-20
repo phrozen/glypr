@@ -224,20 +224,19 @@ Add `glypr-core` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-glypr-core = { version = "0.3.0", features = ["metal"] }
+glypr-core = { version = "0.4.0", features = ["metal"] }
 ```
 
 ### Self-Contained GGUF Loading & Unified Embedding API
 
 ```rust
-use anyhow::Result;
 use candle_core::Device;
 use glypr_core::{
-    cosine_similarity, truncate_mrl, AttentionMode, GlyprEmbedder, ModalityPart, Task,
-    VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH,
+    cosine_similarity, truncate_mrl, AttentionMode, GlyprEmbedder, GlyprResult, ModalityPart,
+    Task, VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH,
 };
 
-fn main() -> Result<()> {
+fn main() -> GlyprResult<()> {
     let device = Device::new_metal(0)?;
 
     // 1. Load directly from a single GGUF file (no external config or tokenizer files required!)

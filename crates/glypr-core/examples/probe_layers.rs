@@ -52,7 +52,7 @@ fn main() -> Result<()> {
         .unwrap();
     let content = entry["content"].as_str().unwrap();
 
-    let token_ids = embedder.tokenizer.encode(content)?;
+    let token_ids = embedder.tokenizer().encode(content)?;
     let input_ids = candle_core::Tensor::new(&token_ids[..8192], &device)?.unsqueeze(0)?;
 
     for mode in [AttentionMode::ChunkedSliding] {
@@ -67,7 +67,7 @@ fn main() -> Result<()> {
         println!("Before forward: {:.1} MB", get_metal_mb());
 
         // Forward through backbone step-by-step
-        let model = &embedder.model;
+        let model = embedder.model();
         let inputs_embeds = model.embed_tokens.forward(&input_ids)?;
         let inputs_embeds = (inputs_embeds * model.embed_scale)?;
         println!("After embed_tokens: {:.1} MB", get_metal_mb());

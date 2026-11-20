@@ -616,9 +616,8 @@ fn build_tiny_test_embedder(max_seq_len: usize, with_dummy_mmproj: bool) -> Glyp
     use candle_core::quantized::gguf_file::Value;
     use glypr_core::_candle_nn::{Embedding, Linear};
     use glypr_core::{
-        EmbeddingGemma2Model, LinearOp, MultimodalProjector, TextBackendPolicy,
-        VisionBackendPolicy, attention, config, layer, mlp, norm, ple, rope,
-        tokenizer::GlyprTokenizer,
+        EmbeddingGemma2Model, LinearOp, MultimodalProjector, attention, config, layer, mlp, norm,
+        ple, rope, tokenizer::GlyprTokenizer,
     };
     use std::collections::HashMap;
 
@@ -757,32 +756,18 @@ fn build_tiny_test_embedder(max_seq_len: usize, with_dummy_mmproj: bool) -> Glyp
     );
     let tokenizer = GlyprTokenizer::from_gguf_metadata(&meta).unwrap();
 
-    let multimodal = if with_dummy_mmproj {
-        Some(MultimodalProjector {
+    let mut embedder =
+        GlyprEmbedder::from_parts(model, tokenizer, device, dtype).with_max_seq_len(max_seq_len);
+    if with_dummy_mmproj {
+        embedder.set_multimodal_projector(MultimodalProjector {
             vision_tower: None,
             audio_tower: None,
             config: config::MultimodalConfig::from_gguf_metadata(&HashMap::new()),
             device: Device::Cpu,
             dtype: DType::F32,
-        })
-    } else {
-        None
-    };
-
-    GlyprEmbedder {
-        model,
-        tokenizer,
-        device,
-        dtype,
-        multimodal,
-        max_seq_len,
-        #[cfg(any(feature = "coreml", feature = "ane"))]
-        coreml_vision: None,
-        #[cfg(any(feature = "coreml", feature = "ane"))]
-        coreml_text: None,
-        vision_backend: VisionBackendPolicy::Auto,
-        text_backend: TextBackendPolicy::Auto,
+        });
     }
+    embedder
 }
 
 fn build_tiny_test_router(

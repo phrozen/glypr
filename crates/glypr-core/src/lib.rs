@@ -13,9 +13,9 @@
 //!
 //! ## Quick Start
 //! ```no_run
-//! use glypr_core::{AttentionMode, GlyprEmbedder, Task};
+//! use glypr_core::{AttentionMode, GlyprEmbedder, GlyprResult, Task};
 //!
-//! # fn main() -> anyhow::Result<()> {
+//! # fn main() -> GlyprResult<()> {
 //! let mut embedder = GlyprEmbedder::builder()
 //!     .gguf_canonical(false)
 //!     .attention_mode(AttentionMode::ChunkedSliding)
@@ -60,7 +60,7 @@ pub use attention::AttentionMode;
 pub use candle_nn as _candle_nn;
 #[cfg(feature = "coreml")]
 pub use coreml::{CoreMLTextBackbone, CoreMLVisionTower, VisionGridInfo};
-pub use error::GlyprError;
+pub use error::{GlyprError, GlyprResult};
 pub use linear::LinearOp;
 pub use model::EmbeddingGemma2Model;
 pub use multimodal::{
@@ -76,7 +76,7 @@ pub use util::{
     truncate_mrl, with_autorelease_pool,
 };
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use candle_core::{DType, Device, Module, Tensor};
 use config::TextConfig;
 use std::path::{Path, PathBuf};
@@ -194,19 +194,19 @@ pub struct CoreMLAttachReport {
 }
 
 pub struct GlyprEmbedder {
-    pub model: EmbeddingGemma2Model,
-    pub tokenizer: GlyprTokenizer,
-    pub device: Device,
+    model: EmbeddingGemma2Model,
+    tokenizer: GlyprTokenizer,
+    device: Device,
     #[allow(dead_code)]
-    pub dtype: DType,
-    pub multimodal: Option<MultimodalProjector>,
-    pub max_seq_len: usize,
+    dtype: DType,
+    multimodal: Option<MultimodalProjector>,
+    max_seq_len: usize,
     #[cfg(feature = "coreml")]
-    pub coreml_vision: Option<CoreMLVisionTower>,
+    coreml_vision: Option<CoreMLVisionTower>,
     #[cfg(feature = "coreml")]
-    pub coreml_text: Option<CoreMLTextBackbone>,
-    pub vision_backend: VisionBackendPolicy,
-    pub text_backend: TextBackendPolicy,
+    coreml_text: Option<CoreMLTextBackbone>,
+    vision_backend: VisionBackendPolicy,
+    text_backend: TextBackendPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -429,7 +429,7 @@ impl GlyprBuilder {
     }
 
     /// Construct and initialize the [`GlyprEmbedder`].
-    pub fn build(self) -> Result<GlyprEmbedder> {
+    pub fn build(self) -> GlyprResult<GlyprEmbedder> {
         let device = match self.device {
             Some(d) => d,
             None => {
@@ -489,9 +489,9 @@ impl GlyprBuilder {
             #[cfg(not(feature = "coreml"))]
             {
                 let _ = (dir, self.coreml_compute_units);
-                anyhow::bail!(
-                    "CoreML directory specified, but glypr-core was built without --features coreml / ane"
-                );
+                return Err(GlyprError::InvalidInput(
+                    "CoreML directory specified, but glypr-core was built without --features coreml / ane".to_string(),
+                ));
             }
         }
 
@@ -505,6 +505,29 @@ impl GlyprEmbedder {
         GlyprBuilder::new()
     }
 
+    /// Construct a [`GlyprEmbedder`] from pre-built components (e.g., for custom loading or test harnesses).
+    pub fn from_parts(
+        model: EmbeddingGemma2Model,
+        tokenizer: GlyprTokenizer,
+        device: Device,
+        dtype: DType,
+    ) -> Self {
+        Self {
+            model,
+            tokenizer,
+            device,
+            dtype,
+            multimodal: None,
+            max_seq_len: DEFAULT_MAX_SEQ_LEN,
+            #[cfg(feature = "coreml")]
+            coreml_vision: None,
+            #[cfg(feature = "coreml")]
+            coreml_text: None,
+            vision_backend: VisionBackendPolicy::Auto,
+            text_backend: TextBackendPolicy::Auto,
+        }
+    }
+
     fn default_dtype_for_device(device: &Device) -> DType {
         if device.is_metal() {
             DType::BF16
@@ -513,7 +536,7 @@ impl GlyprEmbedder {
         }
     }
 
-    pub fn load<P: AsRef<Path>>(model_dir: P, device: &Device, dtype: DType) -> Result<Self> {
+    pub fn load<P: AsRef<Path>>(model_dir: P, device: &Device, dtype: DType) -> GlyprResult<Self> {
         let dir = model_dir.as_ref();
         let config_path = dir.join("config.json");
         let tokenizer_path = dir.join("tokenizer.json");
@@ -524,40 +547,30 @@ impl GlyprEmbedder {
         let tokenizer = GlyprTokenizer::from_file(&tokenizer_path)
             .with_context(|| format!("Failed to load tokenizer from {:?}", tokenizer_path))?;
 
-        let file = std::fs::File::open(&weights_path)
-            .with_context(|| format!("Failed to open weights from {:?}", weights_path))?;
+        let file = std::fs::File::open(&weights_path)?;
         // SAFETY: Model weights are read-only during deserialization and not mutated concurrently.
         let weights_mmap = unsafe { memmap2::Mmap::map(&file) }
             .with_context(|| format!("Failed to mmap weights from {:?}", weights_path))?;
-        let safetensors = safetensors::SafeTensors::deserialize(&weights_mmap)
-            .map_err(|e| anyhow::anyhow!("Safetensors deserialization failed: {}", e))?;
+        let safetensors = safetensors::SafeTensors::deserialize(&weights_mmap).map_err(|e| {
+            GlyprError::ModelLoad(format!("Safetensors deserialization failed: {}", e))
+        })?;
 
         let model = EmbeddingGemma2Model::from_safetensors(&safetensors, config, device, dtype)
-            .map_err(|e| anyhow::anyhow!("Model initialization failed: {}", e))?;
+            .map_err(|e| GlyprError::ModelLoad(format!("Model initialization failed: {}", e)))?;
 
-        let embedder = Self {
-            model,
-            tokenizer,
-            device: device.clone(),
-            dtype,
-            multimodal: None,
-            max_seq_len: DEFAULT_MAX_SEQ_LEN,
-            #[cfg(feature = "coreml")]
-            coreml_vision: None,
-            #[cfg(feature = "coreml")]
-            coreml_text: None,
-            vision_backend: VisionBackendPolicy::Auto,
-            text_backend: TextBackendPolicy::Auto,
-        };
+        let embedder = Self::from_parts(model, tokenizer, device.clone(), dtype);
         embedder.warmup_metal()?;
         Ok(embedder)
     }
 
     /// Load a 100% self-contained GGUF file (extracts model weights, architecture config, and BPE tokenizer).
     /// Zero external file or HuggingFace snapshot dependencies!
-    pub fn load_gguf<P: AsRef<Path>>(gguf_path: P, device: &Device, dtype: DType) -> Result<Self> {
-        let file = std::fs::File::open(gguf_path.as_ref())
-            .with_context(|| format!("Failed to open GGUF file {:?}", gguf_path.as_ref()))?;
+    pub fn load_gguf<P: AsRef<Path>>(
+        gguf_path: P,
+        device: &Device,
+        dtype: DType,
+    ) -> GlyprResult<Self> {
+        let file = std::fs::File::open(gguf_path.as_ref())?;
         let mut reader = std::io::BufReader::with_capacity(8 * 1024 * 1024, file);
 
         let content =
@@ -576,33 +589,22 @@ impl GlyprEmbedder {
 
         let model =
             EmbeddingGemma2Model::from_gguf_content(&content, &mut reader, config, device, dtype)
-                .map_err(|e| anyhow::anyhow!("GGUF Model initialization failed: {}", e))?;
+                .map_err(|e| {
+                GlyprError::ModelLoad(format!("GGUF Model initialization failed: {}", e))
+            })?;
 
-        let embedder = Self {
-            model,
-            tokenizer,
-            device: device.clone(),
-            dtype,
-            multimodal: None,
-            max_seq_len: DEFAULT_MAX_SEQ_LEN,
-            #[cfg(feature = "coreml")]
-            coreml_vision: None,
-            #[cfg(feature = "coreml")]
-            coreml_text: None,
-            vision_backend: VisionBackendPolicy::Auto,
-            text_backend: TextBackendPolicy::Auto,
-        };
+        let embedder = Self::from_parts(model, tokenizer, device.clone(), dtype);
         embedder.warmup_metal()?;
         Ok(embedder)
     }
 
     /// Load self-contained BF16 GGUF file (e.g., `embeddinggemma-2-BF16.gguf`)
-    pub fn load_gguf_bf16<P: AsRef<Path>>(gguf_path: P, device: &Device) -> Result<Self> {
+    pub fn load_gguf_bf16<P: AsRef<Path>>(gguf_path: P, device: &Device) -> GlyprResult<Self> {
         Self::load_gguf(gguf_path, device, Self::default_dtype_for_device(device))
     }
 
     /// Load self-contained Q8_0 quantized GGUF file (e.g., `embeddinggemma-2-Q8_0.gguf`)
-    pub fn load_gguf_q8<P: AsRef<Path>>(gguf_path: P, device: &Device) -> Result<Self> {
+    pub fn load_gguf_q8<P: AsRef<Path>>(gguf_path: P, device: &Device) -> GlyprResult<Self> {
         Self::load_gguf(gguf_path, device, Self::default_dtype_for_device(device))
     }
 
@@ -634,6 +636,22 @@ impl GlyprEmbedder {
     /// Attached GGUF multimodal projector, if any.
     pub fn multimodal(&self) -> Option<&MultimodalProjector> {
         self.multimodal.as_ref()
+    }
+
+    /// Mutable reference to the attached GGUF multimodal projector, if any.
+    pub fn multimodal_mut(&mut self) -> Option<&mut MultimodalProjector> {
+        self.multimodal.as_mut()
+    }
+
+    /// Set a pre-constructed multimodal projector on this embedder.
+    pub fn set_multimodal_projector(&mut self, projector: MultimodalProjector) {
+        self.multimodal = Some(projector);
+    }
+
+    /// Builder-style helper to attach a pre-constructed multimodal projector.
+    pub fn with_multimodal_projector(mut self, projector: MultimodalProjector) -> Self {
+        self.multimodal = Some(projector);
+        self
     }
 
     /// Maximum supported input sequence length in tokens.
@@ -669,7 +687,10 @@ impl GlyprEmbedder {
     }
 
     /// Dynamically attach an optional multimodal projector GGUF (`mmproj-*.gguf`)
-    pub fn attach_multimodal_projector<P: AsRef<Path>>(&mut self, mmproj_path: P) -> Result<()> {
+    pub fn attach_multimodal_projector<P: AsRef<Path>>(
+        &mut self,
+        mmproj_path: P,
+    ) -> GlyprResult<()> {
         let projector =
             MultimodalProjector::from_gguf_file(mmproj_path.as_ref(), &self.device, self.dtype)?;
         self.multimodal = Some(projector);
@@ -688,7 +709,7 @@ impl GlyprEmbedder {
         &mut self,
         dir: P,
         compute_units: CoreMLComputeUnits,
-    ) -> Result<()> {
+    ) -> GlyprResult<()> {
         let tower = CoreMLVisionTower::from_dir(dir, compute_units)?;
         self.coreml_vision = Some(tower);
         Ok(())
@@ -706,7 +727,7 @@ impl GlyprEmbedder {
         &mut self,
         dir: P,
         compute_units: CoreMLComputeUnits,
-    ) -> Result<()> {
+    ) -> GlyprResult<()> {
         let backbone = CoreMLTextBackbone::from_dir(dir, compute_units)?;
         self.coreml_text = Some(backbone);
         Ok(())
@@ -721,14 +742,11 @@ impl GlyprEmbedder {
         &mut self,
         dir: P,
         compute_units: CoreMLComputeUnits,
-    ) -> Result<CoreMLAttachReport> {
+    ) -> GlyprResult<CoreMLAttachReport> {
         let dir_ref = dir.as_ref();
         if !dir_ref.is_dir() {
-            let err = GlyprError::CoreMLNotFound {
+            return Err(GlyprError::CoreMLNotFound {
                 path: dir_ref.to_path_buf(),
-            };
-            return Err(anyhow::Error::new(err)).with_context(|| {
-                format!("CoreML models directory not found at {}", dir_ref.display())
             });
         }
 
@@ -757,16 +775,11 @@ impl GlyprEmbedder {
         }
 
         if report.vision_grids.is_empty() && report.text_seq_lens.is_empty() {
-            let err = GlyprError::CoreMLNotFound {
-                path: dir_ref.to_path_buf(),
-            };
-            return Err(anyhow::Error::new(err)).with_context(|| {
-                format!(
-                    "No usable CoreML vision or text models found in {}: {}",
-                    dir_ref.display(),
-                    report.warnings.join(" | ")
-                )
-            });
+            return Err(GlyprError::ModelLoad(format!(
+                "No usable CoreML vision or text models found in {}: {}",
+                dir_ref.display(),
+                report.warnings.join(" | ")
+            )));
         }
 
         Ok(report)
@@ -775,7 +788,7 @@ impl GlyprEmbedder {
     #[cfg(feature = "coreml")]
     /// Pre-warm all attached CoreML vision and text models so the first inference request
     /// does not pay cold ANE graph compilation latency.
-    pub fn warmup_coreml(&self) -> Result<()> {
+    pub fn warmup_coreml(&self) -> GlyprResult<()> {
         if let Some(cv) = &self.coreml_vision {
             cv.warmup()?;
         }
@@ -788,7 +801,7 @@ impl GlyprEmbedder {
     /// Pre-populate RoPE cos/sin tables up to `max_position_embeddings.min(DEFAULT_MAX_SEQ_LEN)`
     /// and, on Metal devices, pre-compile hot Metal shader pipelines so the first request incurs
     /// zero cold-start compilation or RoPE table-construction jitter. No-op beyond RoPE on CPU.
-    pub fn warmup_metal(&self) -> Result<()> {
+    pub fn warmup_metal(&self) -> GlyprResult<()> {
         let precompute_len = self
             .model
             .config
@@ -796,20 +809,15 @@ impl GlyprEmbedder {
             .clamp(1, DEFAULT_MAX_SEQ_LEN);
         self.model
             .rope_sliding
-            .precompute(precompute_len, &self.device, self.dtype)
-            .map_err(|e| anyhow::anyhow!("Failed to precompute sliding RoPE tables: {}", e))?;
+            .precompute(precompute_len, &self.device, self.dtype)?;
         self.model
             .rope_full
-            .precompute(precompute_len, &self.device, self.dtype)
-            .map_err(|e| anyhow::anyhow!("Failed to precompute full RoPE tables: {}", e))?;
+            .precompute(precompute_len, &self.device, self.dtype)?;
 
         #[cfg(feature = "metal")]
         if let Device::Metal(mdev) = &self.device {
-            crate::metal_kernels::warmup_pipelines(mdev.metal_device())
-                .map_err(|e| anyhow::anyhow!("Failed to warm up Metal fused pipelines: {}", e))?;
-            crate::attention::MetalFlashAttention::warmup_pipelines(mdev.metal_device()).map_err(
-                |e| anyhow::anyhow!("Failed to warm up Metal FlashAttention pipelines: {}", e),
-            )?;
+            crate::metal_kernels::warmup_pipelines(mdev.metal_device())?;
+            crate::attention::MetalFlashAttention::warmup_pipelines(mdev.metal_device())?;
         }
 
         Ok(())
@@ -884,36 +892,30 @@ impl GlyprEmbedder {
     ///
     /// Rejects `Some(0)` and `Some(d)` where `d > self.model.config.embedding_dim`,
     /// and normalizes `Some(embedding_dim)` to `None`.
-    pub fn validate_truncate_dim(&self, truncate_dim: Option<usize>) -> Result<Option<usize>> {
+    pub fn validate_truncate_dim(&self, truncate_dim: Option<usize>) -> GlyprResult<Option<usize>> {
         let embedding_dim = self.model.config.embedding_dim;
         match truncate_dim {
             None => Ok(None),
-            Some(0) => {
-                let err = GlyprError::InvalidMrlDimension {
-                    dim: 0,
-                    max: embedding_dim,
-                };
-                Err(anyhow::Error::new(err)).context("truncate_dim cannot be 0")
-            }
-            Some(d) if d > embedding_dim => {
-                let err = GlyprError::InvalidMrlDimension {
-                    dim: d,
-                    max: embedding_dim,
-                };
-                Err(anyhow::Error::new(err)).with_context(|| {
-                    format!(
-                        "truncate_dim ({}) exceeds model embedding_dim ({})",
-                        d, embedding_dim
-                    )
-                })
-            }
+            Some(0) => Err(GlyprError::InvalidMrlDimension {
+                dim: 0,
+                max: embedding_dim,
+            }),
+            Some(d) if d > embedding_dim => Err(GlyprError::InvalidMrlDimension {
+                dim: d,
+                max: embedding_dim,
+            }),
             Some(d) if d == embedding_dim => Ok(None),
             Some(d) => Ok(Some(d)),
         }
     }
 
     /// Encode a single image item using the routed vision engine (ANE CoreML or Metal/CPU GGUF).
-    pub fn encode_image_part(&self, image: &image::DynamicImage, budget: usize) -> Result<Tensor> {
+    pub fn encode_image_part(
+        &self,
+        image: &image::DynamicImage,
+        budget: usize,
+    ) -> GlyprResult<Tensor> {
+        multimodal::validate_vision_budget(budget)?;
         with_autorelease_pool(|| {
             let processed = crate::multimodal::preprocess_image(image, budget, 16, 3)?;
 
@@ -937,30 +939,16 @@ impl GlyprEmbedder {
                         matched
                     }),
                     VisionBackendPolicy::AneStrict => {
-                        let cv = self.coreml_vision.as_ref().ok_or_else(|| {
-                            anyhow::Error::new(GlyprError::MissingMultimodalEngine).context(
-                                "AneStrict vision backend requested, but no CoreML vision tower is attached",
-                            )
-                        })?;
+                        let cv = self
+                            .coreml_vision
+                            .as_ref()
+                            .ok_or(GlyprError::MissingMultimodalEngine)?;
                         if !cv.supports_grid(processed.patch_height, processed.patch_width) {
-                            let err = GlyprError::UnsupportedCoreMLPatchGrid {
+                            return Err(GlyprError::UnsupportedCoreMLPatchGrid {
                                 patch_height: processed.patch_height,
                                 patch_width: processed.patch_width,
                                 num_patches: processed.num_patches,
                                 supported_grids: cv.supported_grids(),
-                            };
-                            return Err(anyhow::Error::new(err)).with_context(|| {
-                                format!(
-                                    "AneStrict vision routing failed: image produced {}x{} patches ({} total, {}x{} px), \
-                                     but loaded CoreML models only support grids {:?}. Adjust --image-token-budget or export \
-                                     with 'uv run python scripts/export_coreml.py --vision-preset all'.",
-                                    processed.patch_height,
-                                    processed.patch_width,
-                                    processed.num_patches,
-                                    processed.target_width,
-                                    processed.target_height,
-                                    cv.supported_grids()
-                                )
                             });
                         }
                         true
@@ -982,31 +970,14 @@ impl GlyprEmbedder {
             }
 
             // Standard Candle / GGUF path
-            let projector = self.multimodal.as_ref().ok_or_else(|| {
-                #[cfg(feature = "coreml")]
-                let loaded_grids = self
-                    .coreml_vision
-                    .as_ref()
-                    .map(|cv| format!("{:?}", cv.supported_grids()))
-                    .unwrap_or_else(|| "none".to_string());
-                #[cfg(not(feature = "coreml"))]
-                let loaded_grids = "coreml disabled".to_string();
-
-                anyhow::Error::new(GlyprError::MissingMultimodalEngine).context(format!(
-                    "No vision engine available for image: {}x{} patches ({} total, {}x{} px); \
-                     loaded CoreML grids: {}, and no GGUF mmproj is attached. \
-                     Adjust --image-token-budget, pass --bf16-mmproj, or export this aspect ratio.",
-                    processed.patch_height,
-                    processed.patch_width,
-                    processed.num_patches,
-                    processed.target_width,
-                    processed.target_height,
-                    loaded_grids
-                ))
-            })?;
-            let tower = projector.vision_tower.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("Vision Tower is not available in attached multimodal projector")
-            })?;
+            let projector = self
+                .multimodal
+                .as_ref()
+                .ok_or(GlyprError::MissingMultimodalEngine)?;
+            let tower = projector
+                .vision_tower
+                .as_ref()
+                .ok_or(GlyprError::MissingMultimodalEngine)?;
             Ok(tower.encode(&processed)?)
         })
     }
@@ -1017,7 +988,7 @@ impl GlyprEmbedder {
         prompt: Option<&str>,
         items: &[MediaItem],
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
         with_autorelease_pool(|| self.embed_composite_inner(prompt, items, truncate_dim))
     }
@@ -1027,7 +998,7 @@ impl GlyprEmbedder {
         prompt: Option<&str>,
         items: &[MediaItem],
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         let has_coreml_vision = {
             #[cfg(feature = "coreml")]
             {
@@ -1040,9 +1011,7 @@ impl GlyprEmbedder {
         };
 
         if self.multimodal.is_none() && !has_coreml_vision {
-            anyhow::bail!(
-                "Multimodal engine not attached. Call embedder.attach_multimodal_projector() or embedder.attach_coreml_vision() first."
-            );
+            return Err(GlyprError::MissingMultimodalEngine);
         }
 
         // =========================================================================
@@ -1053,6 +1022,7 @@ impl GlyprEmbedder {
             match item {
                 MediaItem::Image { image, budget } => {
                     let b = budget.unwrap_or(280);
+                    multimodal::validate_vision_budget(b)?;
                     let n_tokens = crate::multimodal::compute_soft_token_count(
                         image.width() as usize,
                         image.height() as usize,
@@ -1066,7 +1036,9 @@ impl GlyprEmbedder {
                 }
                 MediaItem::Audio { samples } => {
                     if samples.is_empty() {
-                        anyhow::bail!("Input audio cannot be empty");
+                        return Err(GlyprError::InvalidInput(
+                            "Input audio cannot be empty".to_string(),
+                        ));
                     }
                     let n_tokens = crate::multimodal::compute_audio_soft_token_count(samples.len());
                     placeholders.push(crate::tokenizer::MediaPlaceholder::Audio {
@@ -1078,9 +1050,12 @@ impl GlyprEmbedder {
                     budget_per_frame,
                 } => {
                     if frames.is_empty() {
-                        anyhow::bail!("VideoFrames input cannot be empty");
+                        return Err(GlyprError::InvalidInput(
+                            "VideoFrames input cannot be empty".to_string(),
+                        ));
                     }
                     let b = budget_per_frame.unwrap_or(140);
+                    multimodal::validate_vision_budget(b)?;
                     let mut frame_soft_tokens = Vec::with_capacity(frames.len());
                     for frame in frames.iter() {
                         let n_tokens = crate::multimodal::compute_soft_token_count(
@@ -1104,13 +1079,10 @@ impl GlyprEmbedder {
 
         // 2. Preflight guard: fail fast if sequence length exceeds maximum context window
         if seq_len > self.max_seq_len {
-            anyhow::bail!(
-                "Multimodal sequence length ({} tokens) exceeds maximum context limit ({} tokens). \
-                 Preflight check failed before neural encoding (media items: {}).",
-                seq_len,
-                self.max_seq_len,
-                items.len()
-            );
+            return Err(GlyprError::ContextLimitExceeded {
+                actual: seq_len,
+                max: self.max_seq_len,
+            });
         }
 
         // =========================================================================
@@ -1125,9 +1097,10 @@ impl GlyprEmbedder {
                     soft_tensors.push(soft_toks);
                 }
                 MediaItem::Audio { samples } => {
-                    let projector = self.multimodal.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!("Audio encoding requires attached GGUF mmproj")
-                    })?;
+                    let projector = self
+                        .multimodal
+                        .as_ref()
+                        .ok_or(GlyprError::MissingAudioProjector)?;
                     let (soft_toks, _) = projector.encode_audio(samples)?;
                     soft_tensors.push(soft_toks);
                 }
@@ -1168,7 +1141,7 @@ impl GlyprEmbedder {
 
     /// Encode a single text input formatted according to the specified Task.
     /// Returns a native 768-dimensional L2-normalized embedding vector.
-    pub fn embed_text(&self, text: &str, task: Task) -> Result<Vec<f32>> {
+    pub fn embed_text(&self, text: &str, task: Task) -> GlyprResult<Vec<f32>> {
         self.embed_text_with_dim(text, task, None)
     }
 
@@ -1178,14 +1151,14 @@ impl GlyprEmbedder {
         text: &str,
         task: Task,
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         let formatted = task.format_text(text);
         self.encode_single_text(&formatted, truncate_dim)
     }
 
     /// Encode a batch of texts formatted according to the specified Task.
     /// Returns native 768-dimensional L2-normalized embedding vectors.
-    pub fn embed_texts(&self, texts: &[&str], task: Task) -> Result<Vec<Vec<f32>>> {
+    pub fn embed_texts(&self, texts: &[&str], task: Task) -> GlyprResult<Vec<Vec<f32>>> {
         let formatted: Vec<String> = texts.iter().map(|t| task.format_text(t)).collect();
         let formatted_refs: Vec<&str> = formatted.iter().map(|s| s.as_str()).collect();
         self.encode_batch_texts(&formatted_refs, None)
@@ -1197,7 +1170,7 @@ impl GlyprEmbedder {
     /// Matches Python `sentence-transformers` list format:
     /// `embedder.embed_interleaved(&[ModalityPart::Text("..."), ModalityPart::Image { ... }], Task::SearchQuery)`
     /// Returns native 768-dimensional L2-normalized embedding vector.
-    pub fn embed_interleaved(&self, parts: &[ModalityPart], task: Task) -> Result<Vec<f32>> {
+    pub fn embed_interleaved(&self, parts: &[ModalityPart], task: Task) -> GlyprResult<Vec<f32>> {
         self.embed_interleaved_with_dim(parts, task, None)
     }
 
@@ -1207,7 +1180,7 @@ impl GlyprEmbedder {
         parts: &[ModalityPart],
         task: Task,
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
         with_autorelease_pool(|| self.embed_interleaved_inner(parts, task, truncate_dim))
     }
@@ -1219,14 +1192,14 @@ impl GlyprEmbedder {
         &self,
         token_ids: &[u32],
         truncate_dim: Option<usize>,
-    ) -> Result<Option<Vec<f32>>> {
+    ) -> GlyprResult<Option<Vec<f32>>> {
         #[cfg(not(feature = "coreml"))]
         {
             let _ = (token_ids, truncate_dim);
             if self.text_backend == TextBackendPolicy::AneStrict {
-                anyhow::bail!(
-                    "AneStrict text backend requested, but glypr-core was built without --features coreml / ane"
-                );
+                return Err(GlyprError::InvalidInput(
+                    "AneStrict text backend requested, but glypr-core was built without --features coreml / ane".to_string(),
+                ));
             }
             Ok(None)
         }
@@ -1238,11 +1211,8 @@ impl GlyprEmbedder {
                 TextBackendPolicy::Metal => Ok(None),
                 TextBackendPolicy::AneStrict => {
                     let ct = self.coreml_text.as_ref().ok_or_else(|| {
-                        anyhow::Error::new(GlyprError::CoreMLNotFound {
-                            path: PathBuf::from("models/coreml"),
-                        })
-                        .context(
-                            "AneStrict text backend requested, but no CoreML text backbone is attached",
+                        GlyprError::InvalidInput(
+                            "AneStrict text backend requested, but no CoreML text backbone is attached".to_string(),
                         )
                     })?;
                     let ids_i32: Vec<i32> = token_ids.iter().map(|&id| id as i32).collect();
@@ -1289,7 +1259,7 @@ impl GlyprEmbedder {
         parts: &[ModalityPart],
         task: Task,
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         let has_media = parts.iter().any(|p| !matches!(p, ModalityPart::Text(_)));
         let has_coreml_vision = {
             #[cfg(feature = "coreml")]
@@ -1302,9 +1272,34 @@ impl GlyprEmbedder {
             }
         };
         if has_media && self.multimodal.is_none() && !has_coreml_vision {
-            anyhow::bail!(
-                "Multimodal engine not attached. Call embedder.attach_multimodal_projector() or embedder.attach_coreml_vision() first."
-            );
+            return Err(GlyprError::MissingMultimodalEngine);
+        }
+
+        // Validate vision budgets and audio presence upfront before tokenization
+        for part in parts {
+            match part {
+                ModalityPart::Image { budget, .. } => {
+                    multimodal::validate_vision_budget(
+                        budget.unwrap_or(multimodal::VISION_BUDGET_DEFAULT),
+                    )?;
+                }
+                ModalityPart::VideoFrame { budget, .. } => {
+                    multimodal::validate_vision_budget(
+                        budget.unwrap_or(multimodal::VISION_BUDGET_MEDIUM),
+                    )?;
+                }
+                ModalityPart::Audio { samples } => {
+                    if samples.is_empty() {
+                        return Err(GlyprError::InvalidInput(
+                            "Input audio cannot be empty".to_string(),
+                        ));
+                    }
+                    if self.multimodal.is_none() {
+                        return Err(GlyprError::MissingAudioProjector);
+                    }
+                }
+                ModalityPart::Text(_) => {}
+            }
         }
 
         // 1. Tokenize sequence and validate context window preflight (< 10 µs, 0 neural forwards)
@@ -1312,18 +1307,9 @@ impl GlyprEmbedder {
         let seq_len = token_ids.len();
 
         if seq_len > self.max_seq_len {
-            let err = GlyprError::ContextLimitExceeded {
+            return Err(GlyprError::ContextLimitExceeded {
                 actual: seq_len,
                 max: self.max_seq_len,
-            };
-            return Err(anyhow::Error::new(err)).with_context(|| {
-                format!(
-                    "Interleaved multimodal sequence length ({} tokens) exceeds maximum context limit ({} tokens). \
-                     Preflight check failed before neural encoding (parts: {}).",
-                    seq_len,
-                    self.max_seq_len,
-                    parts.len()
-                )
             });
         }
 
@@ -1345,10 +1331,10 @@ impl GlyprEmbedder {
                     soft_tensors.push(soft_toks);
                 }
                 ModalityPart::Audio { samples } => {
-                    let projector = self.multimodal.as_ref().ok_or_else(|| {
-                        anyhow::Error::new(GlyprError::MissingAudioProjector)
-                            .context("Audio encoding requires attached GGUF mmproj")
-                    })?;
+                    let projector = self
+                        .multimodal
+                        .as_ref()
+                        .ok_or(GlyprError::MissingAudioProjector)?;
                     let (soft_toks, _) = projector.encode_audio(samples)?;
                     soft_tensors.push(soft_toks);
                 }
@@ -1381,7 +1367,7 @@ impl GlyprEmbedder {
         &self,
         image: &image::DynamicImage,
         prompt: Option<&str>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         self.embed_image_with_budget(image, prompt, multimodal::VISION_BUDGET_DEFAULT)
     }
 
@@ -1392,7 +1378,7 @@ impl GlyprEmbedder {
         image: &image::DynamicImage,
         prompt: Option<&str>,
         budget: usize,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         multimodal::validate_vision_budget(budget)?;
         self.embed_composite(
             prompt,
@@ -1406,7 +1392,7 @@ impl GlyprEmbedder {
 
     /// Encode an audio waveform (with optional prompt) into a dense normalized embedding vector.
     /// Returns native 768-dimensional normalized embedding vector.
-    pub fn embed_audio(&self, samples: &[f32], prompt: Option<&str>) -> Result<Vec<f32>> {
+    pub fn embed_audio(&self, samples: &[f32], prompt: Option<&str>) -> GlyprResult<Vec<f32>> {
         self.embed_composite(prompt, &[MediaItem::Audio { samples }], None)
     }
 
@@ -1427,7 +1413,7 @@ impl GlyprEmbedder {
         query: &str,
         task: &str,
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         let formatted = self.tokenizer.format_query(query, task);
         self.encode_single_text(&formatted, truncate_dim)
     }
@@ -1437,7 +1423,7 @@ impl GlyprEmbedder {
         content: &str,
         title: Option<&str>,
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         let formatted = self.tokenizer.format_document(content, title);
         self.encode_single_text(&formatted, truncate_dim)
     }
@@ -1447,7 +1433,7 @@ impl GlyprEmbedder {
         text: &str,
         task: &str,
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         let formatted = self.tokenizer.format_query(text, task);
         self.encode_single_text(&formatted, truncate_dim)
     }
@@ -1457,7 +1443,7 @@ impl GlyprEmbedder {
         queries: &[&str],
         task: &str,
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<Vec<f32>>> {
+    ) -> GlyprResult<Vec<Vec<f32>>> {
         let formatted: Vec<String> = queries
             .iter()
             .map(|q| self.tokenizer.format_query(q, task))
@@ -1471,7 +1457,7 @@ impl GlyprEmbedder {
         contents: &[&str],
         titles: Option<&[&str]>,
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<Vec<f32>>> {
+    ) -> GlyprResult<Vec<Vec<f32>>> {
         let formatted: Vec<String> = match titles {
             Some(t_list) => contents
                 .iter()
@@ -1493,7 +1479,7 @@ impl GlyprEmbedder {
         &self,
         tokenized: &[Vec<u32>],
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<Vec<f32>>> {
+    ) -> GlyprResult<Vec<Vec<f32>>> {
         let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
         if tokenized.is_empty() {
             return Ok(Vec::new());
@@ -1505,7 +1491,7 @@ impl GlyprEmbedder {
         &self,
         tokenized: &[Vec<u32>],
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<Vec<f32>>> {
+    ) -> GlyprResult<Vec<Vec<f32>>> {
         let b = tokenized.len();
         if b == 0 {
             return Ok(Vec::new());
@@ -1513,20 +1499,14 @@ impl GlyprEmbedder {
 
         for (item_idx, ids) in tokenized.iter().enumerate() {
             if ids.is_empty() {
-                anyhow::bail!("Batch item {} has empty token sequence", item_idx);
+                return Err(GlyprError::InvalidInput(format!(
+                    "Batch item {item_idx} has empty token sequence"
+                )));
             }
             if ids.len() > self.max_seq_len {
-                let err = GlyprError::ContextLimitExceeded {
+                return Err(GlyprError::ContextLimitExceeded {
                     actual: ids.len(),
                     max: self.max_seq_len,
-                };
-                return Err(anyhow::Error::new(err)).with_context(|| {
-                    format!(
-                        "Batch item {} sequence length ({}) exceeds maximum context limit ({})",
-                        item_idx,
-                        ids.len(),
-                        self.max_seq_len
-                    )
                 });
             }
         }
@@ -1534,9 +1514,9 @@ impl GlyprEmbedder {
         // Pure-text ANE routing check (isolated cleanly before Metal/CPU vectorized batching)
         #[cfg(not(feature = "coreml"))]
         if self.text_backend == TextBackendPolicy::AneStrict {
-            anyhow::bail!(
-                "AneStrict text backend requested, but glypr-core was built without --features coreml / ane"
-            );
+            return Err(GlyprError::InvalidInput(
+                "AneStrict text backend requested, but glypr-core was built without --features coreml / ane".to_string(),
+            ));
         }
 
         #[cfg(feature = "coreml")]
@@ -1548,11 +1528,9 @@ impl GlyprEmbedder {
             };
             if try_ane {
                 let ct = self.coreml_text.as_ref().ok_or_else(|| {
-                    anyhow::Error::new(GlyprError::CoreMLNotFound {
-                        path: PathBuf::from("models/coreml"),
-                    })
-                    .context(
-                        "AneStrict text backend requested, but no CoreML text backbone is attached",
+                    GlyprError::InvalidInput(
+                        "AneStrict text backend requested, but no CoreML text backbone is attached"
+                            .to_string(),
                     )
                 })?;
 
@@ -1626,7 +1604,7 @@ impl GlyprEmbedder {
         &self,
         inputs: &[MultimodalInput],
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<Vec<f32>>> {
+    ) -> GlyprResult<Vec<Vec<f32>>> {
         let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
         let b = inputs.len();
         if b == 0 {
@@ -1645,7 +1623,7 @@ impl GlyprEmbedder {
         &self,
         inputs: &[MultimodalInput],
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<Vec<f32>>> {
+    ) -> GlyprResult<Vec<Vec<f32>>> {
         let b = inputs.len();
 
         // 1. Check multimodal projector requirement if media parts exist
@@ -1665,9 +1643,7 @@ impl GlyprEmbedder {
             }
         };
         if has_any_media && self.multimodal.is_none() && !has_coreml_vision {
-            anyhow::bail!(
-                "Multimodal input received in batch, but multimodal engine is not attached."
-            );
+            return Err(GlyprError::MissingMultimodalEngine);
         }
 
         // 1b. Pure-text fast path: parallel Rayon tokenization + vectorized [B, max_len] forward
@@ -1681,7 +1657,7 @@ impl GlyprEmbedder {
                         .encode_modality_sequence(&inp.parts, inp.task)?;
                     Ok(ids)
                 })
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<GlyprResult<Vec<_>>>()?;
             return self.embed_tokenized_texts_inner(&tokenized, truncate_dim);
         }
 
@@ -1691,6 +1667,7 @@ impl GlyprEmbedder {
             for (part_idx, part) in inp.parts.iter().enumerate() {
                 if let ModalityPart::Image { image, budget } = part {
                     let b = budget.unwrap_or(multimodal::VISION_BUDGET_DEFAULT);
+                    multimodal::validate_vision_budget(b)?;
                     image_requests.push((item_idx, part_idx, *image, b));
                 }
             }
@@ -1719,7 +1696,7 @@ impl GlyprEmbedder {
                 let projector = self
                     .multimodal
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Multimodal engine not attached."))?;
+                    .ok_or(GlyprError::MissingMultimodalEngine)?;
                 let images_and_budgets: Vec<(&image::DynamicImage, usize)> = image_requests
                     .iter()
                     .map(|(_, _, img, b)| (*img, *b))
@@ -1737,18 +1714,16 @@ impl GlyprEmbedder {
         let mut item_embeds = Vec::with_capacity(b);
         let mut seq_lens = Vec::with_capacity(b);
 
-        for (item_idx, inp) in inputs.iter().enumerate() {
+        for inp in inputs.iter() {
             let (token_ids, slots) = self
                 .tokenizer
                 .encode_modality_sequence(&inp.parts, inp.task)?;
             let seq_len = token_ids.len();
             if seq_len > self.max_seq_len {
-                anyhow::bail!(
-                    "Batch item {} sequence length ({}) exceeds maximum context limit ({})",
-                    item_idx,
-                    seq_len,
-                    self.max_seq_len
-                );
+                return Err(GlyprError::ContextLimitExceeded {
+                    actual: seq_len,
+                    max: self.max_seq_len,
+                });
             }
             seq_lens.push(seq_len);
 
@@ -1761,9 +1736,10 @@ impl GlyprEmbedder {
                         soft_tensors.push(soft_toks);
                     }
                     ModalityPart::Audio { samples } => {
-                        let projector = self.multimodal.as_ref().ok_or_else(|| {
-                            anyhow::anyhow!("Audio encoding requires attached GGUF mmproj")
-                        })?;
+                        let projector = self
+                            .multimodal
+                            .as_ref()
+                            .ok_or(GlyprError::MissingAudioProjector)?;
                         let (soft_toks, _) = projector.encode_audio(samples)?;
                         soft_tensors.push(soft_toks);
                     }
@@ -1845,7 +1821,7 @@ impl GlyprEmbedder {
         &self,
         texts: &[&str],
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<Vec<f32>>> {
+    ) -> GlyprResult<Vec<Vec<f32>>> {
         let inputs: Vec<MultimodalInput> = texts
             .iter()
             .map(|t| MultimodalInput::text(t, Task::Raw))
@@ -1853,21 +1829,15 @@ impl GlyprEmbedder {
         self.embed_batch(&inputs, truncate_dim)
     }
 
-    fn encode_single_text(&self, text: &str, truncate_dim: Option<usize>) -> Result<Vec<f32>> {
+    fn encode_single_text(&self, text: &str, truncate_dim: Option<usize>) -> GlyprResult<Vec<f32>> {
         let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
         with_autorelease_pool(|| {
             let token_ids = self.tokenizer.encode(text)?;
             let seq_len = token_ids.len();
             if seq_len > self.max_seq_len {
-                let err = GlyprError::ContextLimitExceeded {
+                return Err(GlyprError::ContextLimitExceeded {
                     actual: seq_len,
                     max: self.max_seq_len,
-                };
-                return Err(anyhow::Error::new(err)).with_context(|| {
-                    format!(
-                        "Text sequence length ({} tokens) exceeds maximum context limit ({} tokens)",
-                        seq_len, self.max_seq_len
-                    )
                 });
             }
 
@@ -1896,7 +1866,7 @@ impl GlyprEmbedder {
         &self,
         texts: &[&str],
         truncate_dim: Option<usize>,
-    ) -> Result<(Vec<Vec<f32>>, PipelineProfile)> {
+    ) -> GlyprResult<(Vec<Vec<f32>>, PipelineProfile)> {
         let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
         with_autorelease_pool(|| {
             let t_total = std::time::Instant::now();
@@ -1907,11 +1877,10 @@ impl GlyprEmbedder {
                 let ids = self.tokenizer.encode(texts[0])?;
                 let seq_len = ids.len();
                 if seq_len > self.max_seq_len {
-                    anyhow::bail!(
-                        "Text sequence length ({} tokens) exceeds maximum context limit ({} tokens)",
-                        seq_len,
-                        self.max_seq_len
-                    );
+                    return Err(GlyprError::ContextLimitExceeded {
+                        actual: seq_len,
+                        max: self.max_seq_len,
+                    });
                 }
                 let t = Tensor::from_vec(ids, (1, seq_len), &self.device)?;
                 (t, None)
@@ -1975,13 +1944,13 @@ fn splice_soft_tokens(
     seq_len: usize,
     slots: &[tokenizer::MediaSlot],
     soft_tensors: &[Tensor],
-) -> Result<Tensor> {
+) -> GlyprResult<Tensor> {
     if slots.len() != soft_tensors.len() {
-        anyhow::bail!(
+        return Err(GlyprError::InvalidInput(format!(
             "Multimodal splicing slot count ({}) does not match encoded media tensor count ({})",
             slots.len(),
             soft_tensors.len()
-        );
+        )));
     }
 
     let mut chunks = Vec::new();
@@ -1990,12 +1959,10 @@ fn splice_soft_tokens(
     for (slot, soft_tensor) in slots.iter().zip(soft_tensors.iter()) {
         let actual_len = soft_tensor.dim(0)?;
         if actual_len != slot.length {
-            anyhow::bail!(
+            return Err(GlyprError::InvalidInput(format!(
                 "Multimodal splicing length mismatch at token {}: slot expects {} soft tokens, got {}",
-                slot.start_idx,
-                slot.length,
-                actual_len
-            );
+                slot.start_idx, slot.length, actual_len
+            )));
         }
         if slot.start_idx > curr {
             chunks.push(text_embeds.narrow(1, curr, slot.start_idx - curr)?);
@@ -2160,20 +2127,7 @@ mod tests {
         );
         let tokenizer = GlyprTokenizer::from_gguf_metadata(&meta).unwrap();
 
-        GlyprEmbedder {
-            model,
-            tokenizer,
-            device,
-            dtype,
-            multimodal: None,
-            max_seq_len: DEFAULT_MAX_SEQ_LEN,
-            #[cfg(feature = "coreml")]
-            coreml_vision: None,
-            #[cfg(feature = "coreml")]
-            coreml_text: None,
-            vision_backend: VisionBackendPolicy::Auto,
-            text_backend: TextBackendPolicy::Auto,
-        }
+        GlyprEmbedder::from_parts(model, tokenizer, device, dtype)
     }
 
     #[test]
@@ -2231,13 +2185,17 @@ mod tests {
         assert_eq!(v_interleaved.len(), 8);
 
         embedder.set_text_backend(TextBackendPolicy::AneStrict);
-        assert!(embedder.embed_text("hello", Task::Raw).is_err());
-        assert!(
+        assert!(matches!(
+            embedder.embed_text("hello", Task::Raw).unwrap_err(),
+            GlyprError::InvalidInput(_)
+        ));
+        assert!(matches!(
             embedder
                 .embed_interleaved(&[ModalityPart::Text("hello")], Task::Raw)
-                .is_err()
-        );
-        assert!(
+                .unwrap_err(),
+            GlyprError::InvalidInput(_)
+        ));
+        assert!(matches!(
             embedder
                 .embed_batch(
                     &[
@@ -2246,8 +2204,9 @@ mod tests {
                     ],
                     None
                 )
-                .is_err()
-        );
+                .unwrap_err(),
+            GlyprError::InvalidInput(_)
+        ));
     }
 
     #[test]
@@ -2257,9 +2216,18 @@ mod tests {
         assert_eq!(embedder.validate_truncate_dim(None).unwrap(), None);
         assert_eq!(embedder.validate_truncate_dim(Some(16)).unwrap(), None);
         assert_eq!(embedder.validate_truncate_dim(Some(8)).unwrap(), Some(8));
-        assert!(embedder.validate_truncate_dim(Some(0)).is_err());
-        assert!(embedder.validate_truncate_dim(Some(17)).is_err());
-        assert!(embedder.validate_truncate_dim(Some(1024)).is_err());
+        assert!(matches!(
+            embedder.validate_truncate_dim(Some(0)).unwrap_err(),
+            GlyprError::InvalidMrlDimension { dim: 0, max: 16 }
+        ));
+        assert!(matches!(
+            embedder.validate_truncate_dim(Some(17)).unwrap_err(),
+            GlyprError::InvalidMrlDimension { dim: 17, max: 16 }
+        ));
+        assert!(matches!(
+            embedder.validate_truncate_dim(Some(1024)).unwrap_err(),
+            GlyprError::InvalidMrlDimension { dim: 1024, max: 16 }
+        ));
 
         let inputs = [
             MultimodalInput::text("hello", Task::Raw),
@@ -2267,20 +2235,36 @@ mod tests {
         ];
 
         // Invalid truncate_dim must fail cleanly (no chunks_exact(0) panic, no silent ignore)
-        assert!(embedder.embed_batch(&inputs, Some(0)).is_err());
-        assert!(embedder.embed_batch(&inputs, Some(1024)).is_err());
-        assert!(embedder.encode_single_text("hello", Some(0)).is_err());
-        assert!(embedder.encode_single_text("hello", Some(1024)).is_err());
-        assert!(
+        assert!(matches!(
+            embedder.embed_batch(&inputs, Some(0)).unwrap_err(),
+            GlyprError::InvalidMrlDimension { dim: 0, max: 16 }
+        ));
+        assert!(matches!(
+            embedder.embed_batch(&inputs, Some(1024)).unwrap_err(),
+            GlyprError::InvalidMrlDimension { dim: 1024, max: 16 }
+        ));
+        assert!(matches!(
+            embedder.encode_single_text("hello", Some(0)).unwrap_err(),
+            GlyprError::InvalidMrlDimension { dim: 0, max: 16 }
+        ));
+        assert!(matches!(
+            embedder
+                .encode_single_text("hello", Some(1024))
+                .unwrap_err(),
+            GlyprError::InvalidMrlDimension { dim: 1024, max: 16 }
+        ));
+        assert!(matches!(
             embedder
                 .profile_encode_batch(&["hello", "hello world"], Some(0))
-                .is_err()
-        );
-        assert!(
+                .unwrap_err(),
+            GlyprError::InvalidMrlDimension { dim: 0, max: 16 }
+        ));
+        assert!(matches!(
             embedder
                 .profile_encode_batch(&["hello", "hello world"], Some(1024))
-                .is_err()
-        );
+                .unwrap_err(),
+            GlyprError::InvalidMrlDimension { dim: 1024, max: 16 }
+        ));
 
         // Heterogeneous batch with hidden_size=8 (not 512) and embedding_dim=16 (not 768)
         let full = embedder.embed_batch(&inputs, None).unwrap();
@@ -2299,8 +2283,7 @@ mod tests {
 
     #[test]
     fn test_embed_composite_rejects_empty_video_and_audio_preflight() {
-        let mut embedder = build_tiny_embedder();
-        embedder.multimodal = Some(MultimodalProjector {
+        let embedder = build_tiny_embedder().with_multimodal_projector(MultimodalProjector {
             vision_tower: None,
             audio_tower: None,
             config: config::MultimodalConfig::from_gguf_metadata(&HashMap::new()),
@@ -2318,11 +2301,13 @@ mod tests {
                 None,
             )
             .unwrap_err();
+        assert!(matches!(empty_video_err, GlyprError::InvalidInput(_)));
         assert!(empty_video_err.to_string().contains("empty"));
 
         let empty_audio_err = embedder
             .embed_composite(None, &[MediaItem::Audio { samples: &[] }], None)
             .unwrap_err();
+        assert!(matches!(empty_audio_err, GlyprError::InvalidInput(_)));
         assert!(empty_audio_err.to_string().contains("empty"));
     }
 
@@ -2342,7 +2327,7 @@ mod tests {
         let texts = ["hello", "hello world", "world"];
         let tokenized: Vec<Vec<u32>> = texts
             .iter()
-            .map(|t| embedder.tokenizer.encode(t).unwrap())
+            .map(|t| embedder.tokenizer().encode(t).unwrap())
             .collect();
 
         let from_tokens = embedder.embed_tokenized_texts(&tokenized, None).unwrap();

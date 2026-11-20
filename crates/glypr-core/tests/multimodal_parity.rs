@@ -542,7 +542,7 @@ fn test_multimodal_golden_parity() -> anyhow::Result<()> {
             eprintln!("Skipping multimodal test (GLYPR_ALLOW_MISSING_WEIGHTS=1): {e}");
             return Ok(());
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
     let mmproj_gguf = match glypr_core::hub::resolve_default_mmproj() {
         Ok(p) => p,
@@ -550,7 +550,7 @@ fn test_multimodal_golden_parity() -> anyhow::Result<()> {
             eprintln!("Skipping multimodal test (GLYPR_ALLOW_MISSING_WEIGHTS=1): {e}");
             return Ok(());
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
 
     println!(
@@ -610,7 +610,7 @@ fn test_multimodal_golden_parity_q8() -> anyhow::Result<()> {
             eprintln!("Skipping Q8 multimodal test (GLYPR_ALLOW_MISSING_WEIGHTS=1): {e}");
             return Ok(());
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
     let mmproj_gguf = match glypr_core::hub::resolve_canonical_mmproj(true) {
         Ok(p) => p,
@@ -618,7 +618,7 @@ fn test_multimodal_golden_parity_q8() -> anyhow::Result<()> {
             eprintln!("Skipping Q8 multimodal test (GLYPR_ALLOW_MISSING_WEIGHTS=1): {e}");
             return Ok(());
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
 
     println!(

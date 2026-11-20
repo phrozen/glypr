@@ -464,7 +464,7 @@ fn test_long_context_pooling_precision() -> Result<()> {
             Tensor::from_vec(raw_vec, (1, seq_len, hidden_dim), &device)?.to_dtype(DType::BF16)?;
 
         // Pool and normalize
-        let pooled = embedder.model.pool_and_normalize(&t_tensor, None, None)?;
+        let pooled = embedder.model().pool_and_normalize(&t_tensor, None, None)?;
         let pooled_vec = pooled.to_dtype(DType::F32)?.squeeze(0)?.to_vec1::<f32>()?;
 
         // Compute cosine similarity vs F64 ground truth

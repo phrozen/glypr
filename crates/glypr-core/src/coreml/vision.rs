@@ -1,5 +1,5 @@
 use crate::coreml::CoreMLComputeUnits;
-use crate::error::GlyprError;
+use crate::error::{GlyprError, GlyprResult};
 use crate::multimodal::ProcessedImage;
 use anyhow::{Context, Result, anyhow, bail};
 use candle_core::{Device, Tensor};
@@ -110,17 +110,23 @@ impl CoreMLVisionTower {
     ///
     /// Automatically introspects the model to discover its static patch input count
     /// and output feature name.
-    pub fn from_path<P: AsRef<Path>>(path: P, compute_units: CoreMLComputeUnits) -> Result<Self> {
+    pub fn from_path<P: AsRef<Path>>(
+        path: P,
+        compute_units: CoreMLComputeUnits,
+    ) -> GlyprResult<Self> {
         let path_ref = path.as_ref();
         if !path_ref.exists() {
-            bail!("CoreML model not found at {}", path_ref.display());
+            return Err(GlyprError::CoreMLNotFound {
+                path: path_ref.to_path_buf(),
+            });
         }
 
-        let model = Model::load(path_ref, compute_units.into()).with_context(|| {
-            format!(
-                "Failed to load CoreML vision model at {}",
-                path_ref.display()
-            )
+        let model = Model::load(path_ref, compute_units.into()).map_err(|e| {
+            GlyprError::ModelLoad(format!(
+                "Failed to load CoreML vision model at {}: {}",
+                path_ref.display(),
+                e
+            ))
         })?;
 
         let entry = Self::inspect_and_build_entry(model, path_ref)?;
@@ -138,14 +144,14 @@ impl CoreMLVisionTower {
     /// Discovers every `*.mlmodelc` bundle containing a `"pixel_values"` input feature
     /// (skipping `"input_ids"` text backbones without relying on filename prefixes),
     /// surfaces per-file load diagnostics, and detects uncompiled `.mlpackage` bundles.
-    pub fn from_dir<P: AsRef<Path>>(dir: P, compute_units: CoreMLComputeUnits) -> Result<Self> {
+    pub fn from_dir<P: AsRef<Path>>(
+        dir: P,
+        compute_units: CoreMLComputeUnits,
+    ) -> GlyprResult<Self> {
         let dir_ref = dir.as_ref();
         if !dir_ref.is_dir() {
-            let err = GlyprError::CoreMLNotFound {
+            return Err(GlyprError::CoreMLNotFound {
                 path: dir_ref.to_path_buf(),
-            };
-            return Err(anyhow::Error::new(err)).with_context(|| {
-                format!("CoreML vision directory not found at {}", dir_ref.display())
             });
         }
 
@@ -237,10 +243,7 @@ impl CoreMLVisionTower {
                     .collect();
                 msg.push_str(&format!(". Load diagnostics: [{}]", details.join("; ")));
             }
-            let err = GlyprError::CoreMLNotFound {
-                path: dir_ref.to_path_buf(),
-            };
-            return Err(anyhow::Error::new(err)).with_context(|| msg);
+            return Err(GlyprError::ModelLoad(msg));
         }
 
         Ok(Self {
@@ -373,7 +376,7 @@ impl CoreMLVisionTower {
     }
 
     /// Execute a single dummy forward pass on every loaded CoreML vision model to pre-warm ANE compilation.
-    pub fn warmup(&self) -> Result<()> {
+    pub fn warmup(&self) -> GlyprResult<()> {
         for entry in self.models.values() {
             let dummy = vec![0.0f32; entry.num_patches * 768];
             let tensor = BorrowedTensor::from_f32(&dummy, &[1, entry.num_patches, 768])
@@ -399,59 +402,33 @@ impl CoreMLVisionTower {
     /// Raw forward pass encoding a `ProcessedImage` into flat f32 data.
     ///
     /// Returns `(output_buffer, shape)` where shape is `[1, num_soft_tokens, 512]`.
-    pub fn encode_raw(&self, image: &ProcessedImage) -> Result<(Vec<f32>, Vec<usize>)> {
+    pub fn encode_raw(&self, image: &ProcessedImage) -> GlyprResult<(Vec<f32>, Vec<usize>)> {
         let entry = match self.models.get(&(image.patch_height, image.patch_width)) {
             Some(e) => e,
             None => {
-                let loaded_desc: Vec<String> = self
-                    .grid_infos()
-                    .into_iter()
-                    .map(|g| {
-                        format!(
-                            "{}x{} ({} patches -> {} tokens)",
-                            g.patch_height, g.patch_width, g.num_patches, g.num_soft_tokens
-                        )
-                    })
-                    .collect();
-                let err = GlyprError::UnsupportedCoreMLPatchGrid {
+                return Err(GlyprError::UnsupportedCoreMLPatchGrid {
                     patch_height: image.patch_height,
                     patch_width: image.patch_width,
                     num_patches: image.num_patches,
                     supported_grids: self.supported_grids(),
-                };
-                return Err(anyhow::Error::new(err)).with_context(|| {
-                    format!(
-                        "No CoreML vision model loaded for {}x{} patches ({} patches, {}x{} px); \
-                         loaded grids: [{}]. Adjust --image-token-budget, pass --bf16-mmproj for GPU fallback, \
-                         or export this aspect ratio with 'uv run python scripts/export_coreml.py --vision-preset all'.",
-                        image.patch_height,
-                        image.patch_width,
-                        image.num_patches,
-                        image.target_width,
-                        image.target_height,
-                        loaded_desc.join(", "),
-                    )
                 });
             }
         };
 
         if image.num_patches != entry.num_patches {
-            bail!(
+            return Err(GlyprError::InvalidInput(format!(
                 "CoreML vision patch count mismatch: image has {} patches ({}x{}), expected {}",
-                image.num_patches,
-                image.patch_height,
-                image.patch_width,
-                entry.num_patches
-            );
+                image.num_patches, image.patch_height, image.patch_width, entry.num_patches
+            )));
         }
 
         let expected_elements = entry.num_patches * 768;
         if image.pixel_values.len() != expected_elements {
-            bail!(
+            return Err(GlyprError::InvalidInput(format!(
                 "Image pixel values buffer size {} does not match expected size {}",
                 image.pixel_values.len(),
                 expected_elements
-            );
+            )));
         }
 
         let tensor = BorrowedTensor::from_f32(&image.pixel_values, &[1, entry.num_patches, 768])
@@ -480,7 +457,7 @@ impl CoreMLVisionTower {
     ///
     /// Copies the output buffer ($126 \times 512 \times 4\text{ bytes} \approx 258\text{ KB}$) into
     /// device memory ready for splicing into the multimodal prompt sequence.
-    pub fn encode_to_tensor(&self, image: &ProcessedImage, device: &Device) -> Result<Tensor> {
+    pub fn encode_to_tensor(&self, image: &ProcessedImage, device: &Device) -> GlyprResult<Tensor> {
         self.encode_to_tensor_dtype(image, device, candle_core::DType::F32)
     }
 
@@ -490,7 +467,7 @@ impl CoreMLVisionTower {
         image: &ProcessedImage,
         device: &Device,
         dtype: candle_core::DType,
-    ) -> Result<Tensor> {
+    ) -> GlyprResult<Tensor> {
         let (data, shape) = self.encode_raw(image)?;
         let num_tokens = if shape.len() >= 2 {
             shape[1]
@@ -627,8 +604,16 @@ mod tests {
             "expected loaded grid in error message: {msg}"
         );
         assert!(
-            err.downcast_ref::<GlyprError>().is_some(),
-            "expected GlyprError downcast"
+            matches!(
+                err,
+                GlyprError::UnsupportedCoreMLPatchGrid {
+                    patch_height: 27,
+                    patch_width: 42,
+                    num_patches: 1134,
+                    ..
+                }
+            ),
+            "expected GlyprError::UnsupportedCoreMLPatchGrid, got: {err:?}"
         );
     }
 
@@ -642,6 +627,7 @@ mod tests {
         let err = CoreMLVisionTower::from_dir(&tmp, CoreMLComputeUnits::CpuAndNeuralEngine)
             .err()
             .expect("from_dir should fail when only .mlpackage exists");
+        assert!(matches!(err, GlyprError::ModelLoad(_)), "got: {err:?}");
         let msg = err.to_string();
         assert!(msg.contains(".mlpackage"), "got: {msg}");
         assert!(msg.contains("coremlcompiler"), "got: {msg}");

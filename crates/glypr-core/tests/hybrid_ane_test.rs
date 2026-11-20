@@ -49,7 +49,7 @@ fn test_hybrid_ane_vision_with_gpu_backbone() -> anyhow::Result<()> {
         }
     };
 
-    if embedder.coreml_vision.is_none() {
+    if embedder.coreml_vision().is_none() {
         eprintln!("Skipping test: CoreML vision models not found");
         return Ok(());
     }
@@ -66,7 +66,7 @@ fn test_hybrid_ane_vision_with_gpu_backbone() -> anyhow::Result<()> {
 
     println!(
         "Running hybrid multimodal embedding (Vision on ANE, Backbone on {:?})...",
-        embedder.device
+        embedder.device()
     );
     let emb_hybrid = embedder.embed_composite(Some("Describe the image"), &items, None)?;
 
@@ -87,7 +87,7 @@ fn test_hybrid_ane_vision_with_gpu_backbone() -> anyhow::Result<()> {
     assert_eq!(nan_count, 0, "Hybrid embedding contains NaNs");
 
     // 2. If GGUF mmproj is attached, compare cosine similarity between ANE and GPU mmproj
-    if embedder.multimodal.is_some() {
+    if embedder.multimodal().is_some() {
         embedder.set_vision_backend(VisionBackendPolicy::Metal);
         println!("Running pure Metal/CPU multimodal embedding for parity check...");
         let emb_metal = embedder.embed_composite(Some("Describe the image"), &items, None)?;

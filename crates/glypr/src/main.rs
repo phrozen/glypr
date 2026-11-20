@@ -357,7 +357,7 @@ fn resolve_base_model_path(
         }
         return Ok(file);
     }
-    resolve_canonical_model_with_options(use_q8, offline)
+    Ok(resolve_canonical_model_with_options(use_q8, offline)?)
 }
 
 fn resolve_projector_path(

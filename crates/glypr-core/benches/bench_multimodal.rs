@@ -41,7 +41,7 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
         let mut total_vision = std::time::Duration::ZERO;
         let mut total_backbone = std::time::Duration::ZERO;
 
-        let proj = embedder.multimodal.as_ref().unwrap();
+        let proj = embedder.multimodal().unwrap();
         let t_vis = Instant::now();
         let _ = proj.encode_image_with_budget(&card_img, budget)?;
         let vision_dur = t_vis.elapsed();
@@ -113,7 +113,7 @@ fn bench_device(device: Device, dtype: DType, device_label: &str) -> anyhow::Res
             num_soft_tokens
         );
 
-        let proj = embedder.multimodal.as_ref().unwrap();
+        let proj = embedder.multimodal().unwrap();
 
         // Warmup
         let _ = embedder.embed_audio(&samples, Some("Audio query"))?;

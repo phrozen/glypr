@@ -22,43 +22,43 @@ pub enum EngineError {
     Internal(String),
 }
 
-fn classify_core_error(err: &anyhow::Error) -> EngineError {
-    if let Some(ge) = err.downcast_ref::<GlyprError>() {
-        return match ge {
-            GlyprError::ContextLimitExceeded { .. }
-            | GlyprError::MissingMultimodalEngine
-            | GlyprError::MissingAudioProjector
-            | GlyprError::InvalidVisionBudget { .. }
-            | GlyprError::UnsupportedCoreMLPatchCount { .. }
-            | GlyprError::UnsupportedCoreMLPatchGrid { .. }
-            | GlyprError::InvalidMrlDimension { .. }
-            | GlyprError::InvalidInput(_) => EngineError::InvalidInput(err.to_string()),
-            GlyprError::CoreMLNotFound { .. }
-            | GlyprError::OfflineCacheMiss { .. }
-            | GlyprError::Io(_)
-            | GlyprError::Candle(_)
-            | GlyprError::Other(_) => EngineError::Internal(err.to_string()),
-        };
-    }
-
-    let msg = err.to_string();
-    let lower = msg.to_ascii_lowercase();
-    if lower.contains("exceeds maximum context")
-        || lower.contains("exceeds coreml")
-        || lower.contains("exceeds model embedding_dim")
-        || lower.contains("cannot be empty")
-        || lower.contains("cannot embed an empty")
-        || lower.contains("cannot be 0")
-        || lower.contains("not attached")
-        || lower.contains("requires attached")
-        || lower.contains("placeholder")
-        || lower.contains("vision token budget")
-        || lower.contains("anestrict")
-        || lower.contains("no coreml vision model loaded")
-    {
-        EngineError::InvalidInput(msg)
-    } else {
-        EngineError::Internal(msg)
+fn classify_core_error(err: &GlyprError) -> EngineError {
+    match err {
+        GlyprError::ContextLimitExceeded { .. }
+        | GlyprError::MissingMultimodalEngine
+        | GlyprError::MissingAudioProjector
+        | GlyprError::InvalidVisionBudget { .. }
+        | GlyprError::UnsupportedCoreMLPatchCount { .. }
+        | GlyprError::UnsupportedCoreMLPatchGrid { .. }
+        | GlyprError::InvalidMrlDimension { .. }
+        | GlyprError::InvalidInput(_) => EngineError::InvalidInput(err.to_string()),
+        GlyprError::CoreMLNotFound { .. }
+        | GlyprError::OfflineCacheMiss { .. }
+        | GlyprError::ModelLoad(_)
+        | GlyprError::Io(_)
+        | GlyprError::Candle(_) => EngineError::Internal(err.to_string()),
+        GlyprError::Other(inner) => {
+            let msg = inner.to_string();
+            let lower = msg.to_ascii_lowercase();
+            if lower.contains("exceeds maximum context")
+                || lower.contains("exceeds coreml")
+                || lower.contains("exceeds model embedding_dim")
+                || lower.contains("cannot be empty")
+                || lower.contains("cannot embed an empty")
+                || lower.contains("cannot be 0")
+                || lower.contains("not attached")
+                || lower.contains("requires attached")
+                || lower.contains("placeholder")
+                || lower.contains("vision token budget")
+                || lower.contains("anestrict")
+                || lower.contains("no coreml vision model loaded")
+            {
+                EngineError::InvalidInput(msg)
+            } else {
+                EngineError::Internal(msg)
+            }
+        }
+        _ => EngineError::Internal(err.to_string()),
     }
 }
 
@@ -283,7 +283,7 @@ pub fn spawn_inference_engine_with_config(
 ) -> EngineHandle {
     let (tx, mut rx) = mpsc::channel::<WorkerMessage>(1024);
 
-    let device_name = match &embedder.device {
+    let device_name = match embedder.device() {
         candle_core::Device::Metal(_) => "metal".to_string(),
         candle_core::Device::Cpu => "cpu".to_string(),
         candle_core::Device::Cuda(_) => "cuda".to_string(),
@@ -292,7 +292,7 @@ pub fn spawn_inference_engine_with_config(
     let (ane_enabled, ane_patches) = {
         #[cfg(any(feature = "coreml", feature = "ane"))]
         {
-            if let Some(cv) = &embedder.coreml_vision {
+            if let Some(cv) = embedder.coreml_vision() {
                 (true, cv.supported_patch_counts())
             } else {
                 (false, Vec::new())
@@ -307,7 +307,7 @@ pub fn spawn_inference_engine_with_config(
     let (ane_text_enabled, ane_text_seq_len) = {
         #[cfg(any(feature = "coreml", feature = "ane"))]
         {
-            if let Some(ct) = &embedder.coreml_text {
+            if let Some(ct) = embedder.coreml_text() {
                 (true, Some(ct.max_seq_len()))
             } else {
                 (false, None)
@@ -319,13 +319,13 @@ pub fn spawn_inference_engine_with_config(
         }
     };
 
-    let vision_backend = match embedder.vision_backend {
+    let vision_backend = match embedder.vision_backend() {
         glypr_core::VisionBackendPolicy::Auto => {
-            if ane_enabled && embedder.multimodal.is_some() {
+            if ane_enabled && embedder.multimodal().is_some() {
                 "hybrid (ane + metal)"
             } else if ane_enabled {
                 "ane"
-            } else if embedder.multimodal.is_some() {
+            } else if embedder.multimodal().is_some() {
                 "metal"
             } else {
                 "none"
@@ -336,7 +336,7 @@ pub fn spawn_inference_engine_with_config(
     }
     .to_string();
 
-    let text_backend = match embedder.text_backend {
+    let text_backend = match embedder.text_backend() {
         TextBackendPolicy::Auto => {
             if ane_text_enabled {
                 "hybrid (ane + metal)"
@@ -589,22 +589,23 @@ fn process_batch_results(
 
             let inp = build_multimodal_input(item, task);
             match embedder
-                .tokenizer
+                .tokenizer()
                 .encode_modality_sequence(&inp.parts, inp.task)
             {
                 Ok((ids, _)) => {
                     let tok_count = ids.len();
-                    if tok_count > embedder.max_seq_len {
+                    if tok_count > embedder.max_seq_len() {
                         return PreflightItem::Invalid(EngineError::InvalidInput(format!(
                             "Sequence length ({} tokens) exceeds maximum context limit ({} tokens)",
-                            tok_count, embedder.max_seq_len
+                            tok_count,
+                            embedder.max_seq_len()
                         )));
                     }
                     let is_pure_text = matches!(item, PreparedItem::Text(_));
-                    if is_pure_text && embedder.text_backend == TextBackendPolicy::AneStrict {
+                    if is_pure_text && embedder.text_backend() == TextBackendPolicy::AneStrict {
                         #[cfg(any(feature = "coreml", feature = "ane"))]
                         {
-                            match &embedder.coreml_text {
+                            match embedder.coreml_text() {
                                 Some(ct) if tok_count > ct.max_seq_len() => {
                                     return PreflightItem::Invalid(EngineError::InvalidInput(
                                         format!(
@@ -951,8 +952,8 @@ mod tests {
         use candle_core::{DType, Device, Tensor};
         use glypr_core::_candle_nn::{Embedding, Linear};
         use glypr_core::{
-            EmbeddingGemma2Model, LinearOp, TextBackendPolicy, VisionBackendPolicy, attention,
-            config, layer, mlp, norm, ple, rope, tokenizer::GlyprTokenizer,
+            EmbeddingGemma2Model, LinearOp, attention, config, layer, mlp, norm, ple, rope,
+            tokenizer::GlyprTokenizer,
         };
         use std::collections::HashMap;
 
@@ -1091,20 +1092,7 @@ mod tests {
         );
         let tokenizer = GlyprTokenizer::from_gguf_metadata(&meta).unwrap();
 
-        GlyprEmbedder {
-            model,
-            tokenizer,
-            device,
-            dtype,
-            multimodal: None,
-            max_seq_len,
-            #[cfg(any(feature = "coreml", feature = "ane"))]
-            coreml_vision: None,
-            #[cfg(any(feature = "coreml", feature = "ane"))]
-            coreml_text: None,
-            vision_backend: VisionBackendPolicy::Auto,
-            text_backend: TextBackendPolicy::Auto,
-        }
+        GlyprEmbedder::from_parts(model, tokenizer, device, dtype).with_max_seq_len(max_seq_len)
     }
 
     #[test]

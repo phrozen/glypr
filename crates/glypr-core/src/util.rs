@@ -1,18 +1,15 @@
+use crate::error::{GlyprError, GlyprResult};
 use anyhow::{Result, bail};
 use pulp::Simd;
 
 /// Truncate a normalized embedding to a Matryoshka (MRL) dimension (e.g. 512, 256, 128)
 /// and re-normalize with L2 norm.
-pub fn truncate_mrl(embedding: &[f32], target_dim: usize) -> Result<Vec<f32>> {
-    if target_dim == 0 {
-        bail!("Target Matryoshka dimension cannot be 0");
-    }
-    if target_dim > embedding.len() {
-        bail!(
-            "Target dimension {} exceeds embedding dimension {}",
-            target_dim,
-            embedding.len()
-        );
+pub fn truncate_mrl(embedding: &[f32], target_dim: usize) -> GlyprResult<Vec<f32>> {
+    if target_dim == 0 || target_dim > embedding.len() {
+        return Err(GlyprError::InvalidMrlDimension {
+            dim: target_dim,
+            max: embedding.len(),
+        });
     }
     let slice = &embedding[..target_dim];
     Ok(l2_normalize(slice))

@@ -1,5 +1,5 @@
 use crate::coreml::CoreMLComputeUnits;
-use crate::error::GlyprError;
+use crate::error::{GlyprError, GlyprResult};
 use crate::task::Task;
 use crate::tokenizer::GlyprTokenizer;
 use crate::util::truncate_mrl;
@@ -30,28 +30,17 @@ pub struct CoreMLTextBackbone {
     compute_units: CoreMLComputeUnits,
 }
 
-fn validate_text_mrl_dim(truncate_dim: Option<usize>) -> Result<Option<usize>> {
+fn validate_text_mrl_dim(truncate_dim: Option<usize>) -> GlyprResult<Option<usize>> {
     match truncate_dim {
         None => Ok(None),
-        Some(0) => {
-            let err = GlyprError::InvalidMrlDimension {
-                dim: 0,
-                max: TEXT_EMBEDDING_DIM,
-            };
-            Err(anyhow::Error::new(err)).context("truncate_dim cannot be 0")
-        }
-        Some(d) if d > TEXT_EMBEDDING_DIM => {
-            let err = GlyprError::InvalidMrlDimension {
-                dim: d,
-                max: TEXT_EMBEDDING_DIM,
-            };
-            Err(anyhow::Error::new(err)).with_context(|| {
-                format!(
-                    "truncate_dim ({}) exceeds CoreML text backbone embedding_dim ({})",
-                    d, TEXT_EMBEDDING_DIM
-                )
-            })
-        }
+        Some(0) => Err(GlyprError::InvalidMrlDimension {
+            dim: 0,
+            max: TEXT_EMBEDDING_DIM,
+        }),
+        Some(d) if d > TEXT_EMBEDDING_DIM => Err(GlyprError::InvalidMrlDimension {
+            dim: d,
+            max: TEXT_EMBEDDING_DIM,
+        }),
         Some(TEXT_EMBEDDING_DIM) => Ok(None),
         Some(d) => Ok(Some(d)),
     }
@@ -115,18 +104,23 @@ impl CoreMLTextBackbone {
     }
 
     /// Load a single compiled CoreML text backbone model (`.mlmodelc`).
-    pub fn from_path<P: AsRef<Path>>(path: P, compute_units: CoreMLComputeUnits) -> Result<Self> {
+    pub fn from_path<P: AsRef<Path>>(
+        path: P,
+        compute_units: CoreMLComputeUnits,
+    ) -> GlyprResult<Self> {
         let path_ref = path.as_ref();
         if !path_ref.exists() {
-            let err = GlyprError::CoreMLNotFound {
+            return Err(GlyprError::CoreMLNotFound {
                 path: path_ref.to_path_buf(),
-            };
-            return Err(anyhow::Error::new(err))
-                .with_context(|| format!("CoreML text model not found at {}", path_ref.display()));
+            });
         }
 
-        let model = Model::load(path_ref, compute_units.into()).with_context(|| {
-            format!("Failed to load CoreML text model at {}", path_ref.display())
+        let model = Model::load(path_ref, compute_units.into()).map_err(|e| {
+            GlyprError::ModelLoad(format!(
+                "Failed to load CoreML text model at {}: {}",
+                path_ref.display(),
+                e
+            ))
         })?;
 
         let entry = Self::inspect_and_build_entry(model, path_ref)?;
@@ -141,14 +135,14 @@ impl CoreMLTextBackbone {
     /// Introspects every `*.mlmodelc` bundle by checking for `"input_ids"` and `"attention_mask"`
     /// inputs (cleanly skipping vision models), sorts buckets by `seq_len`, and surfaces
     /// `.mlpackage` / load diagnostics if no usable text models are found.
-    pub fn from_dir<P: AsRef<Path>>(dir: P, compute_units: CoreMLComputeUnits) -> Result<Self> {
+    pub fn from_dir<P: AsRef<Path>>(
+        dir: P,
+        compute_units: CoreMLComputeUnits,
+    ) -> GlyprResult<Self> {
         let dir_ref = dir.as_ref();
         if !dir_ref.is_dir() {
-            let err = GlyprError::CoreMLNotFound {
+            return Err(GlyprError::CoreMLNotFound {
                 path: dir_ref.to_path_buf(),
-            };
-            return Err(anyhow::Error::new(err)).with_context(|| {
-                format!("CoreML text directory not found at {}", dir_ref.display())
             });
         }
 
@@ -242,10 +236,7 @@ impl CoreMLTextBackbone {
                     .collect();
                 msg.push_str(&format!(". Load diagnostics: [{}]", details.join("; ")));
             }
-            let err = GlyprError::CoreMLNotFound {
-                path: dir_ref.to_path_buf(),
-            };
-            return Err(anyhow::Error::new(err)).with_context(|| msg);
+            return Err(GlyprError::ModelLoad(msg));
         }
 
         buckets.sort_by_key(|b| b.seq_len);
@@ -255,27 +246,18 @@ impl CoreMLTextBackbone {
         })
     }
 
-    fn select_bucket(&self, num_tokens: usize) -> Result<&TextModelEntry> {
+    fn select_bucket(&self, num_tokens: usize) -> GlyprResult<&TextModelEntry> {
         if let Some(entry) = self.buckets.iter().find(|b| b.seq_len >= num_tokens) {
             return Ok(entry);
         }
-        let max_len = self.max_seq_len();
-        let err = GlyprError::ContextLimitExceeded {
+        Err(GlyprError::ContextLimitExceeded {
             actual: num_tokens,
-            max: max_len,
-        };
-        Err(anyhow::Error::new(err)).with_context(|| {
-            format!(
-                "Token sequence length ({}) exceeds CoreML text backbone static limit ({}; loaded buckets: {:?})",
-                num_tokens,
-                max_len,
-                self.supported_seq_lens()
-            )
+            max: self.max_seq_len(),
         })
     }
 
     /// Run a dummy 1-token forward pass across all loaded text buckets to pre-warm ANE compilation.
-    pub fn warmup(&self) -> Result<()> {
+    pub fn warmup(&self) -> GlyprResult<()> {
         for entry in &self.buckets {
             let mut padded_ids = vec![0i32; entry.seq_len];
             let mut padded_mask = vec![0.0f32; entry.seq_len];
@@ -312,7 +294,7 @@ impl CoreMLTextBackbone {
     ///
     /// If `token_ids.len() > self.max_seq_len()`, fails immediately with a descriptive error.
     /// Sequences shorter than the chosen bucket's `seq_len` are automatically right-padded with zero mask.
-    pub fn embed_token_ids(&self, token_ids: &[i32]) -> Result<Vec<f32>> {
+    pub fn embed_token_ids(&self, token_ids: &[i32]) -> GlyprResult<Vec<f32>> {
         self.embed_token_ids_with_dim(token_ids, None)
     }
 
@@ -321,9 +303,11 @@ impl CoreMLTextBackbone {
         &self,
         token_ids: &[i32],
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         if token_ids.is_empty() {
-            bail!("Cannot embed an empty token sequence");
+            return Err(GlyprError::InvalidInput(
+                "Cannot embed an empty token sequence".to_string(),
+            ));
         }
         let truncate_dim = validate_text_mrl_dim(truncate_dim)?;
         let num_tokens = token_ids.len();
@@ -360,18 +344,20 @@ impl CoreMLTextBackbone {
             .with_context(|| format!("Failed to read output feature '{}'", entry.output_name))?;
 
         if emb_data.len() != TEXT_EMBEDDING_DIM {
-            bail!(
+            return Err(GlyprError::Other(anyhow!(
                 "Unexpected output length {} (expected {}, shape: {:?})",
                 emb_data.len(),
                 TEXT_EMBEDDING_DIM,
                 shape
-            );
+            )));
         }
 
         // Defensive normalization check
         let norm_sq: f32 = emb_data.iter().map(|&x| x * x).sum();
         if norm_sq.is_nan() || norm_sq <= 0.0 {
-            bail!("CoreML text embedding returned invalid or NaN vector");
+            return Err(GlyprError::Other(anyhow!(
+                "CoreML text embedding returned invalid or NaN vector"
+            )));
         }
 
         // Ensure bit-exact unit length
@@ -392,7 +378,7 @@ impl CoreMLTextBackbone {
         text: &str,
         tokenizer: &GlyprTokenizer,
         task: Option<Task>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         self.embed_text_with_dim(text, tokenizer, task, None)
     }
 
@@ -403,7 +389,7 @@ impl CoreMLTextBackbone {
         tokenizer: &GlyprTokenizer,
         task: Option<Task>,
         truncate_dim: Option<usize>,
-    ) -> Result<Vec<f32>> {
+    ) -> GlyprResult<Vec<f32>> {
         let formatted = if let Some(t) = task {
             t.format_text(text)
         } else {
@@ -422,7 +408,7 @@ impl CoreMLTextBackbone {
         tokenizer: &GlyprTokenizer,
         task: Option<Task>,
         device: &Device,
-    ) -> Result<Tensor> {
+    ) -> GlyprResult<Tensor> {
         let vec = self.embed_text(text, tokenizer, task)?;
         Ok(Tensor::from_vec(vec, (1, TEXT_EMBEDDING_DIM), device)?)
     }
@@ -465,9 +451,18 @@ mod tests {
         assert_eq!(validate_text_mrl_dim(None).unwrap(), None);
         assert_eq!(validate_text_mrl_dim(Some(768)).unwrap(), None);
         assert_eq!(validate_text_mrl_dim(Some(256)).unwrap(), Some(256));
-        assert!(validate_text_mrl_dim(Some(0)).is_err());
+        assert!(matches!(
+            validate_text_mrl_dim(Some(0)).unwrap_err(),
+            GlyprError::InvalidMrlDimension { dim: 0, max: 768 }
+        ));
         let err = validate_text_mrl_dim(Some(1024)).unwrap_err();
-        assert!(err.downcast_ref::<GlyprError>().is_some());
+        assert!(matches!(
+            err,
+            GlyprError::InvalidMrlDimension {
+                dim: 1024,
+                max: 768
+            }
+        ));
     }
 
     #[test]
@@ -500,11 +495,11 @@ mod tests {
         let err = backbone.select_bucket(513).err().unwrap();
         assert!(
             matches!(
-                err.downcast_ref::<GlyprError>(),
-                Some(GlyprError::ContextLimitExceeded {
+                err,
+                GlyprError::ContextLimitExceeded {
                     actual: 513,
                     max: 512
-                })
+                }
             ),
             "unexpected error: {err}"
         );
@@ -520,6 +515,7 @@ mod tests {
         let err = CoreMLTextBackbone::from_dir(&tmp, CoreMLComputeUnits::CpuAndNeuralEngine)
             .err()
             .expect("from_dir should fail when only .mlpackage exists");
+        assert!(matches!(err, GlyprError::ModelLoad(_)), "got: {err:?}");
         let msg = err.to_string();
         assert!(msg.contains(".mlpackage"), "got: {msg}");
 

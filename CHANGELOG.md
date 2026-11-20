@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] - 2026-11-20
+
+### Breaking Changes
+- **Encapsulated `GlyprEmbedder` Fields (`UX-10`):** Privatized `GlyprEmbedder` internal fields (`model`, `tokenizer`, `device`, `dtype`, `multimodal`, `max_seq_len`, `coreml_vision`, `coreml_text`, `vision_backend`, `text_backend`). Use the read/write accessors (`model()`, `model_mut()`, `tokenizer()`, `device()`, `dtype()`, `multimodal()`, `multimodal_mut()`, `max_seq_len()`, `set_max_seq_len()`, `with_max_seq_len()`, `embedding_dim()`, `vision_backend()`, `text_backend()`, `coreml_vision()`, `coreml_text()`, `has_multimodal()`, `has_audio_projector()`, `has_coreml_vision()`, `has_coreml_text()`), `GlyprEmbedder::builder()`, or `GlyprEmbedder::from_parts(...)` + `set_multimodal_projector(...)` / `with_multimodal_projector(...)`.
+- **Structured `GlyprError` & `GlyprResult<T>` API Migration (`UX-10`):** Marked `GlyprError` as `#[non_exhaustive]`, exported `GlyprResult<T>`, and migrated public fallible methods on `GlyprEmbedder`, `GlyprBuilder`, `CoreMLVisionTower`, `CoreMLTextBackbone`, `glypr_core::hub`, `truncate_mrl`, and `validate_vision_budget` from `anyhow::Result<T>` to `GlyprResult<T>`.
+- **Strict Validation & Preflight Guards:** Enforced strict MRL dimension bounds (`1..=embedding_dim`), interleaved/composite media & splicing checks, and CLI flag/pre-load validation (`--bf16` vs `--q8` conflict, `--ane` error without `coreml` feature, missing media path rejection, `--dim` bounds).
+- **Default-Off Server Local File Reads:** `glypr-server` disables local filesystem media path reads by default across all bind addresses (`allow_local_files: false`); pass `--allow-local-files` to opt in.
+
+### Added & Improved
+- **M5 Metal 4 FlashAttention & Kernel Fusion:** Added unaligned sequence-length (`s`) FlashAttention support on M5 NAX, Q8_0 GEMM/GEMV tuning, Vision/Audio kernel fusion, and hybrid PLE optimizations.
+- **Fast Loading & Startup Warmup:** Switched Safetensors loading to `mmap`, GGUF loading to an `8 MiB` `BufReader`, and added RoPE, Metal pipeline, and CoreML ANE startup warmup passes.
+- **ANE Text Routing & CoreML Discovery (`UX-01`, `UX-02`, `UX-09`):** Added `CoreMLTextBackbone` multi-bucket discovery and `TextBackendPolicy::Auto` `[64..=512]`-token pure-text ANE routing (`batch_size <= 4`), `(patch_height, patch_width)` vision grid keying, deterministic `resolve_coreml_dir` lookup, and `scripts/export_coreml.py` square/landscape presets + `manifest.json`.
+- **Builder & Offline Hub Ergonomics (`UX-05`, `UX-10`):** Added fluent `GlyprEmbedder::builder()` (`GlyprBuilder`) with safe Metal auto-detection and `--offline` / `HF_HUB_OFFLINE` cache-miss diagnostics.
+- **CLI Batch/JSONL & Inspection (`UX-03`, `UX-12`):** Added `glypr embed --batch` / `--jsonl`, explicit `--image` / `--audio` / `--text-file` flags, and `glypr inspect <PATH>` for `.gguf` and `.mlmodelc` bundles.
+- **Hardened `glypr-server` (`UX-04`):** Added `tracing_subscriber` initialization, `32 MiB` default body limit, `/ready` probe, graceful `SIGINT`/`SIGTERM` shutdown, worker panic isolation, per-item batch error isolation, and length-bucketed micro-batching.
+- **CPU SIMD & Accelerate:** Added Rayon-parallelized BF16 CPU SIMD kernels and optional Apple Accelerate (`vvtanhf`) support.
+
+---
+
 ## [0.3.0] - 2026-10-20
 
 ### Added

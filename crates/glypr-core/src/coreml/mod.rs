@@ -42,17 +42,19 @@ pub struct CoreMLModelInfo {
 pub fn inspect_mlmodelc<P: AsRef<std::path::Path>>(
     path: P,
     compute_units: CoreMLComputeUnits,
-) -> anyhow::Result<CoreMLModelInfo> {
+) -> crate::error::GlyprResult<CoreMLModelInfo> {
     let path_ref = path.as_ref();
     if !path_ref.exists() {
-        anyhow::bail!("CoreML bundle not found at {}", path_ref.display());
+        return Err(crate::error::GlyprError::CoreMLNotFound {
+            path: path_ref.to_path_buf(),
+        });
     }
     let model = coreml_native::Model::load(path_ref, compute_units.into()).map_err(|e| {
-        anyhow::anyhow!(
+        crate::error::GlyprError::ModelLoad(format!(
             "Failed to load CoreML model at {}: {}",
             path_ref.display(),
             e
-        )
+        ))
     })?;
     let inputs = model
         .inputs()

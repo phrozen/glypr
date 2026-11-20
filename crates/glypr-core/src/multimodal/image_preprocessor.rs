@@ -1,3 +1,4 @@
+use crate::error::{GlyprError, GlyprResult};
 use anyhow::{Result, bail};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use rayon::prelude::*;
@@ -13,14 +14,13 @@ pub const VISION_BUDGET_MIN: usize = 16;
 pub const VISION_BUDGET_MAX: usize = 2048;
 
 /// Validate that a vision token budget is within supported bounds [16..2048]
-pub fn validate_vision_budget(budget: usize) -> Result<()> {
+pub fn validate_vision_budget(budget: usize) -> GlyprResult<()> {
     if !(VISION_BUDGET_MIN..=VISION_BUDGET_MAX).contains(&budget) {
-        bail!(
-            "Vision token budget {} is out of supported range [{}..{}]",
+        return Err(GlyprError::InvalidVisionBudget {
             budget,
-            VISION_BUDGET_MIN,
-            VISION_BUDGET_MAX
-        );
+            min: VISION_BUDGET_MIN,
+            max: VISION_BUDGET_MAX,
+        });
     }
     Ok(())
 }

@@ -82,7 +82,7 @@ fn test_multimodal_batch_equivalence() -> Result<()> {
             eprintln!("Skipping multimodal batch test (GLYPR_ALLOW_MISSING_WEIGHTS=1): {e}");
             return Ok(());
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
     let mmproj_path = match glypr_core::hub::resolve_canonical_mmproj(false) {
         Ok(p) => p,
@@ -90,7 +90,7 @@ fn test_multimodal_batch_equivalence() -> Result<()> {
             eprintln!("Skipping multimodal batch test (GLYPR_ALLOW_MISSING_WEIGHTS=1): {e}");
             return Ok(());
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
 
     #[cfg(feature = "metal")]

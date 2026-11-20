@@ -1,15 +1,23 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Convenience result alias for fallible `glypr-core` operations.
+pub type GlyprResult<T> = std::result::Result<T, GlyprError>;
+
+fn format_grids(grids: &[(usize, usize)]) -> String {
+    grids
+        .iter()
+        .map(|(h, w)| format!("{h}x{w}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Structured error type for `glypr-core` operations.
-///
-/// In v0.4.0, public APIs attach `GlyprError` values inside `anyhow::Error`
-/// (queryable via `err.downcast_ref::<GlyprError>()`) ahead of the full return-type
-/// migration.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum GlyprError {
     /// Input token sequence exceeds the embedder's configured `max_seq_len` or ANE static limit.
-    #[error("Context length {actual} tokens exceeds max_seq_len ({max} tokens)")]
+    #[error("Sequence length ({actual} tokens) exceeds maximum context limit ({max} tokens)")]
     ContextLimitExceeded {
         /// Actual sequence length in tokens.
         actual: usize,
@@ -47,7 +55,8 @@ pub enum GlyprError {
 
     /// No loaded CoreML vision model matches the image's exact `(patch_height, patch_width)` grid.
     #[error(
-        "Unsupported CoreML image patch grid {patch_height}x{patch_width} ({num_patches} patches); loaded grids: {supported_grids:?}"
+        "Unsupported CoreML image patch grid {patch_height}x{patch_width} ({num_patches} patches); loaded grids: [{}]. Adjust --image-token-budget, pass --bf16-mmproj for GPU fallback, or export this aspect ratio with 'uv run python scripts/export_coreml.py --vision-preset all'.",
+        format_grids(.supported_grids)
     )]
     UnsupportedCoreMLPatchGrid {
         /// Image grid height in patches.
@@ -60,15 +69,18 @@ pub enum GlyprError {
         supported_grids: Vec<(usize, usize)>,
     },
 
-    /// Expected CoreML directory or `.mlmodelc` artifact was not found or failed to load.
+    /// Expected CoreML directory or `.mlmodelc` artifact was not found.
     #[error("CoreML directory or artifact not found at {path}")]
     CoreMLNotFound {
-        /// Missing or invalid CoreML directory/bundle path.
+        /// Missing CoreML directory/bundle path.
         path: PathBuf,
     },
 
     /// Offline mode is active and the requested Hugging Face Hub file is not cached locally.
-    #[error("Offline mode enabled and '{filename}' from '{repo_id}' is not cached in {cache_dir}")]
+    #[error(
+        "File '{filename}' from '{repo_id}' is not in local HF cache ({cache_dir}) and offline mode is enabled. \
+         Run 'glypr pull' online or pass --model-file <PATH>."
+    )]
     OfflineCacheMiss {
         /// Hugging Face repository ID.
         repo_id: String,
@@ -90,6 +102,10 @@ pub enum GlyprError {
     /// Invalid or malformed caller input.
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// Failed to load or initialize model weights, configuration, or CoreML bundles.
+    #[error("Model load error: {0}")]
+    ModelLoad(String),
 
     /// Underlying filesystem or I/O failure.
     #[error(transparent)]

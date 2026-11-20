@@ -1,5 +1,5 @@
-use crate::error::GlyprError;
-use anyhow::{Context, Result};
+use crate::error::{GlyprError, GlyprResult};
+use anyhow::Context;
 use hf_hub::{Cache, api::sync::Api, api::sync::ApiBuilder};
 use std::path::{Path, PathBuf};
 
@@ -54,11 +54,11 @@ pub fn is_offline_mode() -> bool {
 }
 
 /// Builds a synchronous Hugging Face Hub API client configured with the active cache.
-pub fn get_hf_api() -> Result<Api> {
+pub fn get_hf_api() -> GlyprResult<Api> {
     let cache = get_hf_cache();
-    ApiBuilder::from_cache(cache)
+    Ok(ApiBuilder::from_cache(cache)
         .build()
-        .context("Failed to initialize Hugging Face Hub API client")
+        .context("Failed to initialize Hugging Face Hub API client")?)
 }
 
 /// Resolves a file from a Hugging Face model repository with explicit offline control.
@@ -66,43 +66,40 @@ pub fn get_hf_api() -> Result<Api> {
 /// Checks the local Hugging Face cache first (zero network I/O). If the file is missing and
 /// `offline || is_offline_mode()`, fails immediately with an actionable [`GlyprError::OfflineCacheMiss`]
 /// without attempting any network requests.
-pub fn resolve_file_with_options(repo_id: &str, filename: &str, offline: bool) -> Result<PathBuf> {
+pub fn resolve_file_with_options(
+    repo_id: &str,
+    filename: &str,
+    offline: bool,
+) -> GlyprResult<PathBuf> {
     if let Some(cached) = check_cached_file(repo_id, filename) {
         return Ok(cached);
     }
 
     if offline || is_offline_mode() {
-        let cache_dir = get_hf_cache_dir();
-        let err = GlyprError::OfflineCacheMiss {
+        return Err(GlyprError::OfflineCacheMiss {
             repo_id: repo_id.to_string(),
             filename: filename.to_string(),
-            cache_dir: cache_dir.clone(),
-        };
-        return Err(anyhow::Error::new(err)).with_context(|| {
-            format!(
-                "File '{filename}' from '{repo_id}' is not in local HF cache ({}) and offline mode is enabled. \
-                 Run 'glypr pull' online or pass --model-file <PATH>.",
-                cache_dir.display()
-            )
+            cache_dir: get_hf_cache_dir(),
         });
     }
 
     let api = get_hf_api()?;
     let repo = api.model(repo_id.to_string());
-    repo.get(filename)
-        .with_context(|| format!("Failed to resolve '{filename}' from repository '{repo_id}'"))
+    Ok(repo
+        .get(filename)
+        .with_context(|| format!("Failed to resolve '{filename}' from repository '{repo_id}'"))?)
 }
 
 /// Resolves a file from a Hugging Face model repository.
 ///
 /// If the file is already cached locally, it returns the local file path immediately (zero network overhead).
 /// If the file is not yet cached locally, it downloads it from the hub (unless `HF_HUB_OFFLINE=1`).
-pub fn resolve_file(repo_id: &str, filename: &str) -> Result<PathBuf> {
+pub fn resolve_file(repo_id: &str, filename: &str) -> GlyprResult<PathBuf> {
     resolve_file_with_options(repo_id, filename, false)
 }
 
 /// Resolves the canonical base model GGUF (BF16 default or Q8_0) with explicit offline control.
-pub fn resolve_canonical_model_with_options(use_q8: bool, offline: bool) -> Result<PathBuf> {
+pub fn resolve_canonical_model_with_options(use_q8: bool, offline: bool) -> GlyprResult<PathBuf> {
     let filename = if use_q8 {
         GGUF_Q8_0_FILE
     } else {
@@ -112,12 +109,12 @@ pub fn resolve_canonical_model_with_options(use_q8: bool, offline: bool) -> Resu
 }
 
 /// Resolves the canonical base model GGUF (BF16 default or Q8_0).
-pub fn resolve_canonical_model(use_q8: bool) -> Result<PathBuf> {
+pub fn resolve_canonical_model(use_q8: bool) -> GlyprResult<PathBuf> {
     resolve_canonical_model_with_options(use_q8, false)
 }
 
 /// Resolves the canonical multimodal projector GGUF (BF16 default or Q8_0) with explicit offline control.
-pub fn resolve_canonical_mmproj_with_options(use_q8: bool, offline: bool) -> Result<PathBuf> {
+pub fn resolve_canonical_mmproj_with_options(use_q8: bool, offline: bool) -> GlyprResult<PathBuf> {
     let filename = if use_q8 {
         MMPROJ_Q8_0_FILE
     } else {
@@ -127,37 +124,37 @@ pub fn resolve_canonical_mmproj_with_options(use_q8: bool, offline: bool) -> Res
 }
 
 /// Resolves the canonical multimodal projector GGUF (BF16 default or Q8_0).
-pub fn resolve_canonical_mmproj(use_q8: bool) -> Result<PathBuf> {
+pub fn resolve_canonical_mmproj(use_q8: bool) -> GlyprResult<PathBuf> {
     resolve_canonical_mmproj_with_options(use_q8, false)
 }
 
 /// Resolves the default BF16 base model GGUF (`ggml-org/embeddinggemma-2-GGUF/embeddinggemma-2-BF16.gguf`).
-pub fn resolve_default_gguf() -> Result<PathBuf> {
+pub fn resolve_default_gguf() -> GlyprResult<PathBuf> {
     resolve_canonical_model(false)
 }
 
 /// Resolves the default BF16 multimodal projector GGUF (`ggml-org/embeddinggemma-2-GGUF/mmproj-embeddinggemma-2-BF16.gguf`).
-pub fn resolve_default_mmproj() -> Result<PathBuf> {
+pub fn resolve_default_mmproj() -> GlyprResult<PathBuf> {
     resolve_canonical_mmproj(false)
 }
 
 /// Resolves Google's official `model.safetensors` (`google/embeddinggemma-2/model.safetensors`) with offline control.
-pub fn resolve_google_weights_with_options(offline: bool) -> Result<PathBuf> {
+pub fn resolve_google_weights_with_options(offline: bool) -> GlyprResult<PathBuf> {
     resolve_file_with_options(GOOGLE_OFFICIAL_REPO, GOOGLE_SAFETENSORS_FILE, offline)
 }
 
 /// Resolves Google's official `model.safetensors` (`google/embeddinggemma-2/model.safetensors`).
-pub fn resolve_google_weights() -> Result<PathBuf> {
+pub fn resolve_google_weights() -> GlyprResult<PathBuf> {
     resolve_google_weights_with_options(false)
 }
 
 /// Resolves Google's official `tokenizer.json` (`google/embeddinggemma-2/tokenizer.json`) with offline control.
-pub fn resolve_google_tokenizer_with_options(offline: bool) -> Result<PathBuf> {
+pub fn resolve_google_tokenizer_with_options(offline: bool) -> GlyprResult<PathBuf> {
     resolve_file_with_options(GOOGLE_OFFICIAL_REPO, GOOGLE_TOKENIZER_FILE, offline)
 }
 
 /// Resolves Google's official `tokenizer.json` (`google/embeddinggemma-2/tokenizer.json`).
-pub fn resolve_google_tokenizer() -> Result<PathBuf> {
+pub fn resolve_google_tokenizer() -> GlyprResult<PathBuf> {
     resolve_google_tokenizer_with_options(false)
 }
 
@@ -244,8 +241,16 @@ mod tests {
         assert!(msg.contains("offline mode is enabled"), "got: {msg}");
         assert!(msg.contains("glypr pull"), "got: {msg}");
         assert!(
-            err.downcast_ref::<GlyprError>().is_some(),
-            "expected GlyprError downcast"
+            matches!(
+                err,
+                GlyprError::OfflineCacheMiss {
+                    ref repo_id,
+                    ref filename,
+                    ..
+                } if repo_id == "glypr-nonexistent-org/nonexistent-repo-xyz"
+                    && filename == "missing-model.gguf"
+            ),
+            "expected GlyprError::OfflineCacheMiss, got: {err:?}"
         );
     }
 
