@@ -165,6 +165,17 @@ fn get_or_compile_pipeline(
 pub struct MetalFlashAttention;
 
 impl MetalFlashAttention {
+    /// Pre-compile Steel FlashAttention pipelines for standard text head dimensions (256, 512).
+    pub(crate) fn warmup_pipelines(device: &MtlDevice) -> Result<()> {
+        let use_m5 = crate::metal_kernels::MetalCapabilities::detect(device).use_m5_tensor_ops();
+        for head_dim in [256usize, 512] {
+            for has_mask in [false, true] {
+                let _ = get_or_compile_pipeline(device, head_dim, false, false, has_mask, use_m5)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Compute FlashAttention returning output directly in `[B, S, H, D]` layout
     /// so callers can zero-copy `.reshape((B, S, H * D))` without a GPU transpose/copy.
     pub fn compute_attention_bshd(

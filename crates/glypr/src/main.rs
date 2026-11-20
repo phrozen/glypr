@@ -261,6 +261,10 @@ enum Commands {
         #[arg(long)]
         request_timeout_secs: Option<u64>,
 
+        /// Micro-batch coalescing wait window in microseconds (0 = no wait) [env: GLYPR_BATCH_WAIT_US, default: 0]
+        #[arg(long)]
+        batch_wait_us: Option<u64>,
+
         /// Opt-in to allow reading local filesystem paths from HTTP media inputs [env: GLYPR_ALLOW_LOCAL_FILES]
         #[arg(long)]
         allow_local_files: bool,
@@ -1403,6 +1407,7 @@ fn main() -> Result<()> {
             max_body_mb,
             max_batch_items,
             request_timeout_secs,
+            batch_wait_us,
             allow_local_files,
             warmup_coreml,
         } => {
@@ -1438,6 +1443,9 @@ fn main() -> Result<()> {
             let resolved_timeout = request_timeout_secs
                 .or(env_parse::<u64>("GLYPR_REQUEST_TIMEOUT_SECS")?)
                 .unwrap_or(defaults.request_timeout_secs);
+            let resolved_batch_wait_us = batch_wait_us
+                .or(env_parse::<u64>("GLYPR_BATCH_WAIT_US")?)
+                .unwrap_or(defaults.batch_wait_us);
             let env_allow_local = std::env::var("GLYPR_ALLOW_LOCAL_FILES")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false);
@@ -1451,6 +1459,7 @@ fn main() -> Result<()> {
                 max_batch_items: resolved_batch_items.max(1),
                 allow_local_files: *allow_local_files || env_allow_local,
                 request_timeout_secs: resolved_timeout.max(1),
+                batch_wait_us: resolved_batch_wait_us,
             };
             PreValidatedCommand::Serve {
                 config,

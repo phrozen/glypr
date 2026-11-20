@@ -129,6 +129,50 @@ pub struct InferenceRequest {
     pub sender: oneshot::Sender<std::result::Result<(Vec<f32>, usize), EngineError>>,
 }
 
+/// A whole request batch queued in one channel message.
+pub struct BatchInferenceRequest {
+    pub items: Vec<PreparedItem>,
+    pub task: OwnedTask,
+    pub truncate_dim: Option<usize>,
+    pub sender: oneshot::Sender<Vec<InferResult>>,
+}
+
+enum WorkerMessage {
+    Single(InferenceRequest),
+    Batch(BatchInferenceRequest),
+}
+
+enum ResponseTarget {
+    Single(oneshot::Sender<InferResult>),
+    Batch {
+        sender: oneshot::Sender<Vec<InferResult>>,
+        len: usize,
+    },
+}
+
+fn push_worker_message(
+    msg: WorkerMessage,
+    work: &mut Vec<(PreparedItem, OwnedTask, Option<usize>)>,
+    targets: &mut Vec<ResponseTarget>,
+) {
+    match msg {
+        WorkerMessage::Single(req) => {
+            work.push((req.item, req.task, req.truncate_dim));
+            targets.push(ResponseTarget::Single(req.sender));
+        }
+        WorkerMessage::Batch(batch_req) => {
+            let len = batch_req.items.len();
+            for item in batch_req.items {
+                work.push((item, batch_req.task.clone(), batch_req.truncate_dim));
+            }
+            targets.push(ResponseTarget::Batch {
+                sender: batch_req.sender,
+                len,
+            });
+        }
+    }
+}
+
 /// Metadata describing the loaded model and runtime capabilities.
 #[derive(Debug, Clone)]
 pub struct ModelMeta {
@@ -150,7 +194,7 @@ pub struct ModelMeta {
 /// Cloneable handle to submit inference requests to the worker loop.
 #[derive(Clone)]
 pub struct EngineHandle {
-    sender: mpsc::Sender<InferenceRequest>,
+    sender: mpsc::Sender<WorkerMessage>,
     pub meta: Arc<ModelMeta>,
     pub allow_local_files: bool,
     pub max_batch_items: usize,
@@ -179,12 +223,42 @@ impl EngineHandle {
         };
 
         self.sender
-            .send(req)
+            .send(WorkerMessage::Single(req))
             .await
             .map_err(|_| EngineError::Internal("Inference worker is not running".to_string()))?;
 
         rx.await
             .map_err(|_| EngineError::Internal("Inference worker dropped request".to_string()))?
+    }
+
+    /// Submit a batch of prepared items in one channel message and await all results in order.
+    pub async fn infer_batch(
+        &self,
+        items: Vec<PreparedItem>,
+        task: OwnedTask,
+        truncate_dim: Option<usize>,
+    ) -> std::result::Result<Vec<(Vec<f32>, usize)>, EngineError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (tx, rx) = oneshot::channel();
+        let req = BatchInferenceRequest {
+            items,
+            task,
+            truncate_dim,
+            sender: tx,
+        };
+
+        self.sender
+            .send(WorkerMessage::Batch(req))
+            .await
+            .map_err(|_| EngineError::Internal("Inference worker is not running".to_string()))?;
+
+        let results = rx.await.map_err(|_| {
+            EngineError::Internal("Inference worker dropped batch request".to_string())
+        })?;
+
+        results.into_iter().collect()
     }
 }
 
@@ -207,7 +281,7 @@ pub fn spawn_inference_engine_with_config(
     embedder: GlyprEmbedder,
     config: &crate::ServerConfig,
 ) -> EngineHandle {
-    let (tx, mut rx) = mpsc::channel::<InferenceRequest>(1024);
+    let (tx, mut rx) = mpsc::channel::<WorkerMessage>(1024);
 
     let device_name = match &embedder.device {
         candle_core::Device::Metal(_) => "metal".to_string(),
@@ -300,50 +374,80 @@ pub fn spawn_inference_engine_with_config(
     });
 
     let max_batch = config.max_batch_size.max(1);
+    let batch_wait = if config.batch_wait_us > 0 {
+        Some(std::time::Duration::from_micros(config.batch_wait_us))
+    } else {
+        None
+    };
 
     std::thread::Builder::new()
         .name("glypr-infer-worker".into())
         .spawn(move || {
-            tracing::info!("Inference worker started with max_batch_size={}", max_batch);
+            tracing::info!(
+                "Inference worker started with max_batch_size={}, batch_wait_us={}",
+                max_batch,
+                batch_wait.map(|d| d.as_micros() as u64).unwrap_or(0)
+            );
 
-            while let Some(first_req) = rx.blocking_recv() {
-                let mut batch = Vec::with_capacity(max_batch);
-                batch.push(first_req);
+            while let Some(first_msg) = rx.blocking_recv() {
+                let mut work = Vec::with_capacity(max_batch);
+                let mut targets = Vec::new();
+                push_worker_message(first_msg, &mut work, &mut targets);
 
                 // Drain pending requests up to max_batch without blocking
-                while batch.len() < max_batch {
+                while work.len() < max_batch {
                     match rx.try_recv() {
-                        Ok(req) => batch.push(req),
+                        Ok(msg) => push_worker_message(msg, &mut work, &mut targets),
                         Err(_) => break,
                     }
                 }
 
-                // If under capacity, yield briefly to coalesce concurrently arriving requests
-                if batch.len() < max_batch {
-                    std::thread::yield_now();
-                    while batch.len() < max_batch {
+                // Optional micro-batch coalescing window when batch_wait_us > 0
+                if work.len() < max_batch
+                    && let Some(wait_dur) = batch_wait
+                {
+                    let deadline = std::time::Instant::now() + wait_dur;
+                    while work.len() < max_batch {
+                        let now = std::time::Instant::now();
+                        if now >= deadline {
+                            break;
+                        }
                         match rx.try_recv() {
-                            Ok(req) => batch.push(req),
-                            Err(_) => break,
+                            Ok(msg) => push_worker_message(msg, &mut work, &mut targets),
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                                let remaining = deadline.saturating_duration_since(now);
+                                std::thread::sleep(
+                                    remaining.min(std::time::Duration::from_micros(50)),
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
                         }
                     }
                 }
 
-                let mut work = Vec::with_capacity(batch.len());
-                let mut senders = Vec::with_capacity(batch.len());
-                for req in batch {
-                    work.push((req.item, req.task, req.truncate_dim));
-                    senders.push(req.sender);
-                }
-
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    with_autorelease_pool(|| process_batch_results(&embedder, &work))
+                    with_autorelease_pool(|| process_batch_results(&embedder, &work, max_batch))
                 }));
 
                 match outcome {
                     Ok(results) => {
-                        for (sender, res) in senders.into_iter().zip(results) {
-                            let _ = sender.send(res);
+                        let mut res_iter = results.into_iter();
+                        for target in targets {
+                            match target {
+                                ResponseTarget::Single(sender) => {
+                                    let res = res_iter.next().unwrap_or_else(|| {
+                                        Err(EngineError::Internal(
+                                            "Missing inference result".to_string(),
+                                        ))
+                                    });
+                                    let _ = sender.send(res);
+                                }
+                                ResponseTarget::Batch { sender, len } => {
+                                    let chunk: Vec<InferResult> =
+                                        res_iter.by_ref().take(len).collect();
+                                    let _ = sender.send(chunk);
+                                }
+                            }
                         }
                     }
                     Err(panic_payload) => {
@@ -355,11 +459,26 @@ pub fn spawn_inference_engine_with_config(
                             "unknown panic".to_string()
                         };
                         tracing::error!("Inference worker caught panic in batch: {}", panic_msg);
-                        for sender in senders {
-                            let _ = sender.send(Err(EngineError::Internal(format!(
-                                "Inference worker internal panic: {}",
-                                panic_msg
-                            ))));
+                        for target in targets {
+                            match target {
+                                ResponseTarget::Single(sender) => {
+                                    let _ = sender.send(Err(EngineError::Internal(format!(
+                                        "Inference worker internal panic: {}",
+                                        panic_msg
+                                    ))));
+                                }
+                                ResponseTarget::Batch { sender, len } => {
+                                    let errs = (0..len)
+                                        .map(|_| {
+                                            Err(EngineError::Internal(format!(
+                                                "Inference worker internal panic: {}",
+                                                panic_msg
+                                            )))
+                                        })
+                                        .collect();
+                                    let _ = sender.send(errs);
+                                }
+                            }
                         }
                     }
                 }
@@ -406,148 +525,283 @@ fn build_multimodal_input<'a>(item: &'a PreparedItem, task: &'a OwnedTask) -> Mu
 /// Per-item inference output `(embedding_vector, prompt_token_count)` or [`EngineError`].
 pub type InferResult = std::result::Result<(Vec<f32>, usize), EngineError>;
 
-/// Process a collected batch of inference requests with per-item preflight validation
-/// and per-item fallback isolation if a batched forward fails.
+enum PreflightItem<'a> {
+    Invalid(EngineError),
+    ValidText {
+        idx: usize,
+        token_ids: Vec<u32>,
+        tok_count: usize,
+        truncate_dim: Option<usize>,
+    },
+    ValidMultimodal {
+        idx: usize,
+        input: MultimodalInput<'a>,
+        tok_count: usize,
+        truncate_dim: Option<usize>,
+    },
+}
+
+fn finalize_item(
+    embedder: &GlyprEmbedder,
+    vec: Vec<f32>,
+    truncate_dim: Option<usize>,
+    tok_count: usize,
+) -> InferResult {
+    let final_vec = match truncate_dim {
+        Some(dim) if dim < embedder.embedding_dim() => {
+            truncate_mrl(&vec, dim).map_err(|e| EngineError::InvalidInput(e.to_string()))
+        }
+        _ => Ok(vec),
+    };
+    final_vec.map(|v| (v, tok_count))
+}
+
+/// Process a collected batch of inference requests with parallel preflight/tokenization,
+/// length/modality bucketing, exact order preservation, and per-item fallback isolation.
 fn process_batch_results(
     embedder: &GlyprEmbedder,
     work: &[(PreparedItem, OwnedTask, Option<usize>)],
+    max_batch: usize,
 ) -> Vec<InferResult> {
-    let inputs: Vec<MultimodalInput> = work
-        .iter()
-        .map(|(item, task, _)| build_multimodal_input(item, task))
-        .collect();
+    use rayon::prelude::*;
 
-    let mut results: Vec<Option<InferResult>> = vec![None; work.len()];
-    let mut valid_indices = Vec::with_capacity(work.len());
-    let mut valid_inputs = Vec::with_capacity(work.len());
-    let mut valid_token_counts = Vec::with_capacity(work.len());
-
-    // 1. Per-item preflight validation (isolates bad items before GPU/ANE execution)
-    for (idx, ((item, _, truncate_dim), inp)) in work.iter().zip(inputs.iter()).enumerate() {
-        if let Err(e) = embedder.validate_truncate_dim(*truncate_dim) {
-            results[idx] = Some(Err(EngineError::InvalidInput(e.to_string())));
-            continue;
-        }
-
-        if let PreparedItem::Audio { samples, .. } = item {
-            if samples.is_empty() {
-                results[idx] = Some(Err(EngineError::InvalidInput(
-                    "Input audio cannot be empty".to_string(),
-                )));
-                continue;
+    let preflight: Vec<PreflightItem<'_>> = work
+        .par_iter()
+        .enumerate()
+        .map(|(idx, (item, task, truncate_dim))| {
+            if let Err(e) = embedder.validate_truncate_dim(*truncate_dim) {
+                return PreflightItem::Invalid(EngineError::InvalidInput(e.to_string()));
             }
-            if !embedder.has_audio_projector() {
-                results[idx] = Some(Err(EngineError::InvalidInput(
-                    "Audio encoding requires an attached GGUF mmproj audio projector".to_string(),
-                )));
-                continue;
-            }
-        }
 
-        match embedder
-            .tokenizer
-            .encode_modality_sequence(&inp.parts, inp.task)
-        {
-            Ok((ids, _)) => {
-                let tok_count = ids.len();
-                if tok_count > embedder.max_seq_len {
-                    results[idx] = Some(Err(EngineError::InvalidInput(format!(
-                        "Sequence length ({} tokens) exceeds maximum context limit ({} tokens)",
-                        tok_count, embedder.max_seq_len
-                    ))));
-                    continue;
+            if let PreparedItem::Audio { samples, .. } = item {
+                if samples.is_empty() {
+                    return PreflightItem::Invalid(EngineError::InvalidInput(
+                        "Input audio cannot be empty".to_string(),
+                    ));
                 }
-                let is_pure_text = matches!(item, PreparedItem::Text(_));
-                if is_pure_text && embedder.text_backend == TextBackendPolicy::AneStrict {
-                    #[cfg(any(feature = "coreml", feature = "ane"))]
-                    {
-                        match &embedder.coreml_text {
-                            Some(ct) if tok_count > ct.max_seq_len() => {
-                                results[idx] = Some(Err(EngineError::InvalidInput(format!(
-                                    "Sequence length ({} tokens) exceeds CoreML AneStrict limit ({} tokens)",
-                                    tok_count,
-                                    ct.max_seq_len()
-                                ))));
-                                continue;
+                if !embedder.has_audio_projector() {
+                    return PreflightItem::Invalid(EngineError::InvalidInput(
+                        "Audio encoding requires an attached GGUF mmproj audio projector"
+                            .to_string(),
+                    ));
+                }
+            }
+
+            let inp = build_multimodal_input(item, task);
+            match embedder
+                .tokenizer
+                .encode_modality_sequence(&inp.parts, inp.task)
+            {
+                Ok((ids, _)) => {
+                    let tok_count = ids.len();
+                    if tok_count > embedder.max_seq_len {
+                        return PreflightItem::Invalid(EngineError::InvalidInput(format!(
+                            "Sequence length ({} tokens) exceeds maximum context limit ({} tokens)",
+                            tok_count, embedder.max_seq_len
+                        )));
+                    }
+                    let is_pure_text = matches!(item, PreparedItem::Text(_));
+                    if is_pure_text && embedder.text_backend == TextBackendPolicy::AneStrict {
+                        #[cfg(any(feature = "coreml", feature = "ane"))]
+                        {
+                            match &embedder.coreml_text {
+                                Some(ct) if tok_count > ct.max_seq_len() => {
+                                    return PreflightItem::Invalid(EngineError::InvalidInput(
+                                        format!(
+                                            "Sequence length ({} tokens) exceeds CoreML AneStrict limit ({} tokens)",
+                                            tok_count,
+                                            ct.max_seq_len()
+                                        ),
+                                    ));
+                                }
+                                None => {
+                                    return PreflightItem::Invalid(EngineError::InvalidInput(
+                                        "AneStrict text backend requested, but no CoreML text backbone is attached"
+                                            .to_string(),
+                                    ));
+                                }
+                                _ => {}
                             }
-                            None => {
-                                results[idx] = Some(Err(EngineError::InvalidInput(
-                                    "AneStrict text backend requested, but no CoreML text backbone is attached"
-                                        .to_string(),
-                                )));
-                                continue;
-                            }
-                            _ => {}
+                        }
+                        #[cfg(not(any(feature = "coreml", feature = "ane")))]
+                        {
+                            return PreflightItem::Invalid(EngineError::InvalidInput(
+                                "AneStrict text backend requested, but binary was compiled without coreml"
+                                    .to_string(),
+                            ));
                         }
                     }
-                    #[cfg(not(any(feature = "coreml", feature = "ane")))]
-                    {
-                        results[idx] = Some(Err(EngineError::InvalidInput(
-                            "AneStrict text backend requested, but binary was compiled without coreml"
-                                .to_string(),
-                        )));
-                        continue;
+
+                    if is_pure_text {
+                        PreflightItem::ValidText {
+                            idx,
+                            token_ids: ids,
+                            tok_count,
+                            truncate_dim: *truncate_dim,
+                        }
+                    } else {
+                        PreflightItem::ValidMultimodal {
+                            idx,
+                            input: inp,
+                            tok_count,
+                            truncate_dim: *truncate_dim,
+                        }
                     }
                 }
-                valid_indices.push(idx);
-                valid_inputs.push(inp.clone());
-                valid_token_counts.push(tok_count);
+                Err(e) => PreflightItem::Invalid(EngineError::InvalidInput(e.to_string())),
             }
-            Err(e) => {
-                results[idx] = Some(Err(EngineError::InvalidInput(e.to_string())));
+        })
+        .collect();
+
+    struct TextBucketEntry {
+        orig_idx: usize,
+        token_ids: Vec<u32>,
+        tok_count: usize,
+        truncate_dim: Option<usize>,
+    }
+
+    let mut results: Vec<Option<InferResult>> = (0..work.len()).map(|_| None).collect();
+    // 4 pure-text length buckets: [<= 128, <= 512, <= 2048, > 2048]
+    let mut text_buckets: [Vec<TextBucketEntry>; 4] =
+        [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    let mut multimodal_bucket: Vec<(usize, MultimodalInput<'_>, usize, Option<usize>)> = Vec::new();
+
+    for (idx, item) in preflight.into_iter().enumerate() {
+        match item {
+            PreflightItem::Invalid(err) => {
+                results[idx] = Some(Err(err));
+            }
+            PreflightItem::ValidText {
+                idx,
+                token_ids,
+                tok_count,
+                truncate_dim,
+            } => {
+                let bucket_idx = if tok_count <= 128 {
+                    0
+                } else if tok_count <= 512 {
+                    1
+                } else if tok_count <= 2048 {
+                    2
+                } else {
+                    3
+                };
+                text_buckets[bucket_idx].push(TextBucketEntry {
+                    orig_idx: idx,
+                    token_ids,
+                    tok_count,
+                    truncate_dim,
+                });
+            }
+            PreflightItem::ValidMultimodal {
+                idx,
+                input,
+                tok_count,
+                truncate_dim,
+            } => {
+                multimodal_bucket.push((idx, input, tok_count, truncate_dim));
             }
         }
     }
 
-    let finalize_item = |vec: Vec<f32>, truncate_dim: Option<usize>, tok_count: usize| {
-        let final_vec = match truncate_dim {
-            Some(dim) if dim < embedder.embedding_dim() => {
-                truncate_mrl(&vec, dim).map_err(|e| EngineError::InvalidInput(e.to_string()))
-            }
-            _ => Ok(vec),
-        };
-        final_vec.map(|v| (v, tok_count))
-    };
+    let chunk_limit = max_batch.max(1);
 
-    // 2. Execute valid items in a single coalesced batch; isolate per-item on failure
-    if !valid_inputs.is_empty() {
-        match embedder.embed_batch(&valid_inputs, None) {
+    // Execute pure-text length buckets via pre-tokenized vectorized [B, max_len] path
+    for mut bucket in text_buckets {
+        while !bucket.is_empty() {
+            let take = bucket.len().min(chunk_limit);
+            let mut bucket_meta = Vec::with_capacity(take);
+            let mut bucket_ids = Vec::with_capacity(take);
+            for entry in bucket.drain(..take) {
+                bucket_meta.push((entry.orig_idx, entry.tok_count, entry.truncate_dim));
+                bucket_ids.push(entry.token_ids);
+            }
+
+            match embedder.embed_tokenized_texts(&bucket_ids, None) {
+                Ok(embeddings) => {
+                    for ((orig_idx, tok_count, truncate_dim), vec) in
+                        bucket_meta.into_iter().zip(embeddings)
+                    {
+                        results[orig_idx] =
+                            Some(finalize_item(embedder, vec, truncate_dim, tok_count));
+                    }
+                }
+                Err(batch_err) => {
+                    if bucket_ids.len() == 1 {
+                        let orig_idx = bucket_meta[0].0;
+                        results[orig_idx] = Some(Err(classify_core_error(&batch_err)));
+                    } else {
+                        tracing::warn!(
+                            "Text bucket of {} items failed ({}); falling back to per-item isolation",
+                            bucket_ids.len(),
+                            batch_err
+                        );
+                        for ((orig_idx, tok_count, truncate_dim), single_ids) in
+                            bucket_meta.into_iter().zip(bucket_ids)
+                        {
+                            let item_res = match embedder
+                                .embed_tokenized_texts(std::slice::from_ref(&single_ids), None)
+                            {
+                                Ok(mut vecs) => match vecs.pop() {
+                                    Some(vec) => {
+                                        finalize_item(embedder, vec, truncate_dim, tok_count)
+                                    }
+                                    None => Err(EngineError::Internal(
+                                        "Empty embedding output from single-item fallback"
+                                            .to_string(),
+                                    )),
+                                },
+                                Err(e) => Err(classify_core_error(&e)),
+                            };
+                            results[orig_idx] = Some(item_res);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Execute multimodal bucket via embed_batch
+    while !multimodal_bucket.is_empty() {
+        let take = multimodal_bucket.len().min(chunk_limit);
+        let mut mm_meta = Vec::with_capacity(take);
+        let mut mm_inputs = Vec::with_capacity(take);
+        for (orig_idx, inp, tok_count, truncate_dim) in multimodal_bucket.drain(..take) {
+            mm_meta.push((orig_idx, tok_count, truncate_dim));
+            mm_inputs.push(inp);
+        }
+
+        match embedder.embed_batch(&mm_inputs, None) {
             Ok(embeddings) => {
-                for ((idx, tok_count), vec) in valid_indices
-                    .into_iter()
-                    .zip(valid_token_counts)
-                    .zip(embeddings)
+                for ((orig_idx, tok_count, truncate_dim), vec) in
+                    mm_meta.into_iter().zip(embeddings)
                 {
-                    let truncate_dim = work[idx].2;
-                    results[idx] = Some(finalize_item(vec, truncate_dim, tok_count));
+                    results[orig_idx] = Some(finalize_item(embedder, vec, truncate_dim, tok_count));
                 }
             }
             Err(batch_err) => {
-                if valid_inputs.len() == 1 {
-                    let idx = valid_indices[0];
-                    results[idx] = Some(Err(classify_core_error(&batch_err)));
+                if mm_inputs.len() == 1 {
+                    let orig_idx = mm_meta[0].0;
+                    results[orig_idx] = Some(Err(classify_core_error(&batch_err)));
                 } else {
                     tracing::warn!(
-                        "Coalesced batch of {} items failed ({}); falling back to per-item isolation",
-                        valid_inputs.len(),
+                        "Multimodal bucket of {} items failed ({}); falling back to per-item isolation",
+                        mm_inputs.len(),
                         batch_err
                     );
-                    for ((idx, tok_count), single_inp) in valid_indices
-                        .into_iter()
-                        .zip(valid_token_counts)
-                        .zip(valid_inputs)
+                    for ((orig_idx, tok_count, truncate_dim), single_inp) in
+                        mm_meta.into_iter().zip(mm_inputs)
                     {
-                        let truncate_dim = work[idx].2;
                         let item_res = match embedder.embed_batch(&[single_inp], None) {
                             Ok(mut vecs) => match vecs.pop() {
-                                Some(vec) => finalize_item(vec, truncate_dim, tok_count),
+                                Some(vec) => finalize_item(embedder, vec, truncate_dim, tok_count),
                                 None => Err(EngineError::Internal(
                                     "Empty embedding output from single-item fallback".to_string(),
                                 )),
                             },
                             Err(e) => Err(classify_core_error(&e)),
                         };
-                        results[idx] = Some(item_res);
+                        results[orig_idx] = Some(item_res);
                     }
                 }
             }
@@ -690,5 +944,244 @@ mod tests {
         });
         let err = prepare_input_item(bad_budget, false).err().unwrap();
         assert!(matches!(err, EngineError::InvalidInput(_)));
+    }
+
+    fn build_tiny_engine_test_embedder(max_seq_len: usize) -> GlyprEmbedder {
+        use candle_core::quantized::gguf_file::Value;
+        use candle_core::{DType, Device, Tensor};
+        use glypr_core::_candle_nn::{Embedding, Linear};
+        use glypr_core::{
+            EmbeddingGemma2Model, LinearOp, TextBackendPolicy, VisionBackendPolicy, attention,
+            config, layer, mlp, norm, ple, rope, tokenizer::GlyprTokenizer,
+        };
+        use std::collections::HashMap;
+
+        let hidden_size = 8usize;
+        let intermediate_size = 16usize;
+        let num_heads = 2usize;
+        let num_kv_heads = 1usize;
+        let head_dim = 4usize;
+        let embedding_dim = 64usize;
+        let hidden_size_per_layer_input = 8usize;
+        let vocab_size = 16usize;
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let mut rope_parameters = HashMap::new();
+        rope_parameters.insert(
+            "sliding_attention".to_string(),
+            config::RoPEParameters {
+                rope_theta: 10_000.0,
+                rope_type: "default".to_string(),
+            },
+        );
+        rope_parameters.insert(
+            "full_attention".to_string(),
+            config::RoPEParameters {
+                rope_theta: 1_000_000.0,
+                rope_type: "default".to_string(),
+            },
+        );
+
+        let text_config = config::TextConfig {
+            hidden_size,
+            intermediate_size,
+            num_hidden_layers: 1,
+            num_attention_heads: num_heads,
+            num_key_value_heads: num_kv_heads,
+            head_dim,
+            vocab_size,
+            embedding_dim,
+            max_position_embeddings: 4096,
+            sliding_window: 512,
+            rms_norm_eps: 1e-6,
+            hidden_size_per_layer_input,
+            layer_types: vec![config::LayerType::SlidingAttention],
+            per_layer_config: HashMap::new(),
+            rope_parameters,
+            pad_token_id: 0,
+            bos_token_id: 2,
+            eos_token_id: 1,
+        };
+
+        let ones = |shape: (usize, usize)| -> LinearOp {
+            let w = Tensor::ones(shape, dtype, &device).unwrap();
+            LinearOp::new_standard(Linear::new(w, None))
+        };
+        let norm_w = |len: usize| -> norm::RMSNorm {
+            norm::RMSNorm::new(Some(Tensor::ones((len,), dtype, &device).unwrap()), 1e-6)
+        };
+
+        let embed_weight =
+            candle_core::Tensor::arange(0u32, (vocab_size * hidden_size) as u32, &device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap()
+                .reshape((vocab_size, hidden_size))
+                .unwrap();
+        let embed_tokens = Embedding::new(embed_weight, hidden_size);
+
+        let ple = ple::TextPLE::new(
+            ones((hidden_size_per_layer_input, hidden_size)),
+            (hidden_size as f64).powf(-0.5),
+            norm_w(hidden_size_per_layer_input),
+            1,
+            hidden_size_per_layer_input,
+        );
+
+        let layer = layer::EncoderLayer {
+            self_attn: attention::SelfAttention::new(
+                ones((num_heads * head_dim, hidden_size)),
+                ones((num_kv_heads * head_dim, hidden_size)),
+                ones((num_kv_heads * head_dim, hidden_size)),
+                ones((hidden_size, num_heads * head_dim)),
+                norm_w(head_dim),
+                norm_w(head_dim),
+                norm::RMSNorm::new(None, 1e-6),
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                Some(text_config.sliding_window),
+            ),
+            mlp: mlp::MLP::new(
+                ones((intermediate_size, hidden_size)),
+                ones((intermediate_size, hidden_size)),
+                ones((hidden_size, intermediate_size)),
+            ),
+            input_layernorm: norm_w(hidden_size),
+            post_attention_layernorm: norm_w(hidden_size),
+            pre_feedforward_layernorm: norm_w(hidden_size),
+            post_feedforward_layernorm: norm_w(hidden_size),
+            ple_block: ple::TextPLEBlock::new(
+                ones((hidden_size_per_layer_input, hidden_size)),
+                ones((hidden_size, hidden_size_per_layer_input)),
+                norm_w(hidden_size),
+            ),
+            layer_scalar: candle_core::Tensor::ones((1,), dtype, &device).unwrap(),
+        };
+
+        let model = EmbeddingGemma2Model {
+            config: text_config,
+            embed_tokens,
+            embed_scale: (hidden_size as f64).sqrt(),
+            ple,
+            layers: vec![layer],
+            norm: norm_w(hidden_size),
+            embedding_projection: ones((embedding_dim, hidden_size)),
+            rope_sliding: rope::RotaryEmbedding::new(head_dim, 10_000.0, &device).unwrap(),
+            rope_full: rope::RotaryEmbedding::new(head_dim, 1_000_000.0, &device).unwrap(),
+            device: device.clone(),
+            dtype,
+        };
+
+        let vocab = vec!["<unk>", "</s>", "<s>", "a", "b", "\u{2581}"];
+        let mut meta = HashMap::new();
+        meta.insert(
+            "tokenizer.ggml.tokens".to_string(),
+            Value::Array(
+                vocab
+                    .into_iter()
+                    .map(|s| Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+        meta.insert(
+            "tokenizer.ggml.merges".to_string(),
+            Value::Array(Vec::new()),
+        );
+        let tokenizer = GlyprTokenizer::from_gguf_metadata(&meta).unwrap();
+
+        GlyprEmbedder {
+            model,
+            tokenizer,
+            device,
+            dtype,
+            multimodal: None,
+            max_seq_len,
+            #[cfg(any(feature = "coreml", feature = "ane"))]
+            coreml_vision: None,
+            #[cfg(any(feature = "coreml", feature = "ane"))]
+            coreml_text: None,
+            vision_backend: VisionBackendPolicy::Auto,
+            text_backend: TextBackendPolicy::Auto,
+        }
+    }
+
+    #[test]
+    fn test_server_config_batch_wait_us_defaults_to_zero() {
+        assert_eq!(crate::DEFAULT_BATCH_WAIT_US, 0);
+        assert_eq!(crate::ServerConfig::default().batch_wait_us, 0);
+    }
+
+    #[test]
+    fn test_process_batch_results_length_bucketing_preserves_order_and_truncate_dim() {
+        let embedder = build_tiny_engine_test_embedder(3000);
+
+        let text_b2 = "a ".repeat(300); // ~600 tokens -> bucket <= 2048
+        let text_b0_a = "a".to_string(); // <= 128 -> bucket <= 128
+        let text_b1 = "a ".repeat(100); // ~200 tokens -> bucket <= 512
+        let text_b3 = "a ".repeat(1100); // ~2200 tokens -> bucket > 2048
+        let text_oversized = "a ".repeat(2000); // > max_seq_len (3000) -> InvalidInput
+        let text_b0_b = "a b".to_string(); // <= 128 -> bucket <= 128
+
+        let work = vec![
+            (
+                PreparedItem::Text(text_b2.clone()),
+                OwnedTask::Raw,
+                Some(32),
+            ),
+            (PreparedItem::Text(text_b0_a.clone()), OwnedTask::Raw, None),
+            (
+                PreparedItem::Text(text_b1.clone()),
+                OwnedTask::Raw,
+                Some(16),
+            ),
+            (
+                PreparedItem::Text(text_b3.clone()),
+                OwnedTask::Raw,
+                Some(32),
+            ),
+            (PreparedItem::Text(text_oversized), OwnedTask::Raw, None),
+            (
+                PreparedItem::Text(text_b0_b.clone()),
+                OwnedTask::Raw,
+                Some(8),
+            ),
+        ];
+
+        let results = process_batch_results(&embedder, &work, 32);
+        assert_eq!(results.len(), work.len());
+
+        // Oversized item at index 4 must be isolated without failing any other bucket
+        assert!(matches!(results[4], Err(EngineError::InvalidInput(_))));
+
+        let expected = [
+            (0usize, text_b2, Some(32), 32usize),
+            (1usize, text_b0_a, None, 64usize),
+            (2usize, text_b1, Some(16), 16usize),
+            (3usize, text_b3, Some(32), 32usize),
+            (5usize, text_b0_b, Some(8), 8usize),
+        ];
+
+        for (idx, text, trunc, expected_dim) in expected {
+            let (vec, tok_count) = results[idx]
+                .as_ref()
+                .unwrap_or_else(|e| panic!("item {idx} failed unexpectedly: {e}"));
+            assert!(*tok_count > 0);
+            assert_eq!(vec.len(), expected_dim);
+
+            let ref_vec = embedder
+                .embed_text_with_dim(&text, glypr_core::Task::Raw, trunc)
+                .unwrap();
+            let max_diff = vec
+                .iter()
+                .zip(ref_vec.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_diff < 1e-4,
+                "item {idx} diverged from single-item reference: max_diff={max_diff}"
+            );
+        }
     }
 }

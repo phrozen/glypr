@@ -524,15 +524,18 @@ impl GlyprEmbedder {
         let tokenizer = GlyprTokenizer::from_file(&tokenizer_path)
             .with_context(|| format!("Failed to load tokenizer from {:?}", tokenizer_path))?;
 
-        let weights_bytes = std::fs::read(&weights_path)
-            .with_context(|| format!("Failed to read weights from {:?}", weights_path))?;
-        let safetensors = safetensors::SafeTensors::deserialize(&weights_bytes)
+        let file = std::fs::File::open(&weights_path)
+            .with_context(|| format!("Failed to open weights from {:?}", weights_path))?;
+        // SAFETY: Model weights are read-only during deserialization and not mutated concurrently.
+        let weights_mmap = unsafe { memmap2::Mmap::map(&file) }
+            .with_context(|| format!("Failed to mmap weights from {:?}", weights_path))?;
+        let safetensors = safetensors::SafeTensors::deserialize(&weights_mmap)
             .map_err(|e| anyhow::anyhow!("Safetensors deserialization failed: {}", e))?;
 
         let model = EmbeddingGemma2Model::from_safetensors(&safetensors, config, device, dtype)
             .map_err(|e| anyhow::anyhow!("Model initialization failed: {}", e))?;
 
-        Ok(Self {
+        let embedder = Self {
             model,
             tokenizer,
             device: device.clone(),
@@ -545,17 +548,20 @@ impl GlyprEmbedder {
             coreml_text: None,
             vision_backend: VisionBackendPolicy::Auto,
             text_backend: TextBackendPolicy::Auto,
-        })
+        };
+        embedder.warmup_metal()?;
+        Ok(embedder)
     }
 
     /// Load a 100% self-contained GGUF file (extracts model weights, architecture config, and BPE tokenizer).
     /// Zero external file or HuggingFace snapshot dependencies!
     pub fn load_gguf<P: AsRef<Path>>(gguf_path: P, device: &Device, dtype: DType) -> Result<Self> {
-        let mut file = std::fs::File::open(gguf_path.as_ref())
+        let file = std::fs::File::open(gguf_path.as_ref())
             .with_context(|| format!("Failed to open GGUF file {:?}", gguf_path.as_ref()))?;
+        let mut reader = std::io::BufReader::with_capacity(8 * 1024 * 1024, file);
 
         let content =
-            candle_core::quantized::gguf_file::Content::read(&mut file).with_context(|| {
+            candle_core::quantized::gguf_file::Content::read(&mut reader).with_context(|| {
                 format!(
                     "Failed to read GGUF container from {:?}",
                     gguf_path.as_ref()
@@ -569,10 +575,10 @@ impl GlyprEmbedder {
             .context("Failed to parse GlyprTokenizer from GGUF metadata")?;
 
         let model =
-            EmbeddingGemma2Model::from_gguf_content(&content, &mut file, config, device, dtype)
+            EmbeddingGemma2Model::from_gguf_content(&content, &mut reader, config, device, dtype)
                 .map_err(|e| anyhow::anyhow!("GGUF Model initialization failed: {}", e))?;
 
-        Ok(Self {
+        let embedder = Self {
             model,
             tokenizer,
             device: device.clone(),
@@ -585,7 +591,9 @@ impl GlyprEmbedder {
             coreml_text: None,
             vision_backend: VisionBackendPolicy::Auto,
             text_backend: TextBackendPolicy::Auto,
-        })
+        };
+        embedder.warmup_metal()?;
+        Ok(embedder)
     }
 
     /// Load self-contained BF16 GGUF file (e.g., `embeddinggemma-2-BF16.gguf`)
@@ -774,6 +782,36 @@ impl GlyprEmbedder {
         if let Some(ct) = &self.coreml_text {
             ct.warmup()?;
         }
+        Ok(())
+    }
+
+    /// Pre-populate RoPE cos/sin tables up to `max_position_embeddings.min(DEFAULT_MAX_SEQ_LEN)`
+    /// and, on Metal devices, pre-compile hot Metal shader pipelines so the first request incurs
+    /// zero cold-start compilation or RoPE table-construction jitter. No-op beyond RoPE on CPU.
+    pub fn warmup_metal(&self) -> Result<()> {
+        let precompute_len = self
+            .model
+            .config
+            .max_position_embeddings
+            .clamp(1, DEFAULT_MAX_SEQ_LEN);
+        self.model
+            .rope_sliding
+            .precompute(precompute_len, &self.device, self.dtype)
+            .map_err(|e| anyhow::anyhow!("Failed to precompute sliding RoPE tables: {}", e))?;
+        self.model
+            .rope_full
+            .precompute(precompute_len, &self.device, self.dtype)
+            .map_err(|e| anyhow::anyhow!("Failed to precompute full RoPE tables: {}", e))?;
+
+        #[cfg(feature = "metal")]
+        if let Device::Metal(mdev) = &self.device {
+            crate::metal_kernels::warmup_pipelines(mdev.metal_device())
+                .map_err(|e| anyhow::anyhow!("Failed to warm up Metal fused pipelines: {}", e))?;
+            crate::attention::MetalFlashAttention::warmup_pipelines(mdev.metal_device()).map_err(
+                |e| anyhow::anyhow!("Failed to warm up Metal FlashAttention pipelines: {}", e),
+            )?;
+        }
+
         Ok(())
     }
 
@@ -1449,6 +1487,138 @@ impl GlyprEmbedder {
         self.encode_batch_texts(&formatted_refs, truncate_dim)
     }
 
+    /// Embed pre-tokenized pure-text sequences in a single vectorized `[B, max_len]` forward pass
+    /// (preserving `AneStrict` / `Auto` ANE routing when eligible).
+    pub fn embed_tokenized_texts(
+        &self,
+        tokenized: &[Vec<u32>],
+        truncate_dim: Option<usize>,
+    ) -> Result<Vec<Vec<f32>>> {
+        let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
+        if tokenized.is_empty() {
+            return Ok(Vec::new());
+        }
+        with_autorelease_pool(|| self.embed_tokenized_texts_inner(tokenized, truncate_dim))
+    }
+
+    fn embed_tokenized_texts_inner(
+        &self,
+        tokenized: &[Vec<u32>],
+        truncate_dim: Option<usize>,
+    ) -> Result<Vec<Vec<f32>>> {
+        let b = tokenized.len();
+        if b == 0 {
+            return Ok(Vec::new());
+        }
+
+        for (item_idx, ids) in tokenized.iter().enumerate() {
+            if ids.is_empty() {
+                anyhow::bail!("Batch item {} has empty token sequence", item_idx);
+            }
+            if ids.len() > self.max_seq_len {
+                let err = GlyprError::ContextLimitExceeded {
+                    actual: ids.len(),
+                    max: self.max_seq_len,
+                };
+                return Err(anyhow::Error::new(err)).with_context(|| {
+                    format!(
+                        "Batch item {} sequence length ({}) exceeds maximum context limit ({})",
+                        item_idx,
+                        ids.len(),
+                        self.max_seq_len
+                    )
+                });
+            }
+        }
+
+        // Pure-text ANE routing check (isolated cleanly before Metal/CPU vectorized batching)
+        #[cfg(not(feature = "coreml"))]
+        if self.text_backend == TextBackendPolicy::AneStrict {
+            anyhow::bail!(
+                "AneStrict text backend requested, but glypr-core was built without --features coreml / ane"
+            );
+        }
+
+        #[cfg(feature = "coreml")]
+        if self.text_backend != TextBackendPolicy::Metal {
+            let try_ane = match self.text_backend {
+                TextBackendPolicy::AneStrict => true,
+                TextBackendPolicy::Auto => self.coreml_text.is_some() && b <= 4,
+                TextBackendPolicy::Metal => false,
+            };
+            if try_ane {
+                let ct = self.coreml_text.as_ref().ok_or_else(|| {
+                    anyhow::Error::new(GlyprError::CoreMLNotFound {
+                        path: PathBuf::from("models/coreml"),
+                    })
+                    .context(
+                        "AneStrict text backend requested, but no CoreML text backbone is attached",
+                    )
+                })?;
+
+                let all_fit_ane = match self.text_backend {
+                    TextBackendPolicy::AneStrict => true,
+                    TextBackendPolicy::Auto => tokenized
+                        .iter()
+                        .all(|ids| (64..=ct.seq_len()).contains(&ids.len())),
+                    TextBackendPolicy::Metal => false,
+                };
+
+                if all_fit_ane {
+                    let mut results = Vec::with_capacity(b);
+                    for ids in tokenized {
+                        let ids_i32: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
+                        results.push(ct.embed_token_ids_with_dim(&ids_i32, truncate_dim)?);
+                    }
+                    return Ok(results);
+                }
+            }
+        }
+
+        let mut min_len = usize::MAX;
+        let mut max_len = 0usize;
+        for ids in tokenized {
+            min_len = min_len.min(ids.len());
+            max_len = max_len.max(ids.len());
+        }
+
+        let pad_id = self.model.config.pad_token_id as u32;
+        let (input_ids, pad_mask) = if min_len == max_len {
+            let mut flat_ids = Vec::with_capacity(b * max_len);
+            for ids in tokenized {
+                flat_ids.extend_from_slice(ids);
+            }
+            let ids_tensor = Tensor::from_vec(flat_ids, (b, max_len), &self.device)?;
+            (ids_tensor, None)
+        } else {
+            let mut flat_ids = vec![pad_id; b * max_len];
+            let mut mask_vec = vec![0.0f32; b * max_len];
+            for (row_idx, ids) in tokenized.iter().enumerate() {
+                let start = row_idx * max_len;
+                flat_ids[start..start + ids.len()].copy_from_slice(ids);
+                mask_vec[start..start + ids.len()].fill(1.0);
+            }
+            let ids_tensor = Tensor::from_vec(flat_ids, (b, max_len), &self.device)?;
+            let mask_tensor = Tensor::from_vec(mask_vec, (b, max_len), &self.device)?;
+            (ids_tensor, Some(mask_tensor))
+        };
+
+        let token_embeds = self.model.forward(&input_ids, pad_mask.as_ref())?;
+        let pooled =
+            self.model
+                .pool_and_normalize(&token_embeds, pad_mask.as_ref(), truncate_dim)?;
+        let pooled_f32 = pooled.to_dtype(DType::F32)?;
+        let out_dim = pooled_f32.dim(1)?;
+        let all_floats = pooled_f32.flatten_all()?.to_vec1::<f32>()?;
+
+        let mut results = Vec::with_capacity(b);
+        for chunk in all_floats.chunks_exact(out_dim) {
+            results.push(chunk.to_vec());
+        }
+
+        Ok(results)
+    }
+
     /// Unified batch embedding across arbitrary modalities (text, images, audio, interleaved).
     /// Dynamically optimizes homogeneous sequences into unpadded zero-mask passes,
     /// and safely vectorizes heterogeneous sequences with padding attention masks.
@@ -1500,71 +1670,19 @@ impl GlyprEmbedder {
             );
         }
 
-        // 1b. Pure-text ANE routing check (isolated cleanly before Metal batching path)
+        // 1b. Pure-text fast path: parallel Rayon tokenization + vectorized [B, max_len] forward
         if !has_any_media {
-            #[cfg(not(feature = "coreml"))]
-            if self.text_backend == TextBackendPolicy::AneStrict {
-                anyhow::bail!(
-                    "AneStrict text backend requested, but glypr-core was built without --features coreml / ane"
-                );
-            }
-
-            #[cfg(feature = "coreml")]
-            if self.text_backend != TextBackendPolicy::Metal {
-                let try_ane = match self.text_backend {
-                    TextBackendPolicy::AneStrict => true,
-                    TextBackendPolicy::Auto => self.coreml_text.is_some() && b <= 4,
-                    TextBackendPolicy::Metal => false,
-                };
-                if try_ane {
-                    let ct = self.coreml_text.as_ref().ok_or_else(|| {
-                        anyhow::Error::new(GlyprError::CoreMLNotFound {
-                            path: PathBuf::from("models/coreml"),
-                        })
-                        .context(
-                            "AneStrict text backend requested, but no CoreML text backbone is attached",
-                        )
-                    })?;
-
-                    let mut tokenized = Vec::with_capacity(b);
-                    let mut all_fit_ane = true;
-                    for (item_idx, inp) in inputs.iter().enumerate() {
-                        let (ids, _) = self
-                            .tokenizer
-                            .encode_modality_sequence(&inp.parts, inp.task)?;
-                        if ids.len() > self.max_seq_len {
-                            let err = GlyprError::ContextLimitExceeded {
-                                actual: ids.len(),
-                                max: self.max_seq_len,
-                            };
-                            return Err(anyhow::Error::new(err)).with_context(|| {
-                                format!(
-                                    "Batch item {} sequence length ({}) exceeds maximum context limit ({})",
-                                    item_idx,
-                                    ids.len(),
-                                    self.max_seq_len
-                                )
-                            });
-                        }
-                        if self.text_backend == TextBackendPolicy::Auto
-                            && !(64..=ct.seq_len()).contains(&ids.len())
-                        {
-                            all_fit_ane = false;
-                            break;
-                        }
-                        tokenized.push(ids);
-                    }
-
-                    if all_fit_ane {
-                        let mut results = Vec::with_capacity(b);
-                        for ids in tokenized {
-                            let ids_i32: Vec<i32> = ids.into_iter().map(|id| id as i32).collect();
-                            results.push(ct.embed_token_ids_with_dim(&ids_i32, truncate_dim)?);
-                        }
-                        return Ok(results);
-                    }
-                }
-            }
+            use rayon::prelude::*;
+            let tokenized: Vec<Vec<u32>> = inputs
+                .par_iter()
+                .map(|inp| {
+                    let (ids, _slots) = self
+                        .tokenizer
+                        .encode_modality_sequence(&inp.parts, inp.task)?;
+                    Ok(ids)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return self.embed_tokenized_texts_inner(&tokenized, truncate_dim);
         }
 
         // 2. Pre-extract and batch-encode all images across all items
@@ -2206,5 +2324,44 @@ mod tests {
             .embed_composite(None, &[MediaItem::Audio { samples: &[] }], None)
             .unwrap_err();
         assert!(empty_audio_err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn test_embed_tokenized_texts_and_warmup_metal() {
+        let embedder = build_tiny_embedder();
+        embedder.warmup_metal().unwrap();
+
+        // Empty slice -> empty Vec
+        assert!(
+            embedder
+                .embed_tokenized_texts(&[], None)
+                .unwrap()
+                .is_empty()
+        );
+
+        let texts = ["hello", "hello world", "world"];
+        let tokenized: Vec<Vec<u32>> = texts
+            .iter()
+            .map(|t| embedder.tokenizer.encode(t).unwrap())
+            .collect();
+
+        let from_tokens = embedder.embed_tokenized_texts(&tokenized, None).unwrap();
+        let from_texts = embedder.encode_batch_texts(&texts, None).unwrap();
+        assert_eq!(from_tokens.len(), from_texts.len());
+        for (a, b) in from_tokens.iter().zip(from_texts.iter()) {
+            let max_diff = a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_diff < 1e-5, "tokenized batch mismatch: {max_diff}");
+        }
+
+        // Single-item tokenized batch + MRL truncation
+        let single_tok = embedder
+            .embed_tokenized_texts(&tokenized[1..2], Some(8))
+            .unwrap();
+        assert_eq!(single_tok.len(), 1);
+        assert_eq!(single_tok[0].len(), 8);
     }
 }

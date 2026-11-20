@@ -10,7 +10,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::engine::{EngineError, EngineHandle, OwnedTask};
+use crate::engine::{EngineError, EngineHandle, OwnedTask, PreparedItem};
 use crate::schema::{
     EmbeddingObject, EmbeddingOutput, EmbeddingRequest, EmbeddingResponse, EncodingFormat,
     HealthResponse, InputItem, ModelListResponse, ModelObject, ReadyResponse, Usage,
@@ -190,50 +190,54 @@ pub async fn handle_embeddings(
         None
     };
 
-    // 1. Offload image/audio decoding and preprocessing to Tokio's blocking threadpool
-    let allow_local_files = state.engine.allow_local_files;
-    let mut decode_handles = Vec::with_capacity(items.len());
-    for item in items {
-        decode_handles.push(tokio::task::spawn_blocking(move || {
-            crate::engine::prepare_input_item(item, allow_local_files)
-        }));
-    }
-
-    let mut prepared_items = Vec::with_capacity(decode_handles.len());
-    for handle in decode_handles {
-        match handle.await {
-            Ok(Ok(prepared)) => prepared_items.push(prepared),
-            Ok(Err(e)) => return Err(engine_error_response(e)),
-            Err(e) => return Err(internal_error(e.to_string()).into_response()),
+    // 1. Skip Tokio blocking pool completely for pure-text batches; offload image/audio decoding
+    let all_text = items.iter().all(|item| matches!(item, InputItem::Text(_)));
+    let prepared_items = if all_text {
+        items
+            .into_iter()
+            .map(|item| match item {
+                InputItem::Text(s) => PreparedItem::Text(s),
+                InputItem::Media(_) => unreachable!(),
+            })
+            .collect()
+    } else {
+        let allow_local_files = state.engine.allow_local_files;
+        let mut decode_handles = Vec::with_capacity(items.len());
+        for item in items {
+            decode_handles.push(tokio::task::spawn_blocking(move || {
+                crate::engine::prepare_input_item(item, allow_local_files)
+            }));
         }
-    }
 
-    // 2. Dispatch prepared inference tasks concurrently to engine with timeout
-    let timeout_dur = Duration::from_secs(state.engine.request_timeout_secs);
-    let mut handles = Vec::with_capacity(prepared_items.len());
-    for item in prepared_items {
-        let engine = state.engine.clone();
-        let task_clone = task.clone();
-        handles.push(tokio::spawn(async move {
-            tokio::time::timeout(timeout_dur, engine.infer(item, task_clone, truncate_dim)).await
-        }));
-    }
-
-    let mut vectors = Vec::with_capacity(handles.len());
-    for handle in handles {
-        match handle.await {
-            Ok(Ok(Ok(res))) => vectors.push(res),
-            Ok(Ok(Err(e))) => return Err(engine_error_response(e)),
-            Ok(Err(_elapsed)) => {
-                return Err(gateway_timeout(format!(
-                    "Inference request exceeded {}s timeout",
-                    state.engine.request_timeout_secs
-                ))
-                .into_response());
+        let mut prepared = Vec::with_capacity(decode_handles.len());
+        for handle in decode_handles {
+            match handle.await {
+                Ok(Ok(item)) => prepared.push(item),
+                Ok(Err(e)) => return Err(engine_error_response(e)),
+                Err(e) => return Err(internal_error(e.to_string()).into_response()),
             }
-            Err(e) => return Err(internal_error(e.to_string()).into_response()),
         }
-    }
+        prepared
+    };
+
+    // 2. Dispatch the whole batch to the engine in one message under request timeout
+    let timeout_dur = Duration::from_secs(state.engine.request_timeout_secs);
+    let vectors = match tokio::time::timeout(
+        timeout_dur,
+        state.engine.infer_batch(prepared_items, task, truncate_dim),
+    )
+    .await
+    {
+        Ok(Ok(vecs)) => vecs,
+        Ok(Err(e)) => return Err(engine_error_response(e)),
+        Err(_elapsed) => {
+            return Err(gateway_timeout(format!(
+                "Inference request exceeded {}s timeout",
+                state.engine.request_timeout_secs
+            ))
+            .into_response());
+        }
+    };
 
     // Post-process vectors into requested output encoding format
     let mut embedding_objects = Vec::with_capacity(vectors.len());

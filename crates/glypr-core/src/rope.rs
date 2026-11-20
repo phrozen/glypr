@@ -26,6 +26,11 @@ impl RotaryEmbedding {
         })
     }
 
+    /// Pre-populate the cached `(cos, sin)` tables up to `seq_len` (or `DEFAULT_MAX_SEQ_LEN`).
+    pub fn precompute(&self, seq_len: usize, device: &Device, dtype: DType) -> Result<()> {
+        self.get_cos_sin(seq_len, device, dtype).map(|_| ())
+    }
+
     /// Computes (cos, sin) tensors with shape [1, 1, seq_len, head_dim].
     /// Tables are cached up to `max(seq_len, DEFAULT_MAX_SEQ_LEN)` so repeated forward passes
     /// perform zero GPU allocations or kernel launches.

@@ -23,6 +23,8 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_BATCH_ITEMS: usize = 256;
 /// Default per-request inference timeout in seconds.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
+/// Default micro-batch coalescing wait window in microseconds (0 = no wait).
+pub const DEFAULT_BATCH_WAIT_US: u64 = 0;
 
 /// Server configuration options.
 #[derive(Debug, Clone)]
@@ -35,6 +37,7 @@ pub struct ServerConfig {
     pub max_batch_items: usize,
     pub allow_local_files: bool,
     pub request_timeout_secs: u64,
+    pub batch_wait_us: u64,
 }
 
 impl Default for ServerConfig {
@@ -48,6 +51,7 @@ impl Default for ServerConfig {
             max_batch_items: DEFAULT_MAX_BATCH_ITEMS,
             allow_local_files: false,
             request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
+            batch_wait_us: DEFAULT_BATCH_WAIT_US,
         }
     }
 }

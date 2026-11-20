@@ -26,16 +26,17 @@ impl MultimodalProjector {
             bail!("Multimodal projector file not found at {:?}", p);
         }
 
-        let mut file = std::fs::File::open(p)
+        let file = std::fs::File::open(p)
             .with_context(|| format!("Failed to open mmproj GGUF file {:?}", p))?;
+        let mut reader = std::io::BufReader::with_capacity(8 * 1024 * 1024, file);
 
-        let content = candle_core::quantized::gguf_file::Content::read(&mut file)
+        let content = candle_core::quantized::gguf_file::Content::read(&mut reader)
             .with_context(|| format!("Failed to read mmproj GGUF container from {:?}", p))?;
 
         let config = MultimodalConfig::from_gguf_metadata(&content.metadata);
 
         let vision_tower = if let Some(v_cfg) = config.vision_config.clone() {
-            let tower = VisionTower::from_gguf(&content, &mut file, v_cfg, device, dtype)
+            let tower = VisionTower::from_gguf(&content, &mut reader, v_cfg, device, dtype)
                 .context("Failed to load Vision Tower from mmproj GGUF")?;
             Some(tower)
         } else {
@@ -43,7 +44,7 @@ impl MultimodalProjector {
         };
 
         let audio_tower = if let Some(a_cfg) = config.audio_config.clone() {
-            let tower = AudioTower::from_gguf(&content, &mut file, a_cfg, device, dtype)
+            let tower = AudioTower::from_gguf(&content, &mut reader, a_cfg, device, dtype)
                 .context("Failed to load Audio Tower from mmproj GGUF")?;
             Some(tower)
         } else {

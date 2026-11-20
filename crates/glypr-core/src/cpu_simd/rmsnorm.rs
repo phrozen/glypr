@@ -76,7 +76,6 @@ impl CustomOp1 for CpuRMSNormOp {
             );
         }
         let total_elem = shape.elem_count();
-        let num_rows = total_elem / d;
 
         match storage {
             CpuStorage::F32(data) => {
@@ -107,25 +106,25 @@ impl CustomOp1 for CpuRMSNormOp {
                     candle_core::bail!("cpu_rmsnorm requires contiguous input layout");
                 };
 
-                // Convert BF16 input row to F32 in stack buffer, compute SIMD, convert back to BF16
+                // Parallelize BF16 rows across Rayon threads, reusing per-thread scratch F32 buffers
                 let mut out = vec![bf16::from_f32(0.0); total_elem];
                 let weight_ref = self.weight_f32.as_deref();
-                let mut row_buf = vec![0.0f32; d];
-                let mut out_buf = vec![0.0f32; d];
 
-                for r in 0..num_rows {
-                    let start = r * d;
-                    let end = start + d;
-                    let x_row_bf16 = &slice[start..end];
-                    for i in 0..d {
-                        row_buf[i] = x_row_bf16[i].to_f32();
-                    }
-                    simd_rmsnorm_row_f32_dispatch(&row_buf, weight_ref, &mut out_buf, self.eps);
-                    let out_row_bf16 = &mut out[start..end];
-                    for i in 0..d {
-                        out_row_bf16[i] = bf16::from_f32(out_buf[i]);
-                    }
-                }
+                use rayon::prelude::*;
+                out.par_chunks_exact_mut(d)
+                    .zip(slice.par_chunks_exact(d))
+                    .for_each_init(
+                        || (vec![0.0f32; d], vec![0.0f32; d]),
+                        |(row_buf, out_buf), (out_row_bf16, x_row_bf16)| {
+                            for (dst, src) in row_buf.iter_mut().zip(x_row_bf16.iter()) {
+                                *dst = src.to_f32();
+                            }
+                            simd_rmsnorm_row_f32_dispatch(row_buf, weight_ref, out_buf, self.eps);
+                            for (dst, src) in out_row_bf16.iter_mut().zip(out_buf.iter()) {
+                                *dst = bf16::from_f32(*src);
+                            }
+                        },
+                    );
 
                 Ok((CpuStorage::BF16(out), shape.clone()))
             }
@@ -158,5 +157,84 @@ mod tests {
         let good_w = Tensor::ones((4,), DType::F32, &Device::Cpu).unwrap();
         let out = cpu_rmsnorm(&x, Some(&good_w), 1e-6).unwrap();
         assert_eq!(out.dims(), &[2, 4]);
+    }
+
+    #[test]
+    fn test_cpu_rmsnorm_bf16_parity() {
+        let rows = 5usize;
+        let d = 73usize; // non-SIMD-aligned dimension to exercise head + tail
+        let x_data: Vec<f32> = (0..(rows * d))
+            .map(|i| ((i as f32) * 0.13 - 3.0).sin() * 2.5)
+            .collect();
+        let w_data: Vec<f32> = (0..d)
+            .map(|i| 0.5 + ((i as f32) * 0.07).cos() * 0.4)
+            .collect();
+
+        let x_f32 = Tensor::from_vec(x_data, (rows, d), &Device::Cpu).unwrap();
+        let w_f32 = Tensor::from_vec(w_data, (d,), &Device::Cpu).unwrap();
+        let x_bf16 = x_f32.to_dtype(DType::BF16).unwrap();
+        let w_bf16 = w_f32.to_dtype(DType::BF16).unwrap();
+
+        let ref_with_w = cpu_rmsnorm(
+            &x_bf16.to_dtype(DType::F32).unwrap(),
+            Some(&w_bf16.to_dtype(DType::F32).unwrap()),
+            1e-6,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+        let got_with_w = cpu_rmsnorm(&x_bf16, Some(&w_bf16), 1e-6)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+
+        let max_diff_w = ref_with_w
+            .iter()
+            .zip(got_with_w.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff_w < 1e-3,
+            "BF16 RMSNorm (weighted) parity mismatch: {max_diff_w}"
+        );
+
+        let ref_no_w = cpu_rmsnorm(&x_bf16.to_dtype(DType::F32).unwrap(), None, 1e-6)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let got_no_w = cpu_rmsnorm(&x_bf16, None, 1e-6)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+
+        let max_diff_no_w = ref_no_w
+            .iter()
+            .zip(got_no_w.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff_no_w < 1e-3,
+            "BF16 RMSNorm (unweighted) parity mismatch: {max_diff_no_w}"
+        );
     }
 }

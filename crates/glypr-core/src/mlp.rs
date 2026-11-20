@@ -38,13 +38,14 @@ impl MLP {
                 return self.down_proj.forward(&gated);
             }
 
+            if gate_up.device().is_cpu() {
+                let gated = crate::cpu_simd::cpu_geglu_gate_up(&gate_up)?;
+                return self.down_proj.forward(&gated);
+            }
+
             let d = gate_up.dim(D::Minus1)? / 2;
             let gate = gate_up.narrow(D::Minus1, 0, d)?.contiguous()?;
             let up = gate_up.narrow(D::Minus1, d, d)?.contiguous()?;
-            if gate.device().is_cpu() {
-                let gated = crate::cpu_simd::cpu_geglu(&gate, &up)?;
-                return self.down_proj.forward(&gated);
-            }
             let gate_act = gelu_tanh(&gate)?;
             let gated = gate_act.broadcast_mul(&up)?;
             return self.down_proj.forward(&gated);

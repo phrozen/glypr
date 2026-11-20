@@ -113,6 +113,32 @@ fn get_or_compile_m5_pipeline(dev: &MtlDevice, fn_name: &'static str) -> Result<
     Ok(pipeline)
 }
 
+/// Pre-compile hot fused Metal pipelines (and M5 Neural Accelerator pipelines when supported)
+/// so the first inference request incurs zero shader-compilation jitter.
+pub(crate) fn warmup_pipelines(dev: &MtlDevice) -> Result<()> {
+    for name in [
+        "rms_norm_bf16",
+        "rms_norm_residual_add_bf16",
+        "qkv_rmsnorm_rope_transpose_bf16",
+        "ple_scale_rms_norm_transpose_bf16",
+        "ple_scale_rms_norm_bf16",
+        "geglu_gate_up_bf16",
+        "pool_mean_bf16_to_f32",
+        "l2norm_f32_to_bf16",
+        "q8_0_mv_bf16",
+    ] {
+        let _ = get_or_compile_pipeline(dev, name)?;
+    }
+
+    if MetalCapabilities::detect(dev).use_m5_tensor_ops() {
+        for name in ["bf16_mm_m5", "q8_0_mm_m5_bf16"] {
+            let _ = get_or_compile_m5_pipeline(dev, name)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn metal_device_of<'a>(
     t: &'a Tensor,
     fn_name: &str,

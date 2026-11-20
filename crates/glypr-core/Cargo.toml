@@ -36,6 +36,7 @@ ahash = { workspace = true }
 pulp = { workspace = true }
 libc = { workspace = true }
 rayon = { workspace = true }
+memmap2 = { workspace = true }
 image = { workspace = true }
 hound = { workspace = true }
 hf-hub = { workspace = true }
