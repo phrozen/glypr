@@ -263,8 +263,8 @@ impl<'a> MultimodalInput<'a> {
     ) -> Self {
         Self {
             parts: std::borrow::Cow::Owned(vec![
-                ModalityPart::Text(prompt),
                 ModalityPart::Image { image, budget },
+                ModalityPart::Text(prompt),
             ]),
             task,
         }
@@ -280,8 +280,8 @@ impl<'a> MultimodalInput<'a> {
     pub fn audio_with_prompt(samples: &'a [f32], prompt: &'a str, task: Task<'a>) -> Self {
         Self {
             parts: std::borrow::Cow::Owned(vec![
-                ModalityPart::Text(prompt),
                 ModalityPart::Audio { samples },
+                ModalityPart::Text(prompt),
             ]),
             task,
         }
@@ -2348,5 +2348,64 @@ mod tests {
             .unwrap();
         assert_eq!(single_tok.len(), 1);
         assert_eq!(single_tok[0].len(), 8);
+    }
+
+    #[test]
+    fn test_multimodal_input_with_prompt_orders_media_before_text() {
+        let embedder = build_tiny_embedder();
+        let prompt = "hello world";
+
+        let img = image::DynamicImage::new_rgb8(32, 32);
+        let budget = Some(multimodal::VISION_BUDGET_LOW);
+        let img_inp = MultimodalInput::image_with_prompt(&img, prompt, budget, Task::Raw);
+        assert_eq!(img_inp.parts.len(), 2);
+        assert!(matches!(img_inp.parts[0], ModalityPart::Image { .. }));
+        assert!(matches!(img_inp.parts[1], ModalityPart::Text(p) if p == prompt));
+
+        let n_img_tokens =
+            multimodal::compute_soft_token_count(32, 32, multimodal::VISION_BUDGET_LOW, 16, 3)
+                .unwrap();
+        let (img_seq_ids, img_seq_slots) = embedder
+            .tokenizer()
+            .encode_modality_sequence(&img_inp.parts, img_inp.task)
+            .unwrap();
+        let (img_inter_ids, img_inter_slots) = embedder
+            .tokenizer()
+            .encode_interleaved(
+                Some(prompt),
+                &[tokenizer::MediaPlaceholder::Image {
+                    num_soft_tokens: n_img_tokens,
+                }],
+            )
+            .unwrap();
+        assert_eq!(img_seq_ids, img_inter_ids);
+        assert_eq!(img_seq_slots.len(), img_inter_slots.len());
+        assert_eq!(img_seq_slots[0].start_idx, img_inter_slots[0].start_idx);
+        assert_eq!(img_seq_slots[0].length, img_inter_slots[0].length);
+
+        let samples = vec![0.0f32; 1600];
+        let aud_inp = MultimodalInput::audio_with_prompt(&samples, prompt, Task::Raw);
+        assert_eq!(aud_inp.parts.len(), 2);
+        assert!(matches!(aud_inp.parts[0], ModalityPart::Audio { .. }));
+        assert!(matches!(aud_inp.parts[1], ModalityPart::Text(p) if p == prompt));
+
+        let n_aud_tokens = multimodal::compute_audio_soft_token_count(samples.len());
+        let (aud_seq_ids, aud_seq_slots) = embedder
+            .tokenizer()
+            .encode_modality_sequence(&aud_inp.parts, aud_inp.task)
+            .unwrap();
+        let (aud_inter_ids, aud_inter_slots) = embedder
+            .tokenizer()
+            .encode_interleaved(
+                Some(prompt),
+                &[tokenizer::MediaPlaceholder::Audio {
+                    num_soft_tokens: n_aud_tokens,
+                }],
+            )
+            .unwrap();
+        assert_eq!(aud_seq_ids, aud_inter_ids);
+        assert_eq!(aud_seq_slots.len(), aud_inter_slots.len());
+        assert_eq!(aud_seq_slots[0].start_idx, aud_inter_slots[0].start_idx);
+        assert_eq!(aud_seq_slots[0].length, aud_inter_slots[0].length);
     }
 }

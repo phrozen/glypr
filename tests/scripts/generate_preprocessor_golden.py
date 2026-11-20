@@ -50,35 +50,39 @@ def extract_audio_golden(processor: Any) -> dict[str, Any]:
     )
 
     fe = getattr(processor, "feature_extractor", None) or processor
-    try:
-        aud_out = fe(
-            samples,
-            sampling_rate=sample_rate,
-            pad_to_multiple_of=None,
-            return_tensors="np",
+    if hasattr(fe, "_extract_spectrogram"):
+        feats, mask = fe._extract_spectrogram(samples, np.ones(len(samples), dtype=np.int32))
+        feats = np.asarray(feats, dtype=np.float32)[np.asarray(mask, dtype=bool)]
+    else:
+        try:
+            aud_out = fe(
+                [samples],
+                sampling_rate=sample_rate,
+                pad_to_multiple_of=None,
+                return_tensors="np",
+            )
+        except TypeError:
+            aud_out = fe([samples], sampling_rate=sample_rate, return_tensors="np")
+
+        feat_key = "input_features" if "input_features" in aud_out else next(
+            k for k in aud_out.keys() if "feature" in k and "mask" not in k
         )
-    except TypeError:
-        aud_out = fe(samples, sampling_rate=sample_rate, return_tensors="np")
+        feats = _to_numpy(aud_out[feat_key]).astype(np.float32)
 
-    feat_key = "input_features" if "input_features" in aud_out else next(
-        k for k in aud_out.keys() if "feature" in k and "mask" not in k
-    )
-    feats = _to_numpy(aud_out[feat_key]).astype(np.float32)
+        if feats.ndim == 3 and feats.shape[0] == 1:
+            feats = feats[0]
+        elif feats.ndim == 1:
+            raise ValueError(f"Unexpected 1D audio feature shape: {feats.shape}")
 
-    if feats.ndim == 3 and feats.shape[0] == 1:
-        feats = feats[0]
-    elif feats.ndim == 1:
-        raise ValueError(f"Unexpected 1D audio feature shape: {feats.shape}")
-
-    if "input_features_mask" in aud_out:
-        mask = _to_numpy(aud_out["input_features_mask"])
-        if mask.ndim == 2 and mask.shape[0] == 1:
-            mask = mask[0]
-        mask = mask.astype(bool)
-        if feats.ndim == 2 and feats.shape[0] == mask.shape[0]:
-            feats = feats[mask]
-        elif feats.ndim == 2 and feats.shape[1] == mask.shape[0]:
-            feats = feats[:, mask]
+        if "input_features_mask" in aud_out:
+            mask = _to_numpy(aud_out["input_features_mask"])
+            if mask.ndim == 2 and mask.shape[0] == 1:
+                mask = mask[0]
+            mask = mask.astype(bool)
+            if feats.ndim == 2 and feats.shape[0] == mask.shape[0]:
+                feats = feats[mask]
+            elif feats.ndim == 2 and feats.shape[1] == mask.shape[0]:
+                feats = feats[:, mask]
 
     if feats.ndim == 2 and feats.shape[1] != 128 and feats.shape[0] == 128:
         feats = feats.T
@@ -107,7 +111,7 @@ def _patchify_chw(chw: np.ndarray, patch_size: int) -> tuple[np.ndarray, int, in
 def extract_image_golden(processor: Any) -> dict[str, Any]:
     orig_width = 32
     orig_height = 48
-    budget = 70
+    budget = 16
 
     arr = np.zeros((orig_height, orig_width, 3), dtype=np.uint8)
     for y in range(orig_height):
@@ -167,7 +171,9 @@ def extract_image_golden(processor: Any) -> dict[str, Any]:
         "target_height": th,
         "patch_width": pw,
         "patch_height": ph,
-        "pixel_values": np.ascontiguousarray(pv, dtype=np.float32).reshape(-1).tolist(),
+        "pixel_values": [
+            round(float(x), 6) for x in np.ascontiguousarray(pv, dtype=np.float32).reshape(-1)
+        ],
     }
 
 
