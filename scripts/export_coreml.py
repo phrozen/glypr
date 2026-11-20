@@ -392,6 +392,14 @@ class CleanGemma2TextBackbone(nn.Module):
         self.register_buffer("cos_full", torch.zeros(1, 1, seq_len, 512))
         self.register_buffer("sin_full", torch.zeros(1, 1, seq_len, 512))
 
+        if seq_len > 512:
+            idx = torch.arange(seq_len)
+            diff = (idx.unsqueeze(0) - idx.unsqueeze(1)).abs()
+            sw_mask = torch.where(diff > 512, -10000.0, 0.0).view(1, 1, seq_len, seq_len)
+            self.register_buffer("sliding_window_mask", sw_mask)
+        else:
+            self.sliding_window_mask = None
+
         self.layers = nn.ModuleList()
         for i in range(24):
             if (i + 1) % 6 == 0:
@@ -431,14 +439,19 @@ class CleanGemma2TextBackbone(nn.Module):
 
         # Broadcastable additive mask: [1, 1, 1, seq_len]
         additive_mask = (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -10000.0
+        sliding_mask = (
+            additive_mask
+            if self.sliding_window_mask is None
+            else (additive_mask + self.sliding_window_mask)
+        )
 
         for i, layer in enumerate(self.layers):
             per_layer_slice = ple_inputs[:, :, i, :]
             if (i + 1) % 6 == 0:
-                cos, sin = self.cos_full, self.sin_full
+                cos, sin, layer_mask = self.cos_full, self.sin_full, additive_mask
             else:
-                cos, sin = self.cos_sliding, self.sin_sliding
-            x = layer(x, per_layer_slice, additive_mask, cos, sin)
+                cos, sin, layer_mask = self.cos_sliding, self.sin_sliding, sliding_mask
+            x = layer(x, per_layer_slice, layer_mask, cos, sin)
 
         normed = self.norm(x)
         token_embs = self.embedding_projection(normed)
@@ -589,7 +602,7 @@ def export_vision_tower(
 ) -> Path:
     num_patches = patch_h * patch_w
     num_soft_tokens = (patch_h // 3) * (patch_w // 3)
-    target_name = f"gemma2_vision_tower_p{num_patches}_t{num_soft_tokens}_{quantize}"
+    target_name = f"gemma2_vision_tower_p{num_patches}_t{num_soft_tokens}_h{patch_h}_w{patch_w}_{quantize}"
     package_path = output_dir / f"{target_name}.mlpackage"
 
     print("---------------------------------------------------------------------------")
@@ -621,6 +634,9 @@ def export_vision_tower(
             global_config=cto.OpLinearQuantizerConfig(mode="linear_symmetric")
         )
         mlmodel = cto.linear_quantize_weights(mlmodel, config=opt_config)
+
+    mlmodel.user_defined_metadata["glypr.patch_height"] = str(patch_h)
+    mlmodel.user_defined_metadata["glypr.patch_width"] = str(patch_w)
 
     if package_path.exists():
         shutil.rmtree(package_path)

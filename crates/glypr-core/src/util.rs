@@ -29,7 +29,16 @@ pub fn l2_normalize(vec: &[f32]) -> Vec<f32> {
 }
 
 /// Compute cosine similarity between two float vectors.
+///
+/// Panics if `a.len() != b.len()`. Returns `0.0` if either vector is empty or has zero norm.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "Dimension mismatch in cosine_similarity: {} vs {}",
+        a.len(),
+        b.len()
+    );
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -108,13 +117,15 @@ pub fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
 
 /// Compute angular cosine similarity approximation between two packed `u64` binary vectors
 /// using Charikar's formula: `cos(pi * hamming_distance / dim)`.
+///
+/// Returns `0.0` when both slices are empty (consistent with `cosine_similarity` and `int8_cosine_similarity`).
 #[inline]
 pub fn binary_cosine_similarity(a: &[u64], b: &[u64]) -> f32 {
-    let dim = a.len() * 64;
-    if dim == 0 {
-        return 1.0;
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
     }
     let h = hamming_distance(a, b) as f32;
+    let dim = a.len() * 64;
     (std::f32::consts::PI * (h / dim as f32)).cos()
 }
 
@@ -303,5 +314,12 @@ mod tests {
         assert_eq!(dot, expected);
 
         assert!((int8_cosine_similarity(&q, &q) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_empty_cosine_similarities_consistent() {
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+        assert_eq!(int8_cosine_similarity(&[], &[]), 0.0);
+        assert_eq!(binary_cosine_similarity(&[], &[]), 0.0);
     }
 }

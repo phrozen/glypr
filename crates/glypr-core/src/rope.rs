@@ -36,7 +36,7 @@ impl RotaryEmbedding {
         dtype: DType,
     ) -> Result<(Tensor, Tensor)> {
         {
-            let guard = self.cache.read().unwrap();
+            let guard = self.cache.read().unwrap_or_else(|e| e.into_inner());
             if let Some((cached_len, cached_dtype, ref cos_2d, ref sin_2d)) = *guard
                 && seq_len <= cached_len
                 && cached_dtype == dtype
@@ -79,7 +79,7 @@ impl RotaryEmbedding {
         let sin = sin_2d.narrow(0, 0, seq_len)?.unsqueeze(0)?.unsqueeze(0)?;
 
         {
-            let mut guard = self.cache.write().unwrap();
+            let mut guard = self.cache.write().unwrap_or_else(|e| e.into_inner());
             *guard = Some((target_len, dtype, cos_2d, sin_2d));
         }
 

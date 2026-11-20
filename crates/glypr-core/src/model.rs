@@ -47,6 +47,44 @@ fn load_gguf_linear_op<R: std::io::Read + std::io::Seek>(
     LinearOp::from_gguf_tensor(content, reader, name, device, dtype)
 }
 
+fn build_ropes(config: &TextConfig, device: &Device) -> Result<(RotaryEmbedding, RotaryEmbedding)> {
+    let sliding_idx = config
+        .layer_types
+        .iter()
+        .position(|&lt| lt == LayerType::SlidingAttention);
+    let (sliding_head_dim, sliding_theta) = match sliding_idx {
+        Some(idx) => (config.get_head_dim(idx), config.get_rope_theta(idx)),
+        None => (
+            config.head_dim,
+            config
+                .rope_parameters
+                .get("sliding_attention")
+                .map(|p| p.rope_theta)
+                .unwrap_or(10_000.0),
+        ),
+    };
+
+    let full_idx = config
+        .layer_types
+        .iter()
+        .position(|&lt| lt == LayerType::FullAttention);
+    let (full_head_dim, full_theta) = match full_idx {
+        Some(idx) => (config.get_head_dim(idx), config.get_rope_theta(idx)),
+        None => (
+            config.head_dim,
+            config
+                .rope_parameters
+                .get("full_attention")
+                .map(|p| p.rope_theta)
+                .unwrap_or(1_000_000.0),
+        ),
+    };
+
+    let rope_sliding = RotaryEmbedding::new(sliding_head_dim, sliding_theta, device)?;
+    let rope_full = RotaryEmbedding::new(full_head_dim, full_theta, device)?;
+    Ok((rope_sliding, rope_full))
+}
+
 impl EmbeddingGemma2Model {
     pub fn from_safetensors(
         tensors: &SafeTensors,
@@ -54,6 +92,9 @@ impl EmbeddingGemma2Model {
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
+        config
+            .validate()
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         let load_tensor = |name: &str| -> Result<Tensor> {
             let view = tensors
                 .tensor(name)
@@ -105,8 +146,7 @@ impl EmbeddingGemma2Model {
         );
 
         // 3. RoPE
-        let rope_sliding = RotaryEmbedding::new(config.head_dim, config.get_rope_theta(0), device)?;
-        let rope_full = RotaryEmbedding::new(512, config.get_rope_theta(5), device)?;
+        let (rope_sliding, rope_full) = build_ropes(&config, device)?;
 
         // 4. Layers
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
@@ -248,6 +288,9 @@ impl EmbeddingGemma2Model {
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
+        config
+            .validate()
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         // 1. Embeddings
         let embed_qt = content.tensor(reader, "token_embd.weight", device)?;
         let embed_weight = embed_qt.dequantize(device)?.to_dtype(dtype)?;
@@ -275,8 +318,7 @@ impl EmbeddingGemma2Model {
         );
 
         // 3. RoPE
-        let rope_sliding = RotaryEmbedding::new(config.head_dim, config.get_rope_theta(0), device)?;
-        let rope_full = RotaryEmbedding::new(512, config.get_rope_theta(5), device)?;
+        let (rope_sliding, rope_full) = build_ropes(&config, device)?;
 
         // 4. Layers
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
@@ -688,13 +730,20 @@ impl EmbeddingGemma2Model {
         let mut normalized_f32 = pooled_f32.broadcast_div(&norm_clamped)?;
 
         // Optional Matryoshka dimension truncation
-        if let Some(dim) = truncate_dim
-            && dim < hidden_dim
-        {
-            let sliced = normalized_f32.narrow(D::Minus1, 0, dim)?;
-            let slice_norm = sliced.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?;
-            let slice_norm_clamped = Tensor::clamp(&slice_norm, 1e-12f32, f32::MAX)?;
-            normalized_f32 = sliced.broadcast_div(&slice_norm_clamped)?;
+        if let Some(dim) = truncate_dim {
+            if dim == 0 || dim > hidden_dim {
+                candle_core::bail!(
+                    "Invalid Matryoshka truncate_dim {}: must be in 1..={}",
+                    dim,
+                    hidden_dim
+                );
+            }
+            if dim < hidden_dim {
+                let sliced = normalized_f32.narrow(D::Minus1, 0, dim)?;
+                let slice_norm = sliced.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?;
+                let slice_norm_clamped = Tensor::clamp(&slice_norm, 1e-12f32, f32::MAX)?;
+                normalized_f32 = sliced.broadcast_div(&slice_norm_clamped)?;
+            }
         }
 
         if orig_dtype != DType::F32 {

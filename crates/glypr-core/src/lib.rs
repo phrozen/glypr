@@ -30,7 +30,7 @@ pub use multimodal::{
     VISION_BUDGET_ULTRA, VisionBackendPolicy, validate_vision_budget,
 };
 pub use profile::{ForwardProfile, LayerProfile, PipelineProfile};
-pub use task::Task;
+pub use task::{OwnedTask, Task};
 pub use util::{
     AutoreleaseScope, binary_cosine_similarity, cosine_similarity, hamming_distance,
     int8_cosine_similarity, int8_dot_product, l2_normalize, quantize_binary, quantize_int8,
@@ -290,6 +290,25 @@ impl GlyprEmbedder {
         }
     }
 
+    /// Validate and normalize an optional Matryoshka (MRL) truncation dimension.
+    ///
+    /// Rejects `Some(0)` and `Some(d)` where `d > self.model.config.embedding_dim`,
+    /// and normalizes `Some(embedding_dim)` to `None`.
+    pub fn validate_truncate_dim(&self, truncate_dim: Option<usize>) -> Result<Option<usize>> {
+        let embedding_dim = self.model.config.embedding_dim;
+        match truncate_dim {
+            None => Ok(None),
+            Some(0) => anyhow::bail!("truncate_dim cannot be 0"),
+            Some(d) if d > embedding_dim => anyhow::bail!(
+                "truncate_dim ({}) exceeds model embedding_dim ({})",
+                d,
+                embedding_dim
+            ),
+            Some(d) if d == embedding_dim => Ok(None),
+            Some(d) => Ok(Some(d)),
+        }
+    }
+
     /// Encode a single image item using the routed vision engine (ANE CoreML or Metal/CPU GGUF).
     pub fn encode_image_part(&self, image: &image::DynamicImage, budget: usize) -> Result<Tensor> {
         let processed = crate::multimodal::preprocess_image(image, budget, 16, 3)?;
@@ -297,19 +316,22 @@ impl GlyprEmbedder {
         #[cfg(feature = "coreml")]
         {
             let use_coreml = match self.vision_backend {
-                VisionBackendPolicy::Auto => self
-                    .coreml_vision
-                    .as_ref()
-                    .is_some_and(|cv| cv.supports_patches(processed.num_patches)),
+                VisionBackendPolicy::Auto => self.coreml_vision.as_ref().is_some_and(|cv| {
+                    cv.supports_grid(processed.patch_height, processed.patch_width)
+                }),
                 VisionBackendPolicy::AneStrict => {
                     let cv = self.coreml_vision.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!("AneStrict vision backend requested, but no CoreML vision tower attached")
+                        anyhow::anyhow!(
+                            "AneStrict vision backend requested, but no CoreML vision tower attached"
+                        )
                     })?;
-                    if !cv.supports_patches(processed.num_patches) {
+                    if !cv.supports_grid(processed.patch_height, processed.patch_width) {
                         anyhow::bail!(
-                            "AneStrict vision routing failed: image produced {} patches, but loaded CoreML models only support {:?}",
+                            "AneStrict vision routing failed: image produced {}x{} patches ({} total), but loaded CoreML models only support grids {:?}",
+                            processed.patch_height,
+                            processed.patch_width,
                             processed.num_patches,
-                            cv.supported_patch_counts()
+                            cv.supported_grids()
                         );
                     }
                     true
@@ -325,7 +347,9 @@ impl GlyprEmbedder {
         // Standard Candle / GGUF path
         let projector = self.multimodal.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "No vision engine available for image (CoreML model does not support {} patches and no GGUF mmproj attached)",
+                "No vision engine available for image (CoreML model does not support {}x{} patches ({} total) and no GGUF mmproj attached)",
+                processed.patch_height,
+                processed.patch_width,
                 processed.num_patches
             )
         })?;
@@ -342,6 +366,7 @@ impl GlyprEmbedder {
         items: &[MediaItem],
         truncate_dim: Option<usize>,
     ) -> Result<Vec<f32>> {
+        let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
         with_autorelease_pool(|| self.embed_composite_inner(prompt, items, truncate_dim))
     }
 
@@ -388,6 +413,9 @@ impl GlyprEmbedder {
                     });
                 }
                 MediaItem::Audio { samples } => {
+                    if samples.is_empty() {
+                        anyhow::bail!("Input audio cannot be empty");
+                    }
                     let n_tokens = crate::multimodal::compute_audio_soft_token_count(samples.len());
                     placeholders.push(crate::tokenizer::MediaPlaceholder::Audio {
                         num_soft_tokens: n_tokens,
@@ -397,22 +425,23 @@ impl GlyprEmbedder {
                     frames,
                     budget_per_frame,
                 } => {
+                    if frames.is_empty() {
+                        anyhow::bail!("VideoFrames input cannot be empty");
+                    }
                     let b = budget_per_frame.unwrap_or(140);
-                    let n_tokens = if frames.is_empty() {
-                        0
-                    } else {
-                        crate::multimodal::compute_soft_token_count(
-                            frames[0].width() as usize,
-                            frames[0].height() as usize,
+                    let mut frame_soft_tokens = Vec::with_capacity(frames.len());
+                    for frame in frames.iter() {
+                        let n_tokens = crate::multimodal::compute_soft_token_count(
+                            frame.width() as usize,
+                            frame.height() as usize,
                             b,
                             16,
                             3,
-                        )?
-                    };
-                    placeholders.push(crate::tokenizer::MediaPlaceholder::Video {
-                        num_frames: frames.len(),
-                        soft_tokens_per_frame: n_tokens,
-                    });
+                        )?;
+                        frame_soft_tokens.push(n_tokens);
+                    }
+                    placeholders
+                        .push(crate::tokenizer::MediaPlaceholder::Video { frame_soft_tokens });
                 }
             }
         }
@@ -473,23 +502,7 @@ impl GlyprEmbedder {
             (self.model.embed_tokens.forward(&input_tensor)? * self.model.embed_scale)?;
 
         // 2. Splice soft tokens into their respective slot ranges
-        let mut chunks = Vec::new();
-        let mut curr = 0;
-
-        for (slot, soft_tensor) in slots.iter().zip(soft_tensors.iter()) {
-            if slot.start_idx > curr {
-                chunks.push(text_embeds.narrow(1, curr, slot.start_idx - curr)?);
-            }
-            chunks.push(soft_tensor.unsqueeze(0)?);
-            curr = slot.start_idx + slot.length;
-        }
-
-        if curr < seq_len {
-            chunks.push(text_embeds.narrow(1, curr, seq_len - curr)?);
-        }
-
-        let chunks_refs: Vec<&Tensor> = chunks.iter().collect();
-        let merged_embeds = Tensor::cat(&chunks_refs, 1)?;
+        let merged_embeds = splice_soft_tokens(&text_embeds, seq_len, &slots, &soft_tensors)?;
 
         // 3. Forward through backbone and pool
         let token_embeds = self.model.forward_embeds(&merged_embeds, None)?;
@@ -587,24 +600,7 @@ impl GlyprEmbedder {
         let input_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
         let text_embeds =
             (self.model.embed_tokens.forward(&input_tensor)? * self.model.embed_scale)?;
-
-        let mut chunks = Vec::new();
-        let mut curr = 0;
-
-        for (slot, soft_tensor) in slots.iter().zip(soft_tensors.iter()) {
-            if slot.start_idx > curr {
-                chunks.push(text_embeds.narrow(1, curr, slot.start_idx - curr)?);
-            }
-            chunks.push(soft_tensor.unsqueeze(0)?);
-            curr = slot.start_idx + slot.length;
-        }
-
-        if curr < seq_len {
-            chunks.push(text_embeds.narrow(1, curr, seq_len - curr)?);
-        }
-
-        let chunks_refs: Vec<&Tensor> = chunks.iter().collect();
-        let merged_embeds = Tensor::cat(&chunks_refs, 1)?;
+        let merged_embeds = splice_soft_tokens(&text_embeds, seq_len, &slots, &soft_tensors)?;
 
         let token_embeds = self.model.forward_embeds(&merged_embeds, None)?;
         let pooled = self.model.pool_and_normalize(&token_embeds, None, None)?;
@@ -733,6 +729,7 @@ impl GlyprEmbedder {
         inputs: &[MultimodalInput],
         truncate_dim: Option<usize>,
     ) -> Result<Vec<Vec<f32>>> {
+        let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
         let b = inputs.len();
         if b == 0 {
             return Ok(Vec::new());
@@ -740,8 +737,8 @@ impl GlyprEmbedder {
         if b == 1 {
             let single = self.embed_interleaved(&inputs[0].parts, inputs[0].task)?;
             let vec = match truncate_dim {
-                Some(dim) if dim < 768 => truncate_mrl(&single, dim)?,
-                _ => single,
+                Some(dim) => truncate_mrl(&single, dim)?,
+                None => single,
             };
             return Ok(vec![vec]);
         }
@@ -871,28 +868,7 @@ impl GlyprEmbedder {
             let input_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
             let text_embeds =
                 (self.model.embed_tokens.forward(&input_tensor)? * self.model.embed_scale)?;
-
-            let mut chunks = Vec::new();
-            let mut curr = 0;
-
-            for (slot, soft_tensor) in slots.iter().zip(soft_tensors.iter()) {
-                if slot.start_idx > curr {
-                    chunks.push(text_embeds.narrow(1, curr, slot.start_idx - curr)?);
-                }
-                chunks.push(soft_tensor.unsqueeze(0)?);
-                curr = slot.start_idx + slot.length;
-            }
-
-            if curr < seq_len {
-                chunks.push(text_embeds.narrow(1, curr, seq_len - curr)?);
-            }
-
-            let chunks_refs: Vec<&Tensor> = chunks.iter().collect();
-            let merged = if chunks_refs.len() == 1 {
-                chunks_refs[0].clone()
-            } else {
-                Tensor::cat(&chunks_refs, 1)?
-            };
+            let merged = splice_soft_tokens(&text_embeds, seq_len, &slots, &soft_tensors)?;
             item_embeds.push(merged);
         }
 
@@ -917,7 +893,11 @@ impl GlyprEmbedder {
 
                 if len < max_len {
                     let pad_len = max_len - len;
-                    let pad_tensor = Tensor::zeros((1, pad_len, 512), self.dtype, &self.device)?;
+                    let pad_tensor = Tensor::zeros(
+                        (1, pad_len, self.model.config.hidden_size),
+                        self.dtype,
+                        &self.device,
+                    )?;
                     let padded = Tensor::cat(&[&item, &pad_tensor], 1)?;
                     padded_items.push(padded);
                 } else {
@@ -964,6 +944,7 @@ impl GlyprEmbedder {
     }
 
     fn encode_single_text(&self, text: &str, truncate_dim: Option<usize>) -> Result<Vec<f32>> {
+        let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
         with_autorelease_pool(|| {
             let token_ids = self.tokenizer.encode(text)?;
             let seq_len = token_ids.len();
@@ -996,6 +977,7 @@ impl GlyprEmbedder {
         texts: &[&str],
         truncate_dim: Option<usize>,
     ) -> Result<(Vec<Vec<f32>>, PipelineProfile)> {
+        let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
         with_autorelease_pool(|| {
             let t_total = std::time::Instant::now();
             let batch_size = texts.len();
@@ -1065,5 +1047,285 @@ impl GlyprEmbedder {
 
             Ok((result, pipe_profile))
         })
+    }
+}
+
+fn splice_soft_tokens(
+    text_embeds: &Tensor,
+    seq_len: usize,
+    slots: &[tokenizer::MediaSlot],
+    soft_tensors: &[Tensor],
+) -> Result<Tensor> {
+    if slots.len() != soft_tensors.len() {
+        anyhow::bail!(
+            "Multimodal splicing slot count ({}) does not match encoded media tensor count ({})",
+            slots.len(),
+            soft_tensors.len()
+        );
+    }
+
+    let mut chunks = Vec::new();
+    let mut curr = 0;
+
+    for (slot, soft_tensor) in slots.iter().zip(soft_tensors.iter()) {
+        let actual_len = soft_tensor.dim(0)?;
+        if actual_len != slot.length {
+            anyhow::bail!(
+                "Multimodal splicing length mismatch at token {}: slot expects {} soft tokens, got {}",
+                slot.start_idx,
+                slot.length,
+                actual_len
+            );
+        }
+        if slot.start_idx > curr {
+            chunks.push(text_embeds.narrow(1, curr, slot.start_idx - curr)?);
+        }
+        chunks.push(soft_tensor.unsqueeze(0)?);
+        curr = slot.start_idx + slot.length;
+    }
+
+    if curr < seq_len {
+        chunks.push(text_embeds.narrow(1, curr, seq_len - curr)?);
+    }
+
+    let chunks_refs: Vec<&Tensor> = chunks.iter().collect();
+    if chunks_refs.len() == 1 {
+        Ok(chunks_refs[0].clone())
+    } else {
+        Ok(Tensor::cat(&chunks_refs, 1)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn build_tiny_embedder() -> GlyprEmbedder {
+        use candle_core::quantized::gguf_file::Value;
+        use candle_nn::{Embedding, Linear};
+        use config::{LayerType, RoPEParameters};
+
+        let hidden_size = 8usize;
+        let intermediate_size = 16usize;
+        let num_heads = 2usize;
+        let num_kv_heads = 1usize;
+        let head_dim = 4usize;
+        let embedding_dim = 16usize;
+        let hidden_size_per_layer_input = 8usize;
+        let vocab_size = 16usize;
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let mut rope_parameters = HashMap::new();
+        rope_parameters.insert(
+            "sliding_attention".to_string(),
+            RoPEParameters {
+                rope_theta: 10_000.0,
+                rope_type: "default".to_string(),
+            },
+        );
+        rope_parameters.insert(
+            "full_attention".to_string(),
+            RoPEParameters {
+                rope_theta: 1_000_000.0,
+                rope_type: "default".to_string(),
+            },
+        );
+
+        let config = TextConfig {
+            hidden_size,
+            intermediate_size,
+            num_hidden_layers: 1,
+            num_attention_heads: num_heads,
+            num_key_value_heads: num_kv_heads,
+            head_dim,
+            vocab_size,
+            embedding_dim,
+            max_position_embeddings: 128,
+            sliding_window: 512,
+            rms_norm_eps: 1e-6,
+            hidden_size_per_layer_input,
+            layer_types: vec![LayerType::SlidingAttention],
+            per_layer_config: HashMap::new(),
+            rope_parameters,
+            pad_token_id: 0,
+            bos_token_id: 2,
+            eos_token_id: 1,
+        };
+
+        let ones = |shape: (usize, usize)| -> LinearOp {
+            let w = Tensor::ones(shape, dtype, &device).unwrap();
+            LinearOp::new_standard(Linear::new(w, None))
+        };
+        let norm_w = |len: usize| -> norm::RMSNorm {
+            norm::RMSNorm::new(Some(Tensor::ones((len,), dtype, &device).unwrap()), 1e-6)
+        };
+
+        let embed_weight = Tensor::arange(0u32, (vocab_size * hidden_size) as u32, &device)
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap()
+            .reshape((vocab_size, hidden_size))
+            .unwrap();
+        let embed_tokens = Embedding::new(embed_weight, hidden_size);
+
+        let ple = ple::TextPLE::new(
+            ones((hidden_size_per_layer_input, hidden_size)),
+            (hidden_size as f64).powf(-0.5),
+            norm_w(hidden_size_per_layer_input),
+            1,
+            hidden_size_per_layer_input,
+        );
+
+        let layer = layer::EncoderLayer {
+            self_attn: attention::SelfAttention::new(
+                ones((num_heads * head_dim, hidden_size)),
+                ones((num_kv_heads * head_dim, hidden_size)),
+                ones((num_kv_heads * head_dim, hidden_size)),
+                ones((hidden_size, num_heads * head_dim)),
+                norm_w(head_dim),
+                norm_w(head_dim),
+                norm::RMSNorm::new(None, 1e-6),
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                Some(config.sliding_window),
+            ),
+            mlp: mlp::MLP::new(
+                ones((intermediate_size, hidden_size)),
+                ones((intermediate_size, hidden_size)),
+                ones((hidden_size, intermediate_size)),
+            ),
+            input_layernorm: norm_w(hidden_size),
+            post_attention_layernorm: norm_w(hidden_size),
+            pre_feedforward_layernorm: norm_w(hidden_size),
+            post_feedforward_layernorm: norm_w(hidden_size),
+            ple_block: ple::TextPLEBlock::new(
+                ones((hidden_size_per_layer_input, hidden_size)),
+                ones((hidden_size, hidden_size_per_layer_input)),
+                norm_w(hidden_size),
+            ),
+            layer_scalar: Tensor::ones((1,), dtype, &device).unwrap(),
+        };
+
+        let model = EmbeddingGemma2Model {
+            config,
+            embed_tokens,
+            embed_scale: (hidden_size as f64).sqrt(),
+            ple,
+            layers: vec![layer],
+            norm: norm_w(hidden_size),
+            embedding_projection: ones((embedding_dim, hidden_size)),
+            rope_sliding: rope::RotaryEmbedding::new(head_dim, 10_000.0, &device).unwrap(),
+            rope_full: rope::RotaryEmbedding::new(head_dim, 1_000_000.0, &device).unwrap(),
+            device: device.clone(),
+            dtype,
+        };
+
+        let vocab = vec!["<unk>", "</s>", "<s>", "hello", "\u{2581}world"];
+        let mut meta = HashMap::new();
+        meta.insert(
+            "tokenizer.ggml.tokens".to_string(),
+            Value::Array(
+                vocab
+                    .into_iter()
+                    .map(|s| Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+        meta.insert(
+            "tokenizer.ggml.merges".to_string(),
+            Value::Array(Vec::new()),
+        );
+        let tokenizer = GlyprTokenizer::from_gguf_metadata(&meta).unwrap();
+
+        GlyprEmbedder {
+            model,
+            tokenizer,
+            device,
+            dtype,
+            multimodal: None,
+            max_seq_len: DEFAULT_MAX_SEQ_LEN,
+            #[cfg(feature = "coreml")]
+            coreml_vision: None,
+            vision_backend: VisionBackendPolicy::Auto,
+        }
+    }
+
+    #[test]
+    fn test_truncate_dim_validation_and_non_hardcoded_dims() {
+        let embedder = build_tiny_embedder(); // hidden_size=8, embedding_dim=16
+
+        assert_eq!(embedder.validate_truncate_dim(None).unwrap(), None);
+        assert_eq!(embedder.validate_truncate_dim(Some(16)).unwrap(), None);
+        assert_eq!(embedder.validate_truncate_dim(Some(8)).unwrap(), Some(8));
+        assert!(embedder.validate_truncate_dim(Some(0)).is_err());
+        assert!(embedder.validate_truncate_dim(Some(17)).is_err());
+        assert!(embedder.validate_truncate_dim(Some(1024)).is_err());
+
+        let inputs = [
+            MultimodalInput::text("hello", Task::Raw),
+            MultimodalInput::text("hello world", Task::Raw),
+        ];
+
+        // Invalid truncate_dim must fail cleanly (no chunks_exact(0) panic, no silent ignore)
+        assert!(embedder.embed_batch(&inputs, Some(0)).is_err());
+        assert!(embedder.embed_batch(&inputs, Some(1024)).is_err());
+        assert!(embedder.encode_single_text("hello", Some(0)).is_err());
+        assert!(embedder.encode_single_text("hello", Some(1024)).is_err());
+        assert!(
+            embedder
+                .profile_encode_batch(&["hello", "hello world"], Some(0))
+                .is_err()
+        );
+        assert!(
+            embedder
+                .profile_encode_batch(&["hello", "hello world"], Some(1024))
+                .is_err()
+        );
+
+        // Heterogeneous batch with hidden_size=8 (not 512) and embedding_dim=16 (not 768)
+        let full = embedder.embed_batch(&inputs, None).unwrap();
+        assert_eq!(full.len(), 2);
+        assert_eq!(full[0].len(), 16);
+        assert_eq!(full[1].len(), 16);
+
+        let exact_dim = embedder.embed_batch(&inputs, Some(16)).unwrap();
+        assert_eq!(exact_dim[0].len(), 16);
+
+        let trunc = embedder.embed_batch(&inputs, Some(8)).unwrap();
+        assert_eq!(trunc.len(), 2);
+        assert_eq!(trunc[0].len(), 8);
+        assert_eq!(trunc[1].len(), 8);
+    }
+
+    #[test]
+    fn test_embed_composite_rejects_empty_video_and_audio_preflight() {
+        let mut embedder = build_tiny_embedder();
+        embedder.multimodal = Some(MultimodalProjector {
+            vision_tower: None,
+            audio_tower: None,
+            config: config::MultimodalConfig::from_gguf_metadata(&HashMap::new()),
+            device: Device::Cpu,
+            dtype: DType::F32,
+        });
+
+        let empty_video_err = embedder
+            .embed_composite(
+                None,
+                &[MediaItem::VideoFrames {
+                    frames: &[],
+                    budget_per_frame: None,
+                }],
+                None,
+            )
+            .unwrap_err();
+        assert!(empty_video_err.to_string().contains("empty"));
+
+        let empty_audio_err = embedder
+            .embed_composite(None, &[MediaItem::Audio { samples: &[] }], None)
+            .unwrap_err();
+        assert!(empty_audio_err.to_string().contains("empty"));
     }
 }

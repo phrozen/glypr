@@ -6,71 +6,13 @@ use tokenizers::Tokenizer;
 #[derive(Debug, Clone)]
 pub struct GlyprTokenizer {
     tokenizer: Tokenizer,
-    prompts: HashMap<String, String>,
 }
 
 impl GlyprTokenizer {
-    fn default_prompts() -> HashMap<String, String> {
-        let mut prompts = HashMap::new();
-        prompts.insert(
-            "searchquery".to_string(),
-            "task: search result | query: ".to_string(),
-        );
-        prompts.insert(
-            "retrieval".to_string(),
-            "task: search result | query: ".to_string(),
-        );
-        prompts.insert(
-            "coderetrieval".to_string(),
-            "task: code retrieval | query: ".to_string(),
-        );
-        prompts.insert(
-            "questionanswering".to_string(),
-            "task: question answering | query: ".to_string(),
-        );
-        prompts.insert(
-            "factchecking".to_string(),
-            "task: fact checking | query: ".to_string(),
-        );
-        prompts.insert(
-            "sentencesimilarity".to_string(),
-            "task: sentence similarity | query: ".to_string(),
-        );
-        prompts.insert(
-            "sts".to_string(),
-            "task: sentence similarity | query: ".to_string(),
-        );
-        prompts.insert(
-            "summarization".to_string(),
-            "task: sentence similarity | query: ".to_string(),
-        );
-        prompts.insert(
-            "classification".to_string(),
-            "task: classification | query: ".to_string(),
-        );
-        prompts.insert(
-            "clustering".to_string(),
-            "task: clustering | query: ".to_string(),
-        );
-        prompts.insert(
-            "reranking".to_string(),
-            "task: search result | query: ".to_string(),
-        );
-        prompts.insert(
-            "bitextmining".to_string(),
-            "task: search result | query: ".to_string(),
-        );
-        prompts.insert("document".to_string(), "title: none | text: ".to_string());
-        prompts
-    }
-
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let tokenizer = Tokenizer::from_file(path)
             .map_err(|e| anyhow::anyhow!("Tokenizer load error: {}", e))?;
-        Ok(Self {
-            tokenizer,
-            prompts: Self::default_prompts(),
-        })
+        Ok(Self { tokenizer })
     }
 
     /// Construct GlyprTokenizer directly from GGUF metadata without external files
@@ -127,7 +69,11 @@ impl GlyprTokenizer {
                 .map_err(|e| anyhow::anyhow!("Normalizer error: {}", e))?,
         ));
 
-        // Gemma pre-tokenization: Split on " " (\u{2581}) merged with previous token
+        // Gemma pre-tokenization: Split on ASCII space " " (NOT "\u{2581}") with MergedWithPrevious.
+        // Because normalization already replaced " " with "\u{2581}" before pre-tokenization,
+        // splitting on " " is a no-op that preserves "\u{2581}word" prefix tokens and matches
+        // Google's tokenizer.json 100% across corpus_8k.json (changing to "\u{2581}" would turn
+        // "\u{2581}" into a word suffix and break BPE).
         use tokenizers::SplitDelimiterBehavior;
         use tokenizers::pre_tokenizers::split::Split;
         tokenizer.with_pre_tokenizer(Some(
@@ -135,27 +81,15 @@ impl GlyprTokenizer {
                 .map_err(|e| anyhow::anyhow!("Pre-tokenizer error: {}", e))?,
         ));
 
-        Ok(Self {
-            tokenizer,
-            prompts: Self::default_prompts(),
-        })
+        Ok(Self { tokenizer })
     }
 
     pub fn format_query(&self, query: &str, task: &str) -> String {
-        let key = task.to_lowercase().replace(['-', '_', ' '], "");
-        let prefix = self
-            .prompts
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| format!("task: {} | query: ", task.to_lowercase()));
-        format!("{}{}", prefix, query)
+        crate::task::Task::from_name_and_title(task, None).format_text(query)
     }
 
     pub fn format_document(&self, content: &str, title: Option<&str>) -> String {
-        match title {
-            Some(t) => format!("title: {} | text: {}", t, content),
-            None => format!("title: none | text: {}", content),
-        }
+        crate::task::Task::Document { title }.format_text(content)
     }
 
     /// Encode text with BOS (2) and EOS (1) tokens
@@ -343,47 +277,30 @@ impl GlyprTokenizer {
                         tokens.extend(enc.get_ids());
                     }
 
-                    if media_idx < media_items.len() {
-                        match &media_items[media_idx] {
-                            MediaPlaceholder::Image { num_soft_tokens } => {
-                                tokens.push(TOKEN_BOI);
-                                let slot_start = tokens.len();
-                                tokens.resize(tokens.len() + *num_soft_tokens, TOKEN_IMAGE);
-                                tokens.push(TOKEN_EOI);
-                                slots.push(MediaSlot {
-                                    start_idx: slot_start,
-                                    length: *num_soft_tokens,
-                                });
-                            }
-                            MediaPlaceholder::Audio { num_soft_tokens } => {
-                                tokens.push(TOKEN_BOA);
-                                let slot_start = tokens.len();
-                                tokens.resize(tokens.len() + *num_soft_tokens, TOKEN_AUDIO);
-                                tokens.push(TOKEN_EOA);
-                                slots.push(MediaSlot {
-                                    start_idx: slot_start,
-                                    length: *num_soft_tokens,
-                                });
-                            }
-                            MediaPlaceholder::Video {
-                                num_frames,
-                                soft_tokens_per_frame,
-                            } => {
-                                for _ in 0..*num_frames {
-                                    tokens.push(TOKEN_BOI);
-                                    let slot_start = tokens.len();
-                                    tokens
-                                        .resize(tokens.len() + *soft_tokens_per_frame, TOKEN_VIDEO);
-                                    tokens.push(TOKEN_EOI);
-                                    slots.push(MediaSlot {
-                                        start_idx: slot_start,
-                                        length: *soft_tokens_per_frame,
-                                    });
-                                }
-                            }
-                        }
-                        media_idx += 1;
+                    if media_idx >= media_items.len() {
+                        anyhow::bail!(
+                            "Found excess placeholder tag '{}' in prompt (only {} media item(s) provided)",
+                            found_tag,
+                            media_items.len()
+                        );
                     }
+                    let item = &media_items[media_idx];
+                    let matches_tag = matches!(
+                        (found_tag, item),
+                        ("<|image|>", MediaPlaceholder::Image { .. })
+                            | ("<|audio|>", MediaPlaceholder::Audio { .. })
+                            | ("<|video|>", MediaPlaceholder::Video { .. })
+                    );
+                    if !matches_tag {
+                        anyhow::bail!(
+                            "Placeholder tag '{}' at media index {} does not match provided media modality ({})",
+                            found_tag,
+                            media_idx,
+                            item.kind_name()
+                        );
+                    }
+                    push_media_placeholder(&mut tokens, &mut slots, item);
+                    media_idx += 1;
 
                     remaining = &remaining[pos + found_tag.len()..];
                 } else {
@@ -395,45 +312,17 @@ impl GlyprTokenizer {
                     break;
                 }
             }
+
+            if media_idx != media_items.len() {
+                anyhow::bail!(
+                    "Prompt contains {} placeholder tag(s), but {} media item(s) were provided",
+                    media_idx,
+                    media_items.len()
+                );
+            }
         } else {
             for item in media_items {
-                match item {
-                    MediaPlaceholder::Image { num_soft_tokens } => {
-                        tokens.push(TOKEN_BOI);
-                        let slot_start = tokens.len();
-                        tokens.resize(tokens.len() + *num_soft_tokens, TOKEN_IMAGE);
-                        tokens.push(TOKEN_EOI);
-                        slots.push(MediaSlot {
-                            start_idx: slot_start,
-                            length: *num_soft_tokens,
-                        });
-                    }
-                    MediaPlaceholder::Audio { num_soft_tokens } => {
-                        tokens.push(TOKEN_BOA);
-                        let slot_start = tokens.len();
-                        tokens.resize(tokens.len() + *num_soft_tokens, TOKEN_AUDIO);
-                        tokens.push(TOKEN_EOA);
-                        slots.push(MediaSlot {
-                            start_idx: slot_start,
-                            length: *num_soft_tokens,
-                        });
-                    }
-                    MediaPlaceholder::Video {
-                        num_frames,
-                        soft_tokens_per_frame,
-                    } => {
-                        for _ in 0..*num_frames {
-                            tokens.push(TOKEN_BOI);
-                            let slot_start = tokens.len();
-                            tokens.resize(tokens.len() + *soft_tokens_per_frame, TOKEN_VIDEO);
-                            tokens.push(TOKEN_EOI);
-                            slots.push(MediaSlot {
-                                start_idx: slot_start,
-                                length: *soft_tokens_per_frame,
-                            });
-                        }
-                    }
-                }
+                push_media_placeholder(&mut tokens, &mut slots, item);
             }
 
             if !prompt_text.is_empty() {
@@ -506,6 +395,9 @@ impl GlyprTokenizer {
                     });
                 }
                 crate::multimodal::ModalityPart::Audio { samples } => {
+                    if samples.is_empty() {
+                        anyhow::bail!("Input audio cannot be empty");
+                    }
                     if let Some(pfx) = pending_prefix.take() {
                         let enc = self
                             .tokenizer
@@ -567,16 +459,60 @@ impl GlyprTokenizer {
 
 #[derive(Debug, Clone)]
 pub enum MediaPlaceholder {
-    Image {
-        num_soft_tokens: usize,
-    },
-    Audio {
-        num_soft_tokens: usize,
-    },
-    Video {
-        num_frames: usize,
-        soft_tokens_per_frame: usize,
-    },
+    Image { num_soft_tokens: usize },
+    Audio { num_soft_tokens: usize },
+    Video { frame_soft_tokens: Vec<usize> },
+}
+
+impl MediaPlaceholder {
+    fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Image { .. } => "image",
+            Self::Audio { .. } => "audio",
+            Self::Video { .. } => "video",
+        }
+    }
+}
+
+fn push_media_placeholder(
+    tokens: &mut Vec<u32>,
+    slots: &mut Vec<MediaSlot>,
+    item: &MediaPlaceholder,
+) {
+    match item {
+        MediaPlaceholder::Image { num_soft_tokens } => {
+            tokens.push(TOKEN_BOI);
+            let slot_start = tokens.len();
+            tokens.resize(tokens.len() + *num_soft_tokens, TOKEN_IMAGE);
+            tokens.push(TOKEN_EOI);
+            slots.push(MediaSlot {
+                start_idx: slot_start,
+                length: *num_soft_tokens,
+            });
+        }
+        MediaPlaceholder::Audio { num_soft_tokens } => {
+            tokens.push(TOKEN_BOA);
+            let slot_start = tokens.len();
+            tokens.resize(tokens.len() + *num_soft_tokens, TOKEN_AUDIO);
+            tokens.push(TOKEN_EOA);
+            slots.push(MediaSlot {
+                start_idx: slot_start,
+                length: *num_soft_tokens,
+            });
+        }
+        MediaPlaceholder::Video { frame_soft_tokens } => {
+            for &n_tokens in frame_soft_tokens {
+                tokens.push(TOKEN_BOI);
+                let slot_start = tokens.len();
+                tokens.resize(tokens.len() + n_tokens, TOKEN_VIDEO);
+                tokens.push(TOKEN_EOI);
+                slots.push(MediaSlot {
+                    start_idx: slot_start,
+                    length: n_tokens,
+                });
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -595,3 +531,228 @@ pub const TOKEN_AUDIO: u32 = 258881;
 pub const TOKEN_EOI: u32 = 258882;
 pub const TOKEN_EOA: u32 = 258883;
 pub const TOKEN_VIDEO: u32 = 258884;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::quantized::gguf_file::Value;
+
+    fn build_synthetic_gguf_tokenizer() -> GlyprTokenizer {
+        let vocab = vec![
+            "<unk>",
+            "</s>",
+            "<s>",
+            "\u{2581}",
+            "H",
+            "e",
+            "l",
+            "o",
+            "w",
+            "r",
+            "d",
+            "f",
+            "b",
+            "a",
+            "He",
+            "Hel",
+            "Hell",
+            "Hello",
+            "wo",
+            "wor",
+            "worl",
+            "world",
+            "\u{2581}world",
+            "fo",
+            "foo",
+            "ba",
+            "bar",
+            "\u{2581}bar",
+            "Hello\u{2581}",
+        ];
+        let merges = vec![
+            "H e",
+            "He l",
+            "Hel l",
+            "Hell o",
+            "w o",
+            "wo r",
+            "wor l",
+            "worl d",
+            "\u{2581} world",
+            "f o",
+            "fo o",
+            "b a",
+            "ba r",
+            "\u{2581} bar",
+        ];
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "tokenizer.ggml.tokens".to_string(),
+            Value::Array(
+                vocab
+                    .into_iter()
+                    .map(|s| Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+        metadata.insert(
+            "tokenizer.ggml.merges".to_string(),
+            Value::Array(
+                merges
+                    .into_iter()
+                    .map(|s| Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+        GlyprTokenizer::from_gguf_metadata(&metadata).unwrap()
+    }
+
+    #[test]
+    fn test_gguf_tokenizer_preserves_word_prefix_underscore() {
+        let tok = build_synthetic_gguf_tokenizer();
+        // BOS=2, "Hello"=17, "\u{2581}world"=22, EOS=1
+        let ids = tok.encode("Hello world").unwrap();
+        assert_eq!(ids, vec![2, 17, 22, 1]);
+
+        // Leading space also yields prefix token "\u{2581}world"
+        let leading = tok.encode(" world").unwrap();
+        assert_eq!(leading, vec![2, 22, 1]);
+
+        // Multiple spaces preserve individual "\u{2581}" (3) + "\u{2581}bar" (27)
+        let multi = tok.encode("foo  bar").unwrap();
+        assert_eq!(multi, vec![2, 24, 3, 27, 1]);
+    }
+
+    #[test]
+    fn test_format_query_matches_task_aliases() {
+        let tok = build_synthetic_gguf_tokenizer();
+        let query = "neural retrieval";
+        for alias in [
+            "search_query",
+            "retrieval",
+            "retrieval_query",
+            "query",
+            "reranking",
+            "bitextmining",
+            "document",
+            "retrieval_document",
+            "code_retrieval",
+            "code",
+            "classification",
+            "multilabel_classification",
+            "clustering",
+            "question_answering",
+            "qa",
+            "fact_checking",
+            "sentence_similarity",
+            "sts",
+            "pair_classification",
+            "summarization",
+            "raw",
+            "none",
+        ] {
+            let expected = crate::task::Task::from_name_and_title(alias, None).format_text(query);
+            assert_eq!(
+                tok.format_query(query, alias),
+                expected,
+                "mismatch for task alias '{}'",
+                alias
+            );
+        }
+        assert_eq!(tok.format_query(query, "raw"), query);
+        assert_eq!(tok.format_query(query, "none"), query);
+        assert_eq!(
+            tok.format_query(query, "reranking"),
+            "task: search result | query: neural retrieval"
+        );
+        assert_eq!(
+            tok.format_query(query, "bitextmining"),
+            "task: search result | query: neural retrieval"
+        );
+    }
+
+    #[test]
+    fn test_encode_interleaved_strict_placeholder_validation() {
+        let tok = build_synthetic_gguf_tokenizer();
+
+        // Valid multi-modal with variable per-frame video tokens
+        let (tokens, slots) = tok
+            .encode_interleaved(
+                Some("Hello <|image|> world <|video|>"),
+                &[
+                    MediaPlaceholder::Image { num_soft_tokens: 3 },
+                    MediaPlaceholder::Video {
+                        frame_soft_tokens: vec![2, 4],
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(slots.len(), 3);
+        assert_eq!(slots[0].length, 3);
+        assert_eq!(slots[1].length, 2);
+        assert_eq!(slots[2].length, 4);
+        assert_eq!(
+            &tokens[slots[0].start_idx..slots[0].start_idx + 3],
+            &[TOKEN_IMAGE; 3]
+        );
+        assert_eq!(
+            &tokens[slots[1].start_idx..slots[1].start_idx + 2],
+            &[TOKEN_VIDEO; 2]
+        );
+        assert_eq!(
+            &tokens[slots[2].start_idx..slots[2].start_idx + 4],
+            &[TOKEN_VIDEO; 4]
+        );
+
+        // Excess placeholder tag must fail
+        assert!(
+            tok.encode_interleaved(
+                Some("<|image|> <|image|>"),
+                &[MediaPlaceholder::Image { num_soft_tokens: 2 }],
+            )
+            .is_err()
+        );
+
+        // Missing placeholder tag must fail
+        assert!(
+            tok.encode_interleaved(
+                Some("<|image|>"),
+                &[
+                    MediaPlaceholder::Image { num_soft_tokens: 2 },
+                    MediaPlaceholder::Audio { num_soft_tokens: 2 },
+                ],
+            )
+            .is_err()
+        );
+
+        // Modality mismatch must fail
+        assert!(
+            tok.encode_interleaved(
+                Some("<|audio|>"),
+                &[MediaPlaceholder::Image { num_soft_tokens: 2 }],
+            )
+            .is_err()
+        );
+        assert!(
+            tok.encode_interleaved(
+                Some("<|image|>"),
+                &[MediaPlaceholder::Video {
+                    frame_soft_tokens: vec![2]
+                }],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_encode_modality_sequence_rejects_empty_audio() {
+        let tok = build_synthetic_gguf_tokenizer();
+        let err = tok
+            .encode_modality_sequence(
+                &[crate::multimodal::ModalityPart::Audio { samples: &[] }],
+                crate::task::Task::Raw,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+}

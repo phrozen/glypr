@@ -53,7 +53,8 @@ impl<'a> Task<'a> {
     /// Construct a Task from a name string (case-insensitive) and an optional document title.
     pub fn from_name_and_title(name: &'a str, title: Option<&'a str>) -> Self {
         match name.to_lowercase().replace(['-', '_', ' '], "").as_str() {
-            "searchquery" | "retrieval" | "retrievalquery" | "query" => Task::SearchQuery,
+            "searchquery" | "retrieval" | "retrievalquery" | "query" | "reranking"
+            | "bitextmining" => Task::SearchQuery,
             "document" | "retrievaldocument" => Task::Document { title },
             "coderetrieval" | "code" => Task::CodeRetrieval,
             "classification" | "multilabelclassification" => Task::Classification,
@@ -66,6 +67,118 @@ impl<'a> Task<'a> {
             "raw" | "none" => Task::Raw,
             _ => Task::Custom(name),
         }
+    }
+
+    /// Convert this borrowed `Task<'a>` into an owned `OwnedTask`.
+    pub fn to_owned(&self) -> OwnedTask {
+        match self {
+            Task::SearchQuery => OwnedTask::SearchQuery,
+            Task::Document { title } => OwnedTask::Document {
+                title: title.map(|s| s.to_string()),
+            },
+            Task::CodeRetrieval => OwnedTask::CodeRetrieval,
+            Task::Classification => OwnedTask::Classification,
+            Task::Clustering => OwnedTask::Clustering,
+            Task::QuestionAnswering => OwnedTask::QuestionAnswering,
+            Task::FactChecking => OwnedTask::FactChecking,
+            Task::SentenceSimilarity => OwnedTask::SentenceSimilarity,
+            Task::Custom(s) => OwnedTask::Custom((*s).to_string()),
+            Task::Raw => OwnedTask::Raw,
+        }
+    }
+
+    /// Canonical task names and descriptions/aliases for CLI help and introspection.
+    pub const fn all_names() -> &'static [(&'static str, &'static str)] {
+        &[
+            (
+                "search_query",
+                "Search / RAG query (aliases: retrieval, retrieval_query, query, reranking, bitextmining)",
+            ),
+            (
+                "document",
+                "Document / passage with optional title (aliases: retrieval_document)",
+            ),
+            ("code_retrieval", "Code search query (aliases: code)"),
+            (
+                "question_answering",
+                "Question answering query (aliases: qa)",
+            ),
+            ("fact_checking", "Fact checking claim"),
+            (
+                "classification",
+                "Text classification (aliases: multilabel_classification)",
+            ),
+            ("clustering", "Topic clustering"),
+            (
+                "sentence_similarity",
+                "Semantic similarity / STS (aliases: sts, pair_classification, summarization)",
+            ),
+            ("raw", "Unprompted raw embedding (aliases: none)"),
+        ]
+    }
+}
+
+/// Owned representation of `Task` that can move across thread boundaries without lifetimes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OwnedTask {
+    #[default]
+    SearchQuery,
+    Document {
+        title: Option<String>,
+    },
+    CodeRetrieval,
+    Classification,
+    Clustering,
+    QuestionAnswering,
+    FactChecking,
+    SentenceSimilarity,
+    Custom(String),
+    Raw,
+}
+
+impl OwnedTask {
+    /// Borrow as a `Task<'_>`.
+    pub fn as_task(&self) -> Task<'_> {
+        match self {
+            Self::SearchQuery => Task::SearchQuery,
+            Self::Document { title } => Task::Document {
+                title: title.as_deref(),
+            },
+            Self::CodeRetrieval => Task::CodeRetrieval,
+            Self::Classification => Task::Classification,
+            Self::Clustering => Task::Clustering,
+            Self::QuestionAnswering => Task::QuestionAnswering,
+            Self::FactChecking => Task::FactChecking,
+            Self::SentenceSimilarity => Task::SentenceSimilarity,
+            Self::Custom(s) => Task::Custom(s),
+            Self::Raw => Task::Raw,
+        }
+    }
+
+    /// Construct an `OwnedTask` from a name string (case-insensitive) and an optional document title.
+    pub fn from_name_and_title(name: &str, title: Option<String>) -> Self {
+        match Task::from_name_and_title(name, title.as_deref()) {
+            Task::SearchQuery => Self::SearchQuery,
+            Task::Document { .. } => Self::Document { title },
+            Task::CodeRetrieval => Self::CodeRetrieval,
+            Task::Classification => Self::Classification,
+            Task::Clustering => Self::Clustering,
+            Task::QuestionAnswering => Self::QuestionAnswering,
+            Task::FactChecking => Self::FactChecking,
+            Task::SentenceSimilarity => Self::SentenceSimilarity,
+            Task::Custom(s) => Self::Custom(s.to_string()),
+            Task::Raw => Self::Raw,
+        }
+    }
+
+    /// Format a text string with this task's prompt prefix.
+    pub fn format_text(&self, text: &str) -> String {
+        self.as_task().format_text(text)
+    }
+
+    /// Returns the official prompt prefix string for this task, if any.
+    pub fn prompt_prefix(&self) -> Option<String> {
+        self.as_task().prompt_prefix()
     }
 }
 
@@ -121,5 +234,25 @@ mod tests {
             Task::from_name_and_title("qa", None),
             Task::QuestionAnswering
         );
+        assert_eq!(
+            Task::from_name_and_title("reranking", None),
+            Task::SearchQuery
+        );
+        assert_eq!(
+            Task::from_name_and_title("bitextmining", None),
+            Task::SearchQuery
+        );
+        assert_eq!(Task::from_name_and_title("raw", None), Task::Raw);
+        assert_eq!(Task::from_name_and_title("none", None), Task::Raw);
+
+        let owned = OwnedTask::from_name_and_title("document", Some("My Title".to_string()));
+        assert_eq!(
+            owned.as_task(),
+            Task::Document {
+                title: Some("My Title")
+            }
+        );
+        assert_eq!(owned.as_task().to_owned(), owned);
+        assert!(!Task::all_names().is_empty());
     }
 }

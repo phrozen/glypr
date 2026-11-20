@@ -2,19 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelConfigFile {
-    pub text_config: Option<TextConfig>,
-    // Root config fallback fields if text_config is absent
-    pub hidden_size: Option<usize>,
-    pub num_hidden_layers: Option<usize>,
-    pub num_attention_heads: Option<usize>,
-    pub num_key_value_heads: Option<usize>,
-    pub intermediate_size: Option<usize>,
-    pub vocab_size: Option<usize>,
-    pub embedding_dim: Option<usize>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerType {
@@ -69,7 +56,49 @@ impl TextConfig {
         };
 
         let config: TextConfig = serde_json::from_value(config_obj.clone())?;
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Validate structural invariants of `TextConfig`.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.num_hidden_layers == 0 {
+            anyhow::bail!("TextConfig.num_hidden_layers must be > 0");
+        }
+        if self.layer_types.len() != self.num_hidden_layers {
+            anyhow::bail!(
+                "TextConfig.layer_types length ({}) does not match num_hidden_layers ({})",
+                self.layer_types.len(),
+                self.num_hidden_layers
+            );
+        }
+        if self.num_attention_heads == 0 {
+            anyhow::bail!("TextConfig.num_attention_heads must be > 0");
+        }
+        if self.num_key_value_heads == 0 {
+            anyhow::bail!("TextConfig.num_key_value_heads must be > 0");
+        }
+        if self.head_dim == 0 {
+            anyhow::bail!("TextConfig.head_dim must be > 0");
+        }
+        if self.embedding_dim == 0 {
+            anyhow::bail!("TextConfig.embedding_dim must be > 0");
+        }
+        for (layer_key, override_cfg) in &self.per_layer_config {
+            if override_cfg.head_dim == 0 {
+                anyhow::bail!(
+                    "TextConfig.per_layer_config[{}].head_dim must be > 0",
+                    layer_key
+                );
+            }
+            if override_cfg.num_key_value_heads == 0 {
+                anyhow::bail!(
+                    "TextConfig.per_layer_config[{}].num_key_value_heads must be > 0",
+                    layer_key
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Construct TextConfig directly from GGUF metadata
@@ -188,9 +217,10 @@ impl TextConfig {
             },
         );
 
-        let sliding_window = 512;
+        let sliding_window = get_u32(metadata.get("gemma-embedding2.attention.sliding_window"))
+            .unwrap_or(512) as usize;
 
-        Ok(Self {
+        let config = Self {
             hidden_size,
             intermediate_size,
             num_hidden_layers,
@@ -209,7 +239,9 @@ impl TextConfig {
             pad_token_id,
             bos_token_id,
             eos_token_id,
-        })
+        };
+        config.validate()?;
+        Ok(config)
     }
 
     /// Get head dimension for a specific layer index
@@ -251,15 +283,16 @@ impl TextConfig {
 }
 
 pub(crate) fn get_u32(val: Option<&candle_core::quantized::gguf_file::Value>) -> Option<u32> {
-    match val {
-        Some(candle_core::quantized::gguf_file::Value::U8(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::I8(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::U16(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::I16(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::U32(v)) => Some(*v),
-        Some(candle_core::quantized::gguf_file::Value::I32(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::U64(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::I64(v)) => Some(*v as u32),
+    use candle_core::quantized::gguf_file::Value;
+    match val? {
+        Value::U8(v) => Some(*v as u32),
+        Value::I8(v) => u32::try_from(*v).ok(),
+        Value::U16(v) => Some(*v as u32),
+        Value::I16(v) => u32::try_from(*v).ok(),
+        Value::U32(v) => Some(*v),
+        Value::I32(v) => u32::try_from(*v).ok(),
+        Value::U64(v) => u32::try_from(*v).ok(),
+        Value::I64(v) => u32::try_from(*v).ok(),
         _ => None,
     }
 }
@@ -336,6 +369,9 @@ impl VisionConfig {
             cfg.num_hidden_layers = v as usize;
         }
         if let Some(v) = get_u32(metadata.get("clip.vision.attention.head_count")) {
+            if v == 0 {
+                return None;
+            }
             cfg.num_attention_heads = v as usize;
             cfg.num_key_value_heads = v as usize;
             cfg.head_dim = cfg.hidden_size / cfg.num_attention_heads;
@@ -409,6 +445,9 @@ impl AudioConfig {
             cfg.num_hidden_layers = v as usize;
         }
         if let Some(v) = get_u32(metadata.get("clip.audio.attention.head_count")) {
+            if v == 0 {
+                return None;
+            }
             cfg.num_attention_heads = v as usize;
         }
         if let Some(v) = get_u32(metadata.get("clip.audio.num_mel_bins")) {
@@ -454,5 +493,81 @@ impl MultimodalConfig {
             eoa_token_id: 258883,
             audio_token_id: 258881,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::quantized::gguf_file::Value;
+
+    #[test]
+    fn test_get_u32_rejects_negative_and_overflow() {
+        assert_eq!(get_u32(Some(&Value::I8(-1))), None);
+        assert_eq!(get_u32(Some(&Value::I16(-42))), None);
+        assert_eq!(get_u32(Some(&Value::I32(-100))), None);
+        assert_eq!(get_u32(Some(&Value::I64(-1))), None);
+        assert_eq!(get_u32(Some(&Value::I64(u32::MAX as i64 + 1))), None);
+        assert_eq!(get_u32(Some(&Value::U64(u32::MAX as u64 + 1))), None);
+
+        assert_eq!(get_u32(Some(&Value::U8(7))), Some(7));
+        assert_eq!(get_u32(Some(&Value::I8(7))), Some(7));
+        assert_eq!(get_u32(Some(&Value::I32(512))), Some(512));
+        assert_eq!(get_u32(Some(&Value::U64(u32::MAX as u64))), Some(u32::MAX));
+    }
+
+    #[test]
+    fn test_text_and_vision_config_validation() {
+        let mut meta = HashMap::new();
+        meta.insert("gemma-embedding2.block_count".to_string(), Value::U32(6));
+        meta.insert(
+            "gemma-embedding2.embedding_length".to_string(),
+            Value::U32(512),
+        );
+        meta.insert(
+            "gemma-embedding2.feed_forward_length".to_string(),
+            Value::U32(2048),
+        );
+        meta.insert(
+            "gemma-embedding2.attention.head_count".to_string(),
+            Value::U32(4),
+        );
+        meta.insert(
+            "gemma-embedding2.attention.sliding_window".to_string(),
+            Value::U32(1024),
+        );
+
+        let cfg = TextConfig::from_gguf_metadata(&meta).unwrap();
+        assert_eq!(cfg.sliding_window, 1024);
+        assert_eq!(cfg.layer_types.len(), 6);
+
+        // Mismatched sliding_window_pattern length must fail
+        meta.insert(
+            "gemma-embedding2.attention.sliding_window_pattern".to_string(),
+            Value::Array(vec![Value::Bool(true), Value::Bool(false)]),
+        );
+        assert!(TextConfig::from_gguf_metadata(&meta).is_err());
+        meta.remove("gemma-embedding2.attention.sliding_window_pattern");
+
+        // Zero attention heads must fail
+        meta.insert(
+            "gemma-embedding2.attention.head_count".to_string(),
+            Value::U32(0),
+        );
+        assert!(TextConfig::from_gguf_metadata(&meta).is_err());
+
+        // VisionConfig / AudioConfig must not divide by zero when head_count == 0
+        let mut vis_meta = HashMap::new();
+        vis_meta.insert("clip.has_vision_encoder".to_string(), Value::Bool(true));
+        vis_meta.insert(
+            "clip.vision.attention.head_count".to_string(),
+            Value::U32(0),
+        );
+        assert!(VisionConfig::from_gguf_metadata(&vis_meta).is_none());
+
+        let mut aud_meta = HashMap::new();
+        aud_meta.insert("clip.has_audio_encoder".to_string(), Value::Bool(true));
+        aud_meta.insert("clip.audio.attention.head_count".to_string(), Value::U32(0));
+        assert!(AudioConfig::from_gguf_metadata(&aud_meta).is_none());
     }
 }

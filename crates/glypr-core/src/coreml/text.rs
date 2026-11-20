@@ -60,6 +60,9 @@ impl CoreMLTextBackbone {
     /// If `token_ids.len() > self.seq_len`, fails immediately with a descriptive error.
     /// Sequences shorter than `self.seq_len` are automatically right-padded with zero mask.
     pub fn embed_token_ids(&self, token_ids: &[i32]) -> Result<Vec<f32>> {
+        if token_ids.is_empty() {
+            bail!("Cannot embed an empty token sequence");
+        }
         let num_tokens = token_ids.len();
         if num_tokens > self.seq_len {
             bail!(
