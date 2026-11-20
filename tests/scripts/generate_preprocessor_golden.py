@@ -111,7 +111,7 @@ def _patchify_chw(chw: np.ndarray, patch_size: int) -> tuple[np.ndarray, int, in
 def extract_image_golden(processor: Any) -> dict[str, Any]:
     orig_width = 32
     orig_height = 48
-    budget = 16
+    budget = 70
 
     arr = np.zeros((orig_height, orig_width, 3), dtype=np.uint8)
     for y in range(orig_height):
