@@ -1,5 +1,7 @@
 """Generate golden reference test vectors for EmbeddingGemma 2 to test the native Rust implementation."""
 
+import argparse
+from datetime import datetime, timezone
 import json
 import os
 import wave
@@ -12,15 +14,33 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
+import sentence_transformers
 import torch
+import transformers
 from PIL import Image
 from safetensors.numpy import save_file
 
-from baseline.embedder import EmbeddingGemmaBaseline
+from baseline.embedder import EmbeddingGemmaBaseline, MODEL_ID
 
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "golden_vectors"
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Torch device to run baseline generation on (default: cpu)",
+    )
+    parser.add_argument(
+        "--dtype",
+        default="float32",
+        choices=["float32", "bfloat16"],
+        help="Model torch dtype (default: float32)",
+    )
+    return parser.parse_args()
 
 def create_synthetic_image(path: Path) -> Path:
     """Create a deterministic 64x64 RGB gradient image."""
@@ -52,12 +72,20 @@ def create_synthetic_audio(path: Path, duration_sec: float = 2.0, sample_rate: i
     return path
 
 def main():
+    args = parse_args()
+    torch_dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
+
     print("=" * 60)
     print("Generating Golden Reference Test Vectors for EmbeddingGemma 2")
+    print(f"Device: {args.device} | Dtype: {args.dtype}")
     print("=" * 60)
 
     # 1. Initialize embedder
-    embedder = EmbeddingGemmaBaseline(mode="text_only")
+    embedder = EmbeddingGemmaBaseline(
+        mode="text_only",
+        device=args.device,
+        torch_dtype=torch_dtype,
+    )
 
     # 2. Define deterministic test cases
     test_cases = [
@@ -105,10 +133,21 @@ def main():
         },
     ]
 
+    provenance = {
+        "model_id": MODEL_ID,
+        "dtype": args.dtype,
+        "device": args.device,
+        "transformers_version": transformers.__version__,
+        "sentence_transformers_version": sentence_transformers.__version__,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
     tensors_to_save = {}
     manifest = {
-        "model_id": "google/embeddinggemma-2",
+        "schema_version": 2,
+        "model_id": MODEL_ID,
         "description": "Deterministic ground-truth reference vectors for Rust implementation validation",
+        "provenance": provenance,
         "supported_dims": [768, 512, 256, 128],
         "test_cases": {},
         "similarities": {},
@@ -180,9 +219,13 @@ def main():
         "audio": str(audio_path.name),
     }
 
-    # Save safetensors
+    # Save safetensors with provenance metadata header
+    safetensors_metadata = {
+        "schema_version": "2",
+        **{k: str(v) for k, v in provenance.items()},
+    }
     weights_path = OUTPUT_DIR / "baseline_vectors.safetensors"
-    save_file(tensors_to_save, str(weights_path))
+    save_file(tensors_to_save, str(weights_path), metadata=safetensors_metadata)
     print(f"\nSaved golden vectors safetensors: {weights_path}")
 
     # Save manifest

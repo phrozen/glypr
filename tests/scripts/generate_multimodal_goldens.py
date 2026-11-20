@@ -10,12 +10,36 @@ Covers:
   6. Semantic cross-modal text retrieval queries
 """
 
+import argparse
+from datetime import datetime, timezone
 import json
 import wave
 from pathlib import Path
 import numpy as np
 from PIL import Image
+import sentence_transformers
 from sentence_transformers import SentenceTransformer
+import torch
+import transformers
+
+
+MODEL_ID = "google/embeddinggemma-2"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Torch device to run multimodal golden generation on (default: cpu)",
+    )
+    parser.add_argument(
+        "--dtype",
+        default="float32",
+        choices=["float32", "bfloat16"],
+        help="Model torch dtype (default: float32)",
+    )
+    return parser.parse_args()
 
 def read_wav_pcm(path: Path) -> np.ndarray:
     """Read a 16 kHz mono WAV file as a float32 array in [-1.0, 1.0]."""
@@ -26,11 +50,18 @@ def read_wav_pcm(path: Path) -> np.ndarray:
         return pcm.astype(np.float32) / 32767.0
 
 def main():
+    args = parse_args()
+    torch_dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
+
     out_dir = Path(__file__).resolve().parent.parent / "golden_vectors"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Loading SentenceTransformer('google/embeddinggemma-2') on CPU...")
-    model = SentenceTransformer("google/embeddinggemma-2", device="cpu")
+    print(f"Loading SentenceTransformer('{MODEL_ID}') on {args.device} ({args.dtype})...")
+    model = SentenceTransformer(
+        MODEL_ID,
+        device=args.device,
+        model_kwargs={"torch_dtype": torch_dtype},
+    )
 
     # 1. Deterministic synthetic test image (224x224 RGB)
     img_arr = np.zeros((224, 224, 3), dtype=np.uint8)
@@ -91,55 +122,55 @@ def main():
 
     print("\n[A] Encoding Baseline Synthetic & Lenna Assets...")
     # Baseline Case 1: Synthetic Image
-    emb = model.encode([{"role": "user", "content": [{"type": "image", "image": images["synth"]}]}], device="cpu")
+    emb = model.encode([{"role": "user", "content": [{"type": "image", "image": images["synth"]}]}], device=args.device)
     add_case("image_only", emb)
 
     # Baseline Case 2: Synthetic Image + Prompt
     prompt_img = "Describe this picture"
-    emb = model.encode([{"role": "user", "content": [{"type": "image", "image": images["synth"]}, {"type": "text", "text": prompt_img}]}], device="cpu")
+    emb = model.encode([{"role": "user", "content": [{"type": "image", "image": images["synth"]}, {"type": "text", "text": prompt_img}]}], device=args.device)
     add_case("image_prompt", emb, {"prompt": prompt_img})
 
     # Baseline Case 3: Synthetic Audio
-    emb = model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["synth"]}]}], device="cpu")
+    emb = model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["synth"]}]}], device=args.device)
     add_case("audio_only", emb)
 
     # Baseline Case 4: Synthetic Audio + Prompt
     prompt_aud = "A musical sound"
-    emb = model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["synth"]}, {"type": "text", "text": prompt_aud}]}], device="cpu")
+    emb = model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["synth"]}, {"type": "text", "text": prompt_aud}]}], device=args.device)
     add_case("audio_prompt", emb, {"prompt": prompt_aud})
 
     # Baseline Case 5: Lenna Only
-    emb = model.encode([{"role": "user", "content": [{"type": "image", "image": images["lenna"]}]}], device="cpu")
+    emb = model.encode([{"role": "user", "content": [{"type": "image", "image": images["lenna"]}]}], device=args.device)
     add_case("real_image_only", emb)
 
     # Baseline Case 6: Lenna + Prompt
     prompt_lenna = "A classic portrait photograph of a woman wearing a hat"
-    emb = model.encode([{"role": "user", "content": [{"type": "image", "image": images["lenna"]}, {"type": "text", "text": prompt_lenna}]}], device="cpu")
+    emb = model.encode([{"role": "user", "content": [{"type": "image", "image": images["lenna"]}, {"type": "text", "text": prompt_lenna}]}], device=args.device)
     add_case("real_image_prompt", emb, {"prompt": prompt_lenna})
 
     # Baseline Case 7: Lena Audio Only
-    emb = model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["lena"]}]}], device="cpu")
+    emb = model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["lena"]}]}], device=args.device)
     add_case("real_audio_only", emb)
 
     # Baseline Case 8: Lena Audio + Prompt
     prompt_lena_aud = "A woman speaking English into a microphone"
-    emb = model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["lena"]}, {"type": "text", "text": prompt_lena_aud}]}], device="cpu")
+    emb = model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["lena"]}, {"type": "text", "text": prompt_lena_aud}]}], device=args.device)
     add_case("real_audio_prompt", emb, {"prompt": prompt_lena_aud})
 
     print("\n[B] Encoding Extended Image Assets (Aspect Ratios & Textures)...")
-    add_case("baboon_only", model.encode([{"role": "user", "content": [{"type": "image", "image": images["baboon"]}]}], device="cpu"), {"file": "baboon.png"})
-    add_case("pepper_only", model.encode([{"role": "user", "content": [{"type": "image", "image": images["pepper"]}]}], device="cpu"), {"file": "pepper.png"})
-    add_case("countryside_only", model.encode([{"role": "user", "content": [{"type": "image", "image": images["countryside"]}]}], device="cpu"), {"file": "countryside.png", "aspect": "16:9"})
-    add_case("dog_only", model.encode([{"role": "user", "content": [{"type": "image", "image": images["dog"]}]}], device="cpu"), {"file": "dog.png", "aspect": "2:3"})
+    add_case("baboon_only", model.encode([{"role": "user", "content": [{"type": "image", "image": images["baboon"]}]}], device=args.device), {"file": "baboon.png"})
+    add_case("pepper_only", model.encode([{"role": "user", "content": [{"type": "image", "image": images["pepper"]}]}], device=args.device), {"file": "pepper.png"})
+    add_case("countryside_only", model.encode([{"role": "user", "content": [{"type": "image", "image": images["countryside"]}]}], device=args.device), {"file": "countryside.png", "aspect": "16:9"})
+    add_case("dog_only", model.encode([{"role": "user", "content": [{"type": "image", "image": images["dog"]}]}], device=args.device), {"file": "dog.png", "aspect": "2:3"})
 
     print("\n[C] Encoding Extended Audio Assets...")
-    add_case("female_voice_only", model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["female_voice"]}]}], device="cpu"), {"file": "female_voice_16k.wav"})
-    add_case("music_only", model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["music"]}]}], device="cpu"), {"file": "music_16k.wav"})
+    add_case("female_voice_only", model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["female_voice"]}]}], device=args.device), {"file": "female_voice_16k.wav"})
+    add_case("music_only", model.encode([{"role": "user", "content": [{"type": "audio", "audio": audios["music"]}]}], device=args.device), {"file": "music_16k.wav"})
 
     print("\n[D] Encoding Dynamic Vision Token Budget Sweeps (pepper.png)...")
     for budget in [70, 140, 280, 560]:
         model[0].processor.image_processor.max_soft_tokens = budget
-        emb_budget = model.encode({"image": images["pepper"]}, device="cpu")
+        emb_budget = model.encode({"image": images["pepper"]}, device=args.device)
         add_case(f"pepper_budget_{budget}", emb_budget, {"file": "pepper.png", "budget": budget})
     # Reset default budget
     model[0].processor.image_processor.max_soft_tokens = 280
@@ -149,7 +180,7 @@ def main():
     emb_comp1 = model.encode({
         "text": composite_text,
         "image": [images["baboon"], images["pepper"]],
-    }, device="cpu")
+    }, device=args.device)
     add_case("composite_multi_image", emb_comp1, {
         "text": composite_text,
         "images": ["baboon.png", "pepper.png"],
@@ -161,7 +192,7 @@ def main():
         "text": interleaved_text,
         "image": images["baboon"],
         "audio": audios["music"],
-    }, device="cpu")
+    }, device=args.device)
     add_case("composite_interleaved", emb_comp2, {
         "text": interleaved_text,
         "image": "baboon.png",
@@ -176,10 +207,21 @@ def main():
         "query_female_voice": "A woman speaking English clearly",
     }
     for qid, qtext in queries.items():
-        emb_q = model.encode(qtext, prompt_name="SearchQuery", device="cpu")
+        emb_q = model.encode(qtext, prompt_name="SearchQuery", device=args.device)
         add_case(qid, emb_q, {"query": qtext, "task": "SearchQuery"})
 
+    provenance = {
+        "model_id": MODEL_ID,
+        "dtype": args.dtype,
+        "device": args.device,
+        "transformers_version": transformers.__version__,
+        "sentence_transformers_version": sentence_transformers.__version__,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
     golden_data = {
+        "schema_version": 2,
+        "provenance": provenance,
         "synthetic_image_file": str(synth_img_path.name),
         "synthetic_audio_file": str(synth_audio_path.name),
         "real_image_file": "lenna.png",

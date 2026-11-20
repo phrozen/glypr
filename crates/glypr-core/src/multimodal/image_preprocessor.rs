@@ -349,4 +349,91 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn test_image_preprocessor_matches_golden_json() {
+        #[derive(serde::Deserialize)]
+        struct PreprocessorGolden {
+            image: ImageGolden,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ImageGolden {
+            orig_width: u32,
+            orig_height: u32,
+            budget: usize,
+            target_width: usize,
+            target_height: usize,
+            patch_width: usize,
+            patch_height: usize,
+            pixel_values: Vec<f32>,
+        }
+
+        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/golden_vectors/preprocessor_golden.json");
+        if !golden_path.exists() {
+            let allow_missing = matches!(
+                std::env::var("GLYPR_ALLOW_MISSING_WEIGHTS")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "1" | "true"
+            );
+            if allow_missing {
+                eprintln!(
+                    "Skipping test_image_preprocessor_matches_golden_json ({} missing and GLYPR_ALLOW_MISSING_WEIGHTS=1)",
+                    golden_path.display()
+                );
+                return;
+            }
+            panic!(
+                "Missing preprocessor golden fixture at {}",
+                golden_path.display()
+            );
+        }
+
+        let raw = std::fs::read_to_string(&golden_path).unwrap();
+        let golden: PreprocessorGolden = serde_json::from_str(&raw).unwrap();
+        let img_meta = golden.image;
+
+        let mut img_buf = RgbImage::new(img_meta.orig_width, img_meta.orig_height);
+        for y in 0..img_meta.orig_height {
+            for x in 0..img_meta.orig_width {
+                let r = ((x * 7) % 256) as u8;
+                let g = ((y * 5) % 256) as u8;
+                let b = (((x + y) * 3) % 256) as u8;
+                img_buf.put_pixel(x, y, image::Rgb([r, g, b]));
+            }
+        }
+
+        let dynamic_img = DynamicImage::ImageRgb8(img_buf);
+        let processed = preprocess_image(&dynamic_img, img_meta.budget, 16, 3).unwrap();
+
+        assert_eq!(processed.target_width, img_meta.target_width);
+        assert_eq!(processed.target_height, img_meta.target_height);
+        assert_eq!(processed.patch_width, img_meta.patch_width);
+        assert_eq!(processed.patch_height, img_meta.patch_height);
+        assert_eq!(processed.pixel_values.len(), img_meta.pixel_values.len());
+
+        let mut max_abs_diff = 0.0f32;
+        for (&got, &expected) in processed
+            .pixel_values
+            .iter()
+            .zip(img_meta.pixel_values.iter())
+        {
+            assert!(got.is_finite(), "non-finite pixel value encountered");
+            max_abs_diff = max_abs_diff.max((got - expected).abs());
+        }
+        assert!(
+            max_abs_diff < 0.025,
+            "image preprocessor max_abs_diff={max_abs_diff:.6} >= 0.025"
+        );
+
+        let cos = crate::cosine_similarity(&processed.pixel_values, &img_meta.pixel_values);
+        assert!(
+            cos >= 0.9999,
+            "image preprocessor cosine similarity {cos:.6} < 0.9999"
+        );
+    }
 }

@@ -713,4 +713,74 @@ mod tests {
         assert!(decode_wav_bytes(&[]).is_err());
         assert!(decode_wav_bytes(b"not a valid wav header").is_err());
     }
+
+    #[test]
+    fn test_audio_preprocessor_matches_golden_json() {
+        #[derive(serde::Deserialize)]
+        struct PreprocessorGolden {
+            audio: AudioGolden,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct AudioGolden {
+            sample_rate: usize,
+            freq_hz: f64,
+            num_samples: usize,
+            num_frames: usize,
+            num_mels: usize,
+            features: Vec<f32>,
+        }
+
+        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/golden_vectors/preprocessor_golden.json");
+        if !golden_path.exists() {
+            let allow_missing = matches!(
+                std::env::var("GLYPR_ALLOW_MISSING_WEIGHTS")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "1" | "true"
+            );
+            if allow_missing {
+                eprintln!(
+                    "Skipping test_audio_preprocessor_matches_golden_json ({} missing and GLYPR_ALLOW_MISSING_WEIGHTS=1)",
+                    golden_path.display()
+                );
+                return;
+            }
+            panic!(
+                "Missing preprocessor golden fixture at {}",
+                golden_path.display()
+            );
+        }
+
+        let raw = std::fs::read_to_string(&golden_path).unwrap();
+        let golden: PreprocessorGolden = serde_json::from_str(&raw).unwrap();
+        let audio = golden.audio;
+        assert_eq!(audio.num_mels, 128);
+
+        let samples: Vec<f32> = (0..audio.num_samples)
+            .map(|i| {
+                (2.0 * std::f64::consts::PI * audio.freq_hz * (i as f64)
+                    / (audio.sample_rate as f64))
+                    .sin() as f32
+            })
+            .collect();
+
+        let processed = preprocess_audio(&samples).unwrap();
+        assert_eq!(processed.num_frames, audio.num_frames);
+        assert_eq!(processed.num_mels, 128);
+        assert_eq!(processed.features.len(), audio.features.len());
+
+        let mut max_abs_diff = 0.0f32;
+        for (&got, &expected) in processed.features.iter().zip(audio.features.iter()) {
+            assert!(got.is_finite(), "non-finite audio feature encountered");
+            max_abs_diff = max_abs_diff.max((got - expected).abs());
+        }
+        assert!(
+            max_abs_diff < 1e-4,
+            "audio preprocessor max_abs_diff={max_abs_diff:.6e} >= 1e-4"
+        );
+    }
 }
