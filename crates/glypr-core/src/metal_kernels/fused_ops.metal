@@ -11,6 +11,10 @@ struct MLX_BF16 {
     MLX_BF16() constant = default;
     
     MLX_BF16(float x) thread {
+        if (metal::isnan(x)) {
+            bits_ = 0x7fc0;
+            return;
+        }
         union { float f; uint32_t i; } u;
         u.f = x;
         // Round to nearest even

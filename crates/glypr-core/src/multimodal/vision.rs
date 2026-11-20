@@ -79,6 +79,12 @@ impl VisionRotaryEmbedding {
         dtype: DType,
         device: &Device,
     ) -> Result<(Tensor, Tensor)> {
+        if self.head_dim == 0 || !self.head_dim.is_multiple_of(4) {
+            candle_core::bail!(
+                "VisionRotaryEmbedding head_dim must be a positive multiple of 4, got {}",
+                self.head_dim
+            );
+        }
         let spatial_dim = self.head_dim / 2;
         let num_freqs = spatial_dim / 2;
 
@@ -135,12 +141,19 @@ impl VisionRotaryEmbedding {
 
     /// Fast GPU/CPU rotation using precomputed (cos, sin) tensors
     pub fn apply_precomputed(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-        let x_h0 = x.narrow(D::Minus1, 0, 16)?.contiguous()?;
-        let x_h1 = x.narrow(D::Minus1, 16, 16)?.contiguous()?;
+        if self.head_dim == 0 || !self.head_dim.is_multiple_of(4) {
+            candle_core::bail!(
+                "VisionRotaryEmbedding head_dim must be a positive multiple of 4, got {}",
+                self.head_dim
+            );
+        }
+        let q = self.head_dim / 4;
+        let x_h0 = x.narrow(D::Minus1, 0, q)?.contiguous()?;
+        let x_h1 = x.narrow(D::Minus1, q, q)?.contiguous()?;
         let rot_h = Tensor::cat(&[&x_h1.neg()?, &x_h0], D::Minus1)?;
 
-        let x_w0 = x.narrow(D::Minus1, 32, 16)?.contiguous()?;
-        let x_w1 = x.narrow(D::Minus1, 48, 16)?.contiguous()?;
+        let x_w0 = x.narrow(D::Minus1, 2 * q, q)?.contiguous()?;
+        let x_w1 = x.narrow(D::Minus1, 3 * q, q)?.contiguous()?;
         let rot_w = Tensor::cat(&[&x_w1.neg()?, &x_w0], D::Minus1)?;
         let rot_x = Tensor::cat(&[&rot_h, &rot_w], D::Minus1)?;
 
@@ -452,16 +465,25 @@ impl VisionTower {
         let b = batch.len();
 
         let num_patches = batch[0].num_patches;
+        let patch_width = batch[0].patch_width;
+        let patch_height = batch[0].patch_height;
         let patch_pixels = 768;
 
         // Flatten all pixel values into a contiguous buffer
         let mut all_pixels = Vec::with_capacity(b * num_patches * patch_pixels);
         for img in batch {
-            if img.num_patches != num_patches {
+            if img.num_patches != num_patches
+                || img.patch_width != patch_width
+                || img.patch_height != patch_height
+            {
                 candle_core::bail!(
-                    "Heterogeneous patch counts in encode_batch: expected {}, got {}",
+                    "Heterogeneous patch geometry in encode_batch: expected {} ({}x{}), got {} ({}x{})",
                     num_patches,
-                    img.num_patches
+                    patch_width,
+                    patch_height,
+                    img.num_patches,
+                    img.patch_width,
+                    img.patch_height
                 );
             }
             all_pixels.extend_from_slice(&img.pixel_values);
@@ -756,6 +778,56 @@ mod tests {
             }
         }
         println!("Test passed successfully!");
+        Ok(())
+    }
+
+    #[test]
+    fn test_encode_batch_rejects_mixed_aspect_same_patch_count() -> Result<()> {
+        let zero_linear = LinearOp::new_standard(Linear::new(
+            Tensor::zeros((1, 1), DType::F32, &Device::Cpu)?,
+            None,
+        ));
+        let tower = VisionTower {
+            patch_embedder: VisionPatchEmbedder {
+                input_proj: zero_linear.clone(),
+                position_embedding_table: Tensor::zeros((2, 1, 1), DType::F32, &Device::Cpu)?,
+                hidden_size: 1,
+            },
+            rotary_emb: VisionRotaryEmbedding::new(64, 100.0),
+            layers: Vec::new(),
+            pooler: VisionPooler::new(3, 768),
+            projector: VisionProjector {
+                norm: RMSNorm::new(None, 1e-6),
+                projection: zero_linear,
+            },
+            config: VisionConfig::default(),
+            device: Device::Cpu,
+            dtype: DType::F32,
+        };
+
+        let make_img = |pw: usize, ph: usize| ProcessedImage {
+            pixel_values: vec![0.0; pw * ph * 768],
+            position_ids: vec![0; pw * ph * 2],
+            num_patches: pw * ph,
+            num_soft_tokens: (pw / 3) * (ph / 3),
+            patch_width: pw,
+            patch_height: ph,
+            target_width: pw * 16,
+            target_height: ph * 16,
+        };
+
+        let img_6x9 = make_img(6, 9);
+        let img_9x6 = make_img(9, 6);
+        assert_eq!(img_6x9.num_patches, 54);
+        assert_eq!(img_9x6.num_patches, 54);
+
+        let err = tower
+            .encode_batch(&[img_6x9, img_9x6])
+            .expect_err("encode_batch must reject [6x9, 9x6] mixed aspect batch");
+        assert!(
+            err.to_string().contains("Heterogeneous patch geometry"),
+            "unexpected error message: {err}"
+        );
         Ok(())
     }
 }

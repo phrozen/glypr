@@ -168,13 +168,14 @@ pub fn preprocess_image(
         pooling_kernel_size,
     )?;
 
-    // 2. Resize image using Catmull-Rom bicubic interpolation (matching PIL BICUBIC)
-    let resized = img.resize_exact(
+    // 2. Convert to RGB before resizing to match Python PIL .convert("RGB").resize(...)
+    let rgb_img = DynamicImage::ImageRgb8(img.to_rgb8());
+    let resized = rgb_img.resize_exact(
         target_width as u32,
         target_height as u32,
         FilterType::CatmullRom,
     );
-    let rgb = resized.to_rgb8();
+    let rgb = resized.into_rgb8();
 
     let patch_width = target_width / patch_size;
     let patch_height = target_height / patch_size;

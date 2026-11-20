@@ -4,7 +4,7 @@ use candle_metal_kernels::metal::{
 };
 use objc2_metal::MTLSize;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, RwLock};
 
 use super::chunked::ChunkedSlidingAttention;
 use super::traits::AttentionBackend;
@@ -43,13 +43,49 @@ struct AttnMaskParams {
     m_strides: [i64; 3],
 }
 
-struct PipelineCache {
-    library: Library,
-    pipelines: Mutex<HashMap<(usize, bool, bool, bool), ComputePipeline>>,
-}
+static SLIDING_LIB_CACHE: LazyLock<RwLock<HashMap<usize, Library>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+static M5_LIB_CACHE: LazyLock<RwLock<HashMap<usize, Library>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+type PipelineCacheKey = (usize, bool, usize, bool, bool, bool);
+static COMPUTE_PIPELINE_CACHE: LazyLock<RwLock<HashMap<PipelineCacheKey, ComputePipeline>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
-static PIPELINE_CACHE: OnceLock<PipelineCache> = OnceLock::new();
-static M5_PIPELINE_CACHE: OnceLock<PipelineCache> = OnceLock::new();
+fn get_or_compile_library(device: &MtlDevice, use_m5: bool) -> Result<Library> {
+    let cache_lock = if use_m5 {
+        &M5_LIB_CACHE
+    } else {
+        &SLIDING_LIB_CACHE
+    };
+    let dev_ptr = device.as_ref() as *const _ as usize;
+    {
+        let cache = cache_lock.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(lib) = cache.get(&dev_ptr) {
+            return Ok(lib.clone());
+        }
+    }
+
+    let library = if use_m5 {
+        crate::metal_kernels::compile_metal4_library(device, M5_SHADER_SRC).map_err(|e| {
+            candle_core::Error::Metal(
+                format!("Failed to compile M5 Steel Attention Metal 4.0 library: {e}").into(),
+            )
+        })?
+    } else {
+        device
+            .new_library_with_source(SLIDING_SHADER_SRC, None)
+            .map_err(|e| {
+                candle_core::Error::Metal(
+                    format!("Failed to compile sliding-window Steel Attention Metal library: {e}")
+                        .into(),
+                )
+            })?
+    };
+
+    let mut cache = cache_lock.write().unwrap_or_else(|e| e.into_inner());
+    cache.insert(dev_ptr, library.clone());
+    Ok(library)
+}
 
 fn get_or_compile_pipeline(
     device: &MtlDevice,
@@ -59,76 +95,18 @@ fn get_or_compile_pipeline(
     has_mask: bool,
     use_m5: bool,
 ) -> Result<ComputePipeline> {
-    if use_m5 {
-        let cache = M5_PIPELINE_CACHE.get_or_init(|| {
-            let lib = match crate::metal_kernels::compile_metal4_library(device, M5_SHADER_SRC) {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("M5 Steel Attention compilation error:\n{e}");
-                    panic!("Failed to compile M5 Steel Attention Metal 4.0 library");
-                }
-            };
-            PipelineCache {
-                library: lib,
-                pipelines: Mutex::new(HashMap::new()),
-            }
-        });
-
-        let key = (head_dim, align_q, align_k, has_mask);
-        let mut map = cache.pipelines.lock().unwrap();
-        if let Some(p) = map.get(&key) {
+    let dev_ptr = device.as_ref() as *const _ as usize;
+    let key = (dev_ptr, use_m5, head_dim, align_q, align_k, has_mask);
+    {
+        let cache = COMPUTE_PIPELINE_CACHE
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = cache.get(&key) {
             return Ok(p.clone());
         }
-
-        let cv = ConstantValues::new(vec![
-            (200, Value::Bool(align_q)),
-            (201, Value::Bool(align_k)),
-            (300, Value::Bool(has_mask)),
-            (301, Value::Bool(false)),
-        ]);
-
-        let func_name = match head_dim {
-            256 => "steel_attention_m5_bfloat16_bq64_bk32_bd256_wm4",
-            512 => "steel_attention_m5_bfloat16_bq64_bk32_bd512_wm4",
-            _ => {
-                return Err(candle_core::Error::Msg(format!(
-                    "Unsupported head_dim for M5 MetalFlashAttention: {head_dim}"
-                )));
-            }
-        };
-        let func = cache
-            .library
-            .get_function(func_name, Some(&cv))
-            .map_err(|e| {
-                candle_core::Error::Metal(format!("Failed to get function {func_name}: {e}").into())
-            })?;
-        let pipeline = device
-            .new_compute_pipeline_state_with_function(&func)
-            .map_err(|e| {
-                candle_core::Error::Metal(
-                    format!("Failed to create M5 compute pipeline: {e}").into(),
-                )
-            })?;
-
-        map.insert(key, pipeline.clone());
-        return Ok(pipeline);
     }
 
-    let cache = PIPELINE_CACHE.get_or_init(|| {
-        let lib = device
-            .new_library_with_source(SLIDING_SHADER_SRC, None)
-            .expect("Failed to compile sliding-window Steel Attention Metal library");
-        PipelineCache {
-            library: lib,
-            pipelines: Mutex::new(HashMap::new()),
-        }
-    });
-
-    let key = (head_dim, align_q, align_k, has_mask);
-    let mut map = cache.pipelines.lock().unwrap();
-    if let Some(p) = map.get(&key) {
-        return Ok(p.clone());
-    }
+    let library = get_or_compile_library(device, use_m5)?;
 
     let cv = ConstantValues::new(vec![
         (200, Value::Bool(align_q)),
@@ -137,28 +115,36 @@ fn get_or_compile_pipeline(
         (301, Value::Bool(false)), // do_causal = false (bidirectional sliding window / full attention)
     ]);
 
-    let func_name = match head_dim {
-        256 => "steel_attention_bfloat16_bq32_bk16_bd256_wm4_wn1_maskbfloat16",
-        512 => "steel_attention_bfloat16_bq16_bk16_bd512_wm2_wn1_maskbfloat16",
-        _ => {
+    let func_name = match (use_m5, head_dim) {
+        (true, 256) => "steel_attention_m5_bfloat16_bq64_bk32_bd256_wm4",
+        (true, 512) => "steel_attention_m5_bfloat16_bq64_bk32_bd512_wm4",
+        (true, _) => {
+            return Err(candle_core::Error::Msg(format!(
+                "Unsupported head_dim for M5 MetalFlashAttention: {head_dim}"
+            )));
+        }
+        (false, 256) => "steel_attention_bfloat16_bq32_bk16_bd256_wm4_wn1_maskbfloat16",
+        (false, 512) => "steel_attention_bfloat16_bq16_bk16_bd512_wm2_wn1_maskbfloat16",
+        (false, _) => {
             return Err(candle_core::Error::Msg(format!(
                 "Unsupported head_dim for MetalFlashAttention: {head_dim}"
             )));
         }
     };
-    let func = cache
-        .library
-        .get_function(func_name, Some(&cv))
-        .map_err(|e| {
-            candle_core::Error::Metal(format!("Failed to get function {func_name}: {e}").into())
-        })?;
+
+    let func = library.get_function(func_name, Some(&cv)).map_err(|e| {
+        candle_core::Error::Metal(format!("Failed to get function {func_name}: {e}").into())
+    })?;
     let pipeline = device
         .new_compute_pipeline_state_with_function(&func)
         .map_err(|e| {
             candle_core::Error::Metal(format!("Failed to create compute pipeline: {e}").into())
         })?;
 
-    map.insert(key, pipeline.clone());
+    let mut cache = COMPUTE_PIPELINE_CACHE
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    cache.insert(key, pipeline.clone());
     Ok(pipeline)
 }
 
@@ -214,11 +200,26 @@ impl MetalFlashAttention {
         };
 
         let (b, h, s, d) = q.dims4()?;
-        let (_kb, kh, _ks, _kd) = k.dims4()?;
+        let (kb, kh, ks, kd) = k.dims4()?;
+        let (vb, vh, vs, vd) = v.dims4()?;
+        if kh == 0 || kh != vh || !h.is_multiple_of(kh) {
+            candle_core::bail!(
+                "MetalFlashAttention: invalid GQA head counts q={h}, k={kh}, v={vh}"
+            );
+        }
+        if (kb, ks, kd) != (b, s, d) || (vb, vs, vd) != (b, s, d) {
+            candle_core::bail!(
+                "MetalFlashAttention: shape mismatch q=({b},{h},{s},{d}) k=({kb},{kh},{ks},{kd}) v=({vb},{vh},{vs},{vd})"
+            );
+        }
         let gqa_factor = (h / kh) as i32;
 
         // Metal Flash Kernel supports head_dim = 256 and 512 in BF16
-        if (d != 256 && d != 512) || q.dtype() != DType::BF16 {
+        if (d != 256 && d != 512)
+            || q.dtype() != DType::BF16
+            || k.dtype() != DType::BF16
+            || v.dtype() != DType::BF16
+        {
             let k_rep = if gqa_factor > 1 {
                 super::repeat_kv(k, gqa_factor as usize)?
             } else {
@@ -238,35 +239,54 @@ impl MetalFlashAttention {
             );
         }
 
-        // Validate optional additive mask ([B, 1, 1, S] or [B, H|1, S|1, S] in BF16 on Metal)
+        // Enforce unit last-dim stride for Metal Flash kernels
+        let q = if q.layout().stride()[3] == 1 {
+            q.clone()
+        } else {
+            q.contiguous()?
+        };
+        let k = if k.layout().stride()[3] == 1 {
+            k.clone()
+        } else {
+            k.contiguous()?
+        };
+        let v = if v.layout().stride()[3] == 1 {
+            v.clone()
+        } else {
+            v.contiguous()?
+        };
+
+        if b == 0 || h == 0 || s == 0 {
+            return Tensor::zeros((b, h, s, d), DType::BF16, q.device());
+        }
+
+        // Validate optional additive mask ([B|1, H|1, S|1, S]) and convert to BF16 on Metal
+        // rather than falling back to MetalSdpaAttention (which ignores sliding_window).
         let mask_contig = if let Some(m) = attention_mask {
-            if m.dtype() != DType::BF16
-                || !m.device().is_metal()
-                || m.dims().len() != 4
-                || m.dim(3)? != s
+            if !m.device().is_metal() {
+                candle_core::bail!("MetalFlashAttention: attention_mask must be on Metal device");
+            }
+            let m_dims = m.dims();
+            if m_dims.len() != 4
+                || (m_dims[0] != 1 && m_dims[0] != b)
+                || (m_dims[1] != 1 && m_dims[1] != h)
+                || (m_dims[2] != 1 && m_dims[2] != s)
+                || m_dims[3] != s
             {
-                let k_rep = if gqa_factor > 1 {
-                    super::repeat_kv(k, gqa_factor as usize)?
-                } else {
-                    k.clone()
-                };
-                let v_rep = if gqa_factor > 1 {
-                    super::repeat_kv(v, gqa_factor as usize)?
-                } else {
-                    v.clone()
-                };
-                return super::metal_sdpa::MetalSdpaAttention.compute_attention(
-                    q,
-                    &k_rep,
-                    &v_rep,
-                    attention_mask,
-                    sliding_window,
+                candle_core::bail!(
+                    "MetalFlashAttention: invalid attention_mask shape {:?} for q shape [{b}, {h}, {s}, {d}]",
+                    m_dims
                 );
             }
-            Some(if m.is_contiguous() {
-                m.clone()
+            let m_bf16 = if m.dtype() != DType::BF16 {
+                m.to_dtype(DType::BF16)?
             } else {
-                m.contiguous()?
+                m.clone()
+            };
+            Some(if m_bf16.is_contiguous() {
+                m_bf16
+            } else {
+                m_bf16.contiguous()?
             })
         } else {
             None
@@ -544,6 +564,76 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_metal_flash_f32_mask_preserves_sliding_window_and_validates_dims() -> Result<()> {
+        if !crate::metal_kernels::is_metal_device_available() {
+            return Ok(());
+        }
+        let dev = Device::new_metal(0)?;
+        let (b, h, kh, s, d) = (1, 2, 1, 32, 256);
+        let q_vec: Vec<f32> = (0..(b * h * s * d))
+            .map(|i| ((i as f32) * 0.031).sin() * 0.5)
+            .collect();
+        let k_vec: Vec<f32> = (0..(b * kh * s * d))
+            .map(|i| ((i as f32) * 0.017).cos() * 0.5)
+            .collect();
+        let v_vec: Vec<f32> = (0..(b * kh * s * d))
+            .map(|i| ((i as f32) * 0.023).sin() * 0.5)
+            .collect();
+        let q = Tensor::from_vec(q_vec, (b, h, s, d), &dev)?.to_dtype(DType::BF16)?;
+        let k = Tensor::from_vec(k_vec, (b, kh, s, d), &dev)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_vec(v_vec, (b, kh, s, d), &dev)?.to_dtype(DType::BF16)?;
+
+        // F32 additive mask must convert to BF16 and STILL honor sliding_window=4
+        let mut mask_vec = vec![0.0f32; b * s];
+        mask_vec[s - 1] = f32::NEG_INFINITY;
+        let mask_f32 = Tensor::from_vec(mask_vec, (b, 1, 1, s), &dev)?;
+        let mask_bf16 = mask_f32.to_dtype(DType::BF16)?;
+
+        let out_f32_mask =
+            MetalFlashAttention.compute_attention(&q, &k, &v, Some(&mask_f32), Some(4))?;
+        let out_bf16_mask =
+            MetalFlashAttention.compute_attention(&q, &k, &v, Some(&mask_bf16), Some(4))?;
+        let out_no_sw =
+            MetalFlashAttention.compute_attention(&q, &k, &v, Some(&mask_bf16), None)?;
+
+        let v_f32 = out_f32_mask
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let v_bf16 = out_bf16_mask
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let v_no_sw = out_no_sw
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(
+            v_f32, v_bf16,
+            "F32 mask must match BF16 mask on MetalFlashAttention"
+        );
+        assert_ne!(
+            v_f32, v_no_sw,
+            "F32 mask must preserve sliding_window instead of dropping it"
+        );
+
+        // Non-unit stride[3] tensor (transposed last two dims) must materialize and succeed
+        let q_transposed = Tensor::zeros((b, h, d, s), DType::BF16, &dev)?.transpose(2, 3)?;
+        assert_ne!(q_transposed.layout().stride()[3], 1);
+        let out_t = MetalFlashAttention.compute_attention(&q_transposed, &k, &v, None, Some(4))?;
+        assert_eq!(out_t.dims(), &[b, h, s, d]);
+
+        // Invalid mask dimensions must return Err
+        let bad_mask = Tensor::zeros((b, h + 1, 1, s), DType::BF16, &dev)?;
+        assert!(
+            MetalFlashAttention
+                .compute_attention(&q, &k, &v, Some(&bad_mask), Some(4))
+                .is_err()
+        );
         Ok(())
     }
 }

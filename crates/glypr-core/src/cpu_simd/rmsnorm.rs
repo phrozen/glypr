@@ -59,7 +59,22 @@ impl CustomOp1 for CpuRMSNormOp {
     fn cpu_fwd(&self, storage: &CpuStorage, layout: &Layout) -> Result<(CpuStorage, Shape)> {
         let shape = layout.shape();
         let dims = shape.dims();
+        if dims.is_empty() {
+            candle_core::bail!("cpu_rmsnorm requires at least 1 dimension");
+        }
         let d = dims[dims.len() - 1];
+        if d == 0 {
+            candle_core::bail!("cpu_rmsnorm requires non-zero last dimension");
+        }
+        if let Some(ref w) = self.weight_f32
+            && w.len() != d
+        {
+            candle_core::bail!(
+                "cpu_rmsnorm weight length {} does not match last dimension {}",
+                w.len(),
+                d
+            );
+        }
         let total_elem = shape.elem_count();
         let num_rows = total_elem / d;
 
@@ -116,5 +131,32 @@ impl CustomOp1 for CpuRMSNormOp {
             }
             _ => candle_core::bail!("cpu_rmsnorm unsupported dtype: {:?}", storage.dtype()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::cpu_rmsnorm;
+    use candle_core::{DType, Device, Tensor};
+
+    #[test]
+    fn test_cpu_rmsnorm_rejects_invalid_shapes_and_weights() {
+        // 0-D scalar tensor
+        let scalar = Tensor::new(1.0f32, &Device::Cpu).unwrap();
+        assert!(cpu_rmsnorm(&scalar, None, 1e-6).is_err());
+
+        // 0-length last dimension
+        let zero_d = Tensor::zeros((2, 0), DType::F32, &Device::Cpu).unwrap();
+        assert!(cpu_rmsnorm(&zero_d, None, 1e-6).is_err());
+
+        // Mismatched weight length
+        let x = Tensor::ones((2, 4), DType::F32, &Device::Cpu).unwrap();
+        let bad_w = Tensor::ones((3,), DType::F32, &Device::Cpu).unwrap();
+        assert!(cpu_rmsnorm(&x, Some(&bad_w), 1e-6).is_err());
+
+        // Valid case works
+        let good_w = Tensor::ones((4,), DType::F32, &Device::Cpu).unwrap();
+        let out = cpu_rmsnorm(&x, Some(&good_w), 1e-6).unwrap();
+        assert_eq!(out.dims(), &[2, 4]);
     }
 }

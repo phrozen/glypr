@@ -22,7 +22,7 @@ static PIPELINE_CACHE: LazyLock<RwLock<HashMap<(usize, &'static str), ComputePip
 fn get_or_compile_fused_library(dev: &MtlDevice) -> Result<Library> {
     let dev_ptr = dev.as_ref() as *const _ as usize;
     {
-        let cache = FUSED_LIB_CACHE.read().unwrap();
+        let cache = FUSED_LIB_CACHE.read().unwrap_or_else(|e| e.into_inner());
         if let Some(lib) = cache.get(&dev_ptr) {
             return Ok(lib.clone());
         }
@@ -34,7 +34,7 @@ fn get_or_compile_fused_library(dev: &MtlDevice) -> Result<Library> {
             candle_core::Error::Metal(format!("Failed to compile fused_ops.metal: {:?}", e).into())
         })?;
 
-    let mut cache = FUSED_LIB_CACHE.write().unwrap();
+    let mut cache = FUSED_LIB_CACHE.write().unwrap_or_else(|e| e.into_inner());
     cache.insert(dev_ptr, library.clone());
     Ok(library)
 }
@@ -42,7 +42,7 @@ fn get_or_compile_fused_library(dev: &MtlDevice) -> Result<Library> {
 fn get_or_compile_m5_library(dev: &MtlDevice) -> Result<Library> {
     let dev_ptr = dev.as_ref() as *const _ as usize;
     {
-        let cache = M5_LIB_CACHE.read().unwrap();
+        let cache = M5_LIB_CACHE.read().unwrap_or_else(|e| e.into_inner());
         if let Some(lib) = cache.get(&dev_ptr) {
             return Ok(lib.clone());
         }
@@ -52,7 +52,7 @@ fn get_or_compile_m5_library(dev: &MtlDevice) -> Result<Library> {
         candle_core::Error::Metal(format!("Failed to compile m5_ops.metal: {:?}", e).into())
     })?;
 
-    let mut cache = M5_LIB_CACHE.write().unwrap();
+    let mut cache = M5_LIB_CACHE.write().unwrap_or_else(|e| e.into_inner());
     cache.insert(dev_ptr, library.clone());
     Ok(library)
 }
@@ -60,7 +60,7 @@ fn get_or_compile_m5_library(dev: &MtlDevice) -> Result<Library> {
 fn get_or_compile_pipeline(dev: &MtlDevice, fn_name: &'static str) -> Result<ComputePipeline> {
     let dev_key = (dev.as_ref() as *const _ as usize, fn_name);
     {
-        let cache = PIPELINE_CACHE.read().unwrap();
+        let cache = PIPELINE_CACHE.read().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = cache.get(&dev_key) {
             return Ok(p.clone());
         }
@@ -80,7 +80,7 @@ fn get_or_compile_pipeline(dev: &MtlDevice, fn_name: &'static str) -> Result<Com
             )
         })?;
 
-    let mut cache = PIPELINE_CACHE.write().unwrap();
+    let mut cache = PIPELINE_CACHE.write().unwrap_or_else(|e| e.into_inner());
     cache.insert(dev_key, pipeline.clone());
     Ok(pipeline)
 }
@@ -88,7 +88,7 @@ fn get_or_compile_pipeline(dev: &MtlDevice, fn_name: &'static str) -> Result<Com
 fn get_or_compile_m5_pipeline(dev: &MtlDevice, fn_name: &'static str) -> Result<ComputePipeline> {
     let dev_key = (dev.as_ref() as *const _ as usize, fn_name);
     {
-        let cache = PIPELINE_CACHE.read().unwrap();
+        let cache = PIPELINE_CACHE.read().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = cache.get(&dev_key) {
             return Ok(p.clone());
         }
@@ -108,37 +108,151 @@ fn get_or_compile_m5_pipeline(dev: &MtlDevice, fn_name: &'static str) -> Result<
             )
         })?;
 
-    let mut cache = PIPELINE_CACHE.write().unwrap();
+    let mut cache = PIPELINE_CACHE.write().unwrap_or_else(|e| e.into_inner());
     cache.insert(dev_key, pipeline.clone());
     Ok(pipeline)
 }
 
+fn metal_device_of<'a>(
+    t: &'a Tensor,
+    fn_name: &str,
+    arg_name: &str,
+) -> Result<&'a candle_core::MetalDevice> {
+    match t.device() {
+        Device::Metal(m) => Ok(m),
+        _ => candle_core::bail!("{fn_name}: {arg_name} requires a Metal device"),
+    }
+}
+
+fn ensure_metal_bf16<'a>(
+    t: &'a Tensor,
+    fn_name: &str,
+    arg_name: &str,
+) -> Result<&'a candle_core::MetalDevice> {
+    let mdev = metal_device_of(t, fn_name, arg_name)?;
+    if t.dtype() != DType::BF16 {
+        candle_core::bail!(
+            "{fn_name}: {arg_name} must have dtype BF16, got {:?}",
+            t.dtype()
+        );
+    }
+    if t.dims().is_empty() {
+        candle_core::bail!("{fn_name}: {arg_name} cannot be 0-D");
+    }
+    Ok(mdev)
+}
+
+fn prepare_metal_weight(
+    w: &Tensor,
+    expected_len: usize,
+    base_device: &Device,
+    fn_name: &str,
+    arg_name: &str,
+) -> Result<Tensor> {
+    if !w.device().same_device(base_device) {
+        candle_core::bail!("{fn_name}: {arg_name} must be on the same Metal device");
+    }
+    if w.dims() != [expected_len] {
+        candle_core::bail!(
+            "{fn_name}: {arg_name} shape {:?} does not match expected [{expected_len}]",
+            w.dims()
+        );
+    }
+    let w = if !w.is_contiguous() {
+        w.contiguous()?
+    } else {
+        w.clone()
+    };
+    if w.dtype() != DType::BF16 {
+        w.to_dtype(DType::BF16)
+    } else {
+        Ok(w)
+    }
+}
+
+fn prepare_metal_rope_table(
+    t: &Tensor,
+    seq_len: usize,
+    head_dim: usize,
+    base_device: &Device,
+    fn_name: &str,
+    arg_name: &str,
+) -> Result<Tensor> {
+    if !t.device().same_device(base_device) {
+        candle_core::bail!("{fn_name}: {arg_name} must be on the same Metal device");
+    }
+    if t.dtype() != DType::BF16 {
+        candle_core::bail!(
+            "{fn_name}: {arg_name} must have dtype BF16, got {:?}",
+            t.dtype()
+        );
+    }
+    let dims = t.dims();
+    let expected_elems = seq_len
+        .checked_mul(head_dim)
+        .ok_or_else(|| candle_core::Error::Msg(format!("{fn_name}: {arg_name} size overflow")))?;
+    if dims.is_empty() || dims[dims.len() - 1] != head_dim || t.elem_count() < expected_elems {
+        candle_core::bail!(
+            "{fn_name}: {arg_name} shape {:?} incompatible with seq_len={seq_len}, head_dim={head_dim}",
+            dims
+        );
+    }
+    if !t.is_contiguous() {
+        t.contiguous()
+    } else {
+        Ok(t.clone())
+    }
+}
+
+fn checked_4d_elems(
+    batch: usize,
+    seq_len: usize,
+    heads: usize,
+    head_dim: usize,
+    fn_name: &str,
+) -> Result<usize> {
+    batch
+        .checked_mul(seq_len)
+        .and_then(|v| v.checked_mul(heads))
+        .and_then(|v| v.checked_mul(head_dim))
+        .ok_or_else(|| candle_core::Error::Msg(format!("{fn_name}: tensor dimension overflow")))
+}
+
 /// Fused Metal RMSNorm executing directly in threadgroup registers via SIMD shuffle reduction.
 pub fn fused_metal_rmsnorm(x: &Tensor, weight: Option<&Tensor>, eps: f64) -> Result<Tensor> {
-    let mdev = match x.device() {
-        Device::Metal(m) => m,
-        _ => candle_core::bail!("fused_metal_rmsnorm requires a Metal device"),
+    let mdev = ensure_metal_bf16(x, "fused_metal_rmsnorm", "x")?;
+    let dims = x.dims();
+    let d = dims[dims.len() - 1];
+    if d == 0 {
+        candle_core::bail!("fused_metal_rmsnorm: last dimension must be > 0");
+    }
+
+    let weight_holder: Option<Tensor> = match weight {
+        Some(w) => Some(prepare_metal_weight(
+            w,
+            d,
+            x.device(),
+            "fused_metal_rmsnorm",
+            "weight",
+        )?),
+        None => None,
     };
+    let weight_ref = weight_holder.as_ref();
 
     let x = if !x.is_contiguous() {
         x.contiguous()?
     } else {
         x.clone()
     };
-    let weight_holder: Option<Tensor> = match weight {
-        Some(w) if !w.is_contiguous() => Some(w.contiguous()?),
-        Some(w) if w.dtype() != DType::BF16 => Some(w.to_dtype(DType::BF16)?),
-        Some(w) => Some(w.clone()),
-        None => None,
-    };
-    let weight_ref = weight_holder.as_ref();
 
     let orig_shape = x.shape();
-    let d = orig_shape.dims()[orig_shape.dims().len() - 1];
     let num_rows = x.elem_count() / d;
+    let out = Tensor::zeros(orig_shape.clone(), DType::BF16, x.device())?;
+    if num_rows == 0 {
+        return Ok(out);
+    }
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_bf16")?;
-    let out = Tensor::zeros(orig_shape.clone(), DType::BF16, x.device())?;
 
     let has_weight: i32 = if weight_ref.is_some() { 1 } else { 0 };
     let d_i32 = d as i32;
@@ -209,10 +323,56 @@ pub fn fused_metal_rmsnorm_residual_add(
     layer_scalar: Option<&Tensor>,
     eps: f64,
 ) -> Result<Tensor> {
-    let mdev = match x.device() {
-        Device::Metal(m) => m,
-        _ => candle_core::bail!("fused_metal_rmsnorm_residual_add requires a Metal device"),
+    let fn_name = "fused_metal_rmsnorm_residual_add";
+    let mdev = ensure_metal_bf16(x, fn_name, "x")?;
+    ensure_metal_bf16(residual, fn_name, "residual")?;
+    if !residual.device().same_device(x.device()) {
+        candle_core::bail!("{fn_name}: residual must be on the same Metal device");
+    }
+    if x.shape() != residual.shape() {
+        candle_core::bail!(
+            "{fn_name}: shape mismatch x={:?} vs residual={:?}",
+            x.dims(),
+            residual.dims()
+        );
+    }
+    let dims = x.dims();
+    let d = dims[dims.len() - 1];
+    if d == 0 {
+        candle_core::bail!("{fn_name}: last dimension must be > 0");
+    }
+
+    let weight_holder: Option<Tensor> = match weight {
+        Some(w) => Some(prepare_metal_weight(w, d, x.device(), fn_name, "weight")?),
+        None => None,
     };
+    let weight_ref = weight_holder.as_ref();
+
+    let scalar_holder: Option<Tensor> = match layer_scalar {
+        Some(s) => {
+            if !s.device().same_device(x.device()) {
+                candle_core::bail!("{fn_name}: layer_scalar must be on the same Metal device");
+            }
+            if s.elem_count() != 1 {
+                candle_core::bail!(
+                    "{fn_name}: layer_scalar must have 1 element, got shape {:?}",
+                    s.dims()
+                );
+            }
+            let s = if !s.is_contiguous() {
+                s.contiguous()?
+            } else {
+                s.clone()
+            };
+            Some(if s.dtype() != DType::BF16 {
+                s.to_dtype(DType::BF16)?
+            } else {
+                s
+            })
+        }
+        None => None,
+    };
+    let scalar_ref = scalar_holder.as_ref();
 
     let x = if !x.is_contiguous() {
         x.contiguous()?
@@ -225,28 +385,14 @@ pub fn fused_metal_rmsnorm_residual_add(
         residual.clone()
     };
 
-    let weight_holder: Option<Tensor> = match weight {
-        Some(w) if !w.is_contiguous() => Some(w.contiguous()?),
-        Some(w) if w.dtype() != DType::BF16 => Some(w.to_dtype(DType::BF16)?),
-        Some(w) => Some(w.clone()),
-        None => None,
-    };
-    let weight_ref = weight_holder.as_ref();
-
-    let scalar_holder: Option<Tensor> = match layer_scalar {
-        Some(s) if !s.is_contiguous() => Some(s.contiguous()?),
-        Some(s) if s.dtype() != DType::BF16 => Some(s.to_dtype(DType::BF16)?),
-        Some(s) => Some(s.clone()),
-        None => None,
-    };
-    let scalar_ref = scalar_holder.as_ref();
-
     let orig_shape = x.shape();
-    let d = orig_shape.dims()[orig_shape.dims().len() - 1];
     let num_rows = x.elem_count() / d;
+    let out = Tensor::zeros(orig_shape.clone(), DType::BF16, x.device())?;
+    if num_rows == 0 {
+        return Ok(out);
+    }
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_residual_add_bf16")?;
-    let out = Tensor::zeros(orig_shape.clone(), DType::BF16, x.device())?;
 
     let has_weight: i32 = if weight_ref.is_some() { 1 } else { 0 };
     let has_scale: i32 = if scalar_ref.is_some() { 1 } else { 0 };
@@ -342,43 +488,43 @@ pub fn fused_metal_qk_rmsnorm_rope_transpose(
     head_dim: usize,
     eps: f64,
 ) -> Result<Tensor> {
-    let mdev = match x.device() {
-        Device::Metal(m) => m,
-        _ => candle_core::bail!("fused_metal_qk_rmsnorm_rope_transpose requires a Metal device"),
-    };
+    let fn_name = "fused_metal_qk_rmsnorm_rope_transpose";
+    let mdev = ensure_metal_bf16(x, fn_name, "x")?;
+    if head_dim == 0 || !head_dim.is_multiple_of(2) {
+        candle_core::bail!("{fn_name}: head_dim must be a positive even integer, got {head_dim}");
+    }
+    if num_heads == 0 {
+        candle_core::bail!("{fn_name}: num_heads must be > 0");
+    }
+    let expected_elems = checked_4d_elems(batch, seq_len, num_heads, head_dim, fn_name)?;
+    if x.elem_count() != expected_elems {
+        candle_core::bail!(
+            "{fn_name}: x elem_count {} does not match batch*seq*heads*head_dim = {}",
+            x.elem_count(),
+            expected_elems
+        );
+    }
+
+    let weight = prepare_metal_weight(weight, head_dim, x.device(), fn_name, "weight")?;
+    let cos = prepare_metal_rope_table(cos, seq_len, head_dim, x.device(), fn_name, "cos")?;
+    let sin = prepare_metal_rope_table(sin, seq_len, head_dim, x.device(), fn_name, "sin")?;
 
     let x = if !x.is_contiguous() {
         x.contiguous()?
     } else {
         x.clone()
     };
-    let weight = if !weight.is_contiguous() {
-        weight.contiguous()?
-    } else {
-        weight.clone()
-    };
-    let weight = if weight.dtype() != DType::BF16 {
-        weight.to_dtype(DType::BF16)?
-    } else {
-        weight
-    };
-    let cos = if !cos.is_contiguous() {
-        cos.contiguous()?
-    } else {
-        cos.clone()
-    };
-    let sin = if !sin.is_contiguous() {
-        sin.contiguous()?
-    } else {
-        sin.clone()
-    };
 
-    let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_rope_transpose_bf16")?;
     let out = Tensor::zeros(
         (batch, num_heads, seq_len, head_dim),
         DType::BF16,
         x.device(),
     )?;
+    if batch == 0 || seq_len == 0 {
+        return Ok(out);
+    }
+
+    let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_rope_transpose_bf16")?;
 
     let eps_f32 = eps as f32;
     let s_i32 = seq_len as i32;
@@ -460,30 +606,48 @@ pub fn fused_metal_v_rmsnorm_transpose(
     head_dim: usize,
     eps: f64,
 ) -> Result<Tensor> {
-    let mdev = match x.device() {
-        Device::Metal(m) => m,
-        _ => candle_core::bail!("fused_metal_v_rmsnorm_transpose requires a Metal device"),
+    let fn_name = "fused_metal_v_rmsnorm_transpose";
+    let mdev = ensure_metal_bf16(x, fn_name, "x")?;
+    if head_dim == 0 || num_heads == 0 {
+        candle_core::bail!("{fn_name}: num_heads and head_dim must be > 0");
+    }
+    let expected_elems = checked_4d_elems(batch, seq_len, num_heads, head_dim, fn_name)?;
+    if x.elem_count() != expected_elems {
+        candle_core::bail!(
+            "{fn_name}: x elem_count {} does not match batch*seq*heads*head_dim = {}",
+            x.elem_count(),
+            expected_elems
+        );
+    }
+
+    let weight_holder: Option<Tensor> = match weight {
+        Some(w) => Some(prepare_metal_weight(
+            w,
+            head_dim,
+            x.device(),
+            fn_name,
+            "weight",
+        )?),
+        None => None,
     };
+    let weight_ref = weight_holder.as_ref();
 
     let x = if !x.is_contiguous() {
         x.contiguous()?
     } else {
         x.clone()
     };
-    let weight_holder: Option<Tensor> = match weight {
-        Some(w) if !w.is_contiguous() => Some(w.contiguous()?),
-        Some(w) if w.dtype() != DType::BF16 => Some(w.to_dtype(DType::BF16)?),
-        Some(w) => Some(w.clone()),
-        None => None,
-    };
-    let weight_ref = weight_holder.as_ref();
 
-    let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_transpose_bf16")?;
     let out = Tensor::zeros(
         (batch, num_heads, seq_len, head_dim),
         DType::BF16,
         x.device(),
     )?;
+    if batch == 0 || seq_len == 0 {
+        return Ok(out);
+    }
+
+    let pipeline = get_or_compile_pipeline(mdev.metal_device(), "rms_norm_transpose_bf16")?;
 
     let eps_f32 = eps as f32;
     let s_i32 = seq_len as i32;
@@ -560,30 +724,34 @@ pub fn fused_metal_ple_scale_rmsnorm_transpose(
     num_layers: usize,
     d: usize,
 ) -> Result<Tensor> {
-    let mdev = match x.device() {
-        Device::Metal(m) => m,
-        _ => candle_core::bail!("fused_metal_ple_scale_rmsnorm_transpose requires a Metal device"),
-    };
+    let fn_name = "fused_metal_ple_scale_rmsnorm_transpose";
+    let mdev = ensure_metal_bf16(x, fn_name, "x")?;
+    if d == 0 || num_layers == 0 {
+        candle_core::bail!("{fn_name}: num_layers and d must be > 0");
+    }
+    let expected_elems = checked_4d_elems(batch, seq_len, num_layers, d, fn_name)?;
+    if x.elem_count() != expected_elems {
+        candle_core::bail!(
+            "{fn_name}: x elem_count {} does not match batch*seq*layers*d = {}",
+            x.elem_count(),
+            expected_elems
+        );
+    }
 
+    let weight = prepare_metal_weight(weight, d, x.device(), fn_name, "weight")?;
     let x = if !x.is_contiguous() {
         x.contiguous()?
     } else {
         x.clone()
     };
-    let weight = if !weight.is_contiguous() {
-        weight.contiguous()?
-    } else {
-        weight.clone()
-    };
-    let weight = if weight.dtype() != DType::BF16 {
-        weight.to_dtype(DType::BF16)?
-    } else {
-        weight
-    };
+
+    let out = Tensor::zeros((num_layers, batch, seq_len, d), DType::BF16, x.device())?;
+    if batch == 0 || seq_len == 0 {
+        return Ok(out);
+    }
 
     let pipeline =
         get_or_compile_pipeline(mdev.metal_device(), "ple_scale_rms_norm_transpose_bf16")?;
-    let out = Tensor::zeros((num_layers, batch, seq_len, d), DType::BF16, x.device())?;
 
     let scale_f32 = scale as f32;
     let eps_f32 = eps as f32;
@@ -656,10 +824,22 @@ pub fn fused_metal_ple_geglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
 }
 
 fn fused_metal_geglu_impl(gate: &Tensor, up: &Tensor, kernel_name: &'static str) -> Result<Tensor> {
-    let mdev = match gate.device() {
-        Device::Metal(m) => m,
-        _ => candle_core::bail!("{} requires a Metal device", kernel_name),
-    };
+    let mdev = ensure_metal_bf16(gate, kernel_name, "gate")?;
+    ensure_metal_bf16(up, kernel_name, "up")?;
+    if !up.device().same_device(gate.device()) {
+        candle_core::bail!("{kernel_name}: up must be on the same Metal device");
+    }
+    if gate.shape() != up.shape() {
+        candle_core::bail!(
+            "{kernel_name}: shape mismatch gate={:?} vs up={:?}",
+            gate.dims(),
+            up.dims()
+        );
+    }
+    let dims = gate.dims();
+    if dims[dims.len() - 1] == 0 {
+        candle_core::bail!("{kernel_name}: last dimension must be > 0");
+    }
 
     let gate = if !gate.is_contiguous() {
         gate.contiguous()?
@@ -673,8 +853,11 @@ fn fused_metal_geglu_impl(gate: &Tensor, up: &Tensor, kernel_name: &'static str)
     };
 
     let total_elements = gate.elem_count();
-    let pipeline = get_or_compile_pipeline(mdev.metal_device(), kernel_name)?;
     let out = Tensor::zeros(gate.shape().clone(), DType::BF16, gate.device())?;
+    if total_elements == 0 {
+        return Ok(out);
+    }
+    let pipeline = get_or_compile_pipeline(mdev.metal_device(), kernel_name)?;
     let total_i32 = total_elements as i32;
 
     {
@@ -729,30 +912,33 @@ fn fused_metal_geglu_impl(gate: &Tensor, up: &Tensor, kernel_name: &'static str)
 
 /// Fused Metal GeGLU reading directly from a concatenated `[..., 2 * D]` `gate_up` projection tensor.
 pub fn fused_metal_geglu_gate_up(gate_up: &Tensor) -> Result<Tensor> {
-    let mdev = match gate_up.device() {
-        Device::Metal(m) => m,
-        _ => candle_core::bail!("fused_metal_geglu_gate_up requires a Metal device"),
-    };
+    let fn_name = "fused_metal_geglu_gate_up";
+    let mdev = ensure_metal_bf16(gate_up, fn_name, "gate_up")?;
+
+    let dims = gate_up.dims();
+    let last_dim = dims[dims.len() - 1];
+    if last_dim == 0 || !last_dim.is_multiple_of(2) {
+        candle_core::bail!(
+            "{fn_name} expects positive last dim divisible by 2, got {:?}",
+            dims
+        );
+    }
 
     let gate_up = if !gate_up.is_contiguous() {
         gate_up.contiguous()?
     } else {
         gate_up.clone()
     };
-    let dims = gate_up.dims();
-    if dims.is_empty() || dims[dims.len() - 1] % 2 != 0 {
-        candle_core::bail!(
-            "fused_metal_geglu_gate_up expects last dim divisible by 2, got {:?}",
-            dims
-        );
-    }
-    let d = dims[dims.len() - 1] / 2;
+    let d = last_dim / 2;
     let mut out_dims = dims.to_vec();
     *out_dims.last_mut().unwrap() = d;
 
     let total_elements = gate_up.elem_count() / 2;
-    let pipeline = get_or_compile_pipeline(mdev.metal_device(), "geglu_gate_up_bf16")?;
     let out = Tensor::zeros(out_dims, DType::BF16, gate_up.device())?;
+    if total_elements == 0 {
+        return Ok(out);
+    }
+    let pipeline = get_or_compile_pipeline(mdev.metal_device(), "geglu_gate_up_bf16")?;
     let d_i32 = d as i32;
 
     {
@@ -817,55 +1003,48 @@ pub fn fused_metal_qkv_rmsnorm_rope_transpose(
     k_eps: f64,
     v_eps: f64,
 ) -> Result<(Tensor, Tensor, Tensor)> {
-    let mdev = match qkv.device() {
-        Device::Metal(m) => m,
-        _ => candle_core::bail!("fused_metal_qkv_rmsnorm_rope_transpose requires a Metal device"),
+    let fn_name = "fused_metal_qkv_rmsnorm_rope_transpose";
+    let mdev = ensure_metal_bf16(qkv, fn_name, "qkv")?;
+    if head_dim == 0 || !head_dim.is_multiple_of(2) {
+        candle_core::bail!("{fn_name}: head_dim must be a positive even integer, got {head_dim}");
+    }
+    if num_q_heads == 0 || num_kv_heads == 0 {
+        candle_core::bail!("{fn_name}: num_q_heads and num_kv_heads must be > 0");
+    }
+    let total_heads = num_q_heads
+        .checked_add(2 * num_kv_heads)
+        .ok_or_else(|| candle_core::Error::Msg(format!("{fn_name}: head count overflow")))?;
+    let expected_elems = checked_4d_elems(batch, seq_len, total_heads, head_dim, fn_name)?;
+    if qkv.elem_count() != expected_elems {
+        candle_core::bail!(
+            "{fn_name}: qkv elem_count {} does not match batch*seq*heads*head_dim = {}",
+            qkv.elem_count(),
+            expected_elems
+        );
+    }
+
+    let q_weight = prepare_metal_weight(q_weight, head_dim, qkv.device(), fn_name, "q_weight")?;
+    let k_weight = prepare_metal_weight(k_weight, head_dim, qkv.device(), fn_name, "k_weight")?;
+    let v_weight_holder: Option<Tensor> = match v_weight {
+        Some(w) => Some(prepare_metal_weight(
+            w,
+            head_dim,
+            qkv.device(),
+            fn_name,
+            "v_weight",
+        )?),
+        None => None,
     };
+    let v_weight_ref = v_weight_holder.as_ref();
+    let cos = prepare_metal_rope_table(cos, seq_len, head_dim, qkv.device(), fn_name, "cos")?;
+    let sin = prepare_metal_rope_table(sin, seq_len, head_dim, qkv.device(), fn_name, "sin")?;
 
     let qkv = if !qkv.is_contiguous() {
         qkv.contiguous()?
     } else {
         qkv.clone()
     };
-    let q_weight = if !q_weight.is_contiguous() {
-        q_weight.contiguous()?
-    } else {
-        q_weight.clone()
-    };
-    let q_weight = if q_weight.dtype() != DType::BF16 {
-        q_weight.to_dtype(DType::BF16)?
-    } else {
-        q_weight
-    };
-    let k_weight = if !k_weight.is_contiguous() {
-        k_weight.contiguous()?
-    } else {
-        k_weight.clone()
-    };
-    let k_weight = if k_weight.dtype() != DType::BF16 {
-        k_weight.to_dtype(DType::BF16)?
-    } else {
-        k_weight
-    };
-    let v_weight_holder: Option<Tensor> = match v_weight {
-        Some(w) if !w.is_contiguous() => Some(w.contiguous()?),
-        Some(w) if w.dtype() != DType::BF16 => Some(w.to_dtype(DType::BF16)?),
-        Some(w) => Some(w.clone()),
-        None => None,
-    };
-    let v_weight_ref = v_weight_holder.as_ref();
-    let cos = if !cos.is_contiguous() {
-        cos.contiguous()?
-    } else {
-        cos.clone()
-    };
-    let sin = if !sin.is_contiguous() {
-        sin.contiguous()?
-    } else {
-        sin.clone()
-    };
 
-    let pipeline = get_or_compile_pipeline(mdev.metal_device(), "qkv_rmsnorm_rope_transpose_bf16")?;
     let q_out = Tensor::zeros(
         (batch, num_q_heads, seq_len, head_dim),
         DType::BF16,
@@ -881,6 +1060,11 @@ pub fn fused_metal_qkv_rmsnorm_rope_transpose(
         DType::BF16,
         qkv.device(),
     )?;
+    if batch == 0 || seq_len == 0 {
+        return Ok((q_out, k_out, v_out));
+    }
+
+    let pipeline = get_or_compile_pipeline(mdev.metal_device(), "qkv_rmsnorm_rope_transpose_bf16")?;
 
     let q_eps_f32 = q_eps as f32;
     let k_eps_f32 = k_eps as f32;
@@ -1007,60 +1191,50 @@ pub fn fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
     head_dim: usize,
     eps: f64,
 ) -> Result<(Tensor, Tensor, Tensor)> {
-    let mdev = match qkv.device() {
-        Device::Metal(m) => m,
-        _ => candle_core::bail!(
-            "fused_metal_vision_qkv_rmsnorm_rope2d_transpose requires a Metal device"
-        ),
+    let fn_name = "fused_metal_vision_qkv_rmsnorm_rope2d_transpose";
+    let mdev = ensure_metal_bf16(qkv, fn_name, "qkv")?;
+    if head_dim == 0 || !head_dim.is_multiple_of(4) {
+        candle_core::bail!(
+            "{fn_name}: head_dim must be a positive multiple of 4 for 2D Vision RoPE, got {head_dim}"
+        );
+    }
+    if num_heads == 0 {
+        candle_core::bail!("{fn_name}: num_heads must be > 0");
+    }
+    let total_heads = 3usize
+        .checked_mul(num_heads)
+        .ok_or_else(|| candle_core::Error::Msg(format!("{fn_name}: head count overflow")))?;
+    let expected_elems = checked_4d_elems(batch, seq_len, total_heads, head_dim, fn_name)?;
+    if qkv.elem_count() != expected_elems {
+        candle_core::bail!(
+            "{fn_name}: qkv elem_count {} does not match batch*seq*3*heads*head_dim = {}",
+            qkv.elem_count(),
+            expected_elems
+        );
+    }
+
+    let q_weight = prepare_metal_weight(q_weight, head_dim, qkv.device(), fn_name, "q_weight")?;
+    let k_weight = prepare_metal_weight(k_weight, head_dim, qkv.device(), fn_name, "k_weight")?;
+    let v_weight_holder: Option<Tensor> = match v_weight {
+        Some(w) => Some(prepare_metal_weight(
+            w,
+            head_dim,
+            qkv.device(),
+            fn_name,
+            "v_weight",
+        )?),
+        None => None,
     };
+    let v_weight_ref = v_weight_holder.as_ref();
+    let cos = prepare_metal_rope_table(cos, seq_len, head_dim, qkv.device(), fn_name, "cos")?;
+    let sin = prepare_metal_rope_table(sin, seq_len, head_dim, qkv.device(), fn_name, "sin")?;
 
     let qkv = if !qkv.is_contiguous() {
         qkv.contiguous()?
     } else {
         qkv.clone()
     };
-    let q_weight = if !q_weight.is_contiguous() {
-        q_weight.contiguous()?
-    } else {
-        q_weight.clone()
-    };
-    let q_weight = if q_weight.dtype() != DType::BF16 {
-        q_weight.to_dtype(DType::BF16)?
-    } else {
-        q_weight
-    };
-    let k_weight = if !k_weight.is_contiguous() {
-        k_weight.contiguous()?
-    } else {
-        k_weight.clone()
-    };
-    let k_weight = if k_weight.dtype() != DType::BF16 {
-        k_weight.to_dtype(DType::BF16)?
-    } else {
-        k_weight
-    };
-    let v_weight_holder: Option<Tensor> = match v_weight {
-        Some(w) if !w.is_contiguous() => Some(w.contiguous()?),
-        Some(w) if w.dtype() != DType::BF16 => Some(w.to_dtype(DType::BF16)?),
-        Some(w) => Some(w.clone()),
-        None => None,
-    };
-    let v_weight_ref = v_weight_holder.as_ref();
-    let cos = if !cos.is_contiguous() {
-        cos.contiguous()?
-    } else {
-        cos.clone()
-    };
-    let sin = if !sin.is_contiguous() {
-        sin.contiguous()?
-    } else {
-        sin.clone()
-    };
 
-    let pipeline = get_or_compile_pipeline(
-        mdev.metal_device(),
-        "vision_qkv_rmsnorm_rope2d_transpose_bf16",
-    )?;
     let q_out = Tensor::zeros(
         (batch, num_heads, seq_len, head_dim),
         DType::BF16,
@@ -1075,6 +1249,14 @@ pub fn fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
         (batch, num_heads, seq_len, head_dim),
         DType::BF16,
         qkv.device(),
+    )?;
+    if batch == 0 || seq_len == 0 {
+        return Ok((q_out, k_out, v_out));
+    }
+
+    let pipeline = get_or_compile_pipeline(
+        mdev.metal_device(),
+        "vision_qkv_rmsnorm_rope2d_transpose_bf16",
     )?;
 
     let eps_f32 = eps as f32;
@@ -1183,10 +1365,24 @@ pub fn fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
 
 /// Fused Metal Audio GLU + 5-Tap Causal Depthwise Conv1D in a single dispatch.
 pub fn fused_metal_audio_glu_causal_dwconv5(pw1: &Tensor, dw_weight: &Tensor) -> Result<Tensor> {
-    let mdev = match pw1.device() {
-        Device::Metal(m) => m,
-        _ => candle_core::bail!("fused_metal_audio_glu_causal_dwconv5 requires a Metal device"),
-    };
+    let fn_name = "fused_metal_audio_glu_causal_dwconv5";
+    let mdev = ensure_metal_bf16(pw1, fn_name, "pw1")?;
+    if !dw_weight.device().same_device(pw1.device()) {
+        candle_core::bail!("{fn_name}: dw_weight must be on the same Metal device");
+    }
+
+    let (batch, seq_len, two_c) = pw1.dims3()?;
+    if two_c == 0 || !two_c.is_multiple_of(2) {
+        candle_core::bail!("{fn_name}: pw1 last dim must be positive and even, got {two_c}");
+    }
+    let c = two_c / 2;
+    if dw_weight.elem_count() != c * 5 {
+        candle_core::bail!(
+            "{fn_name}: dw_weight elem_count {} does not match c*5 = {}",
+            dw_weight.elem_count(),
+            c * 5
+        );
+    }
 
     let pw1 = if !pw1.is_contiguous() {
         pw1.contiguous()?
@@ -1204,12 +1400,13 @@ pub fn fused_metal_audio_glu_causal_dwconv5(pw1: &Tensor, dw_weight: &Tensor) ->
         dw_weight
     };
 
-    let (batch, seq_len, two_c) = pw1.dims3()?;
-    let c = two_c / 2;
+    let out = Tensor::zeros((batch, seq_len, c), DType::BF16, pw1.device())?;
     let total_elements = batch * seq_len * c;
+    if total_elements == 0 {
+        return Ok(out);
+    }
 
     let pipeline = get_or_compile_pipeline(mdev.metal_device(), "audio_glu_causal_dwconv5_bf16")?;
-    let out = Tensor::zeros((batch, seq_len, c), DType::BF16, pw1.device())?;
 
     let b_i32 = batch as i32;
     let s_i32 = seq_len as i32;
@@ -1274,10 +1471,57 @@ pub fn fused_metal_q8_0_matmul(
     out_dim: usize,
     in_dim: usize,
 ) -> Result<Tensor> {
-    let mdev = match x.device() {
-        Device::Metal(m) => m,
-        _ => candle_core::bail!("fused_metal_q8_0_matmul requires a Metal device"),
-    };
+    let fn_name = "fused_metal_q8_0_matmul";
+    let mdev = metal_device_of(x, fn_name, "x")?;
+    if !weight_q8_bytes.device().same_device(x.device()) {
+        candle_core::bail!("{fn_name}: weight_q8_bytes must be on the same Metal device");
+    }
+    if weight_q8_bytes.dtype() != DType::U8 {
+        candle_core::bail!(
+            "{fn_name}: weight_q8_bytes must have dtype U8, got {:?}",
+            weight_q8_bytes.dtype()
+        );
+    }
+    if in_dim == 0 || !in_dim.is_multiple_of(32) {
+        candle_core::bail!("{fn_name}: in_dim must be a positive multiple of 32, got {in_dim}");
+    }
+    if out_dim == 0 {
+        candle_core::bail!("{fn_name}: out_dim must be > 0");
+    }
+
+    let x_dims = x.dims();
+    if x_dims.is_empty() || x_dims[x_dims.len() - 1] != in_dim {
+        candle_core::bail!(
+            "{fn_name} shape mismatch: x={:?}, expected in_dim={}",
+            x_dims,
+            in_dim
+        );
+    }
+    let expected_q8_bytes = out_dim
+        .checked_mul((in_dim / 32) * 34)
+        .ok_or_else(|| candle_core::Error::Msg(format!("{fn_name}: Q8_0 byte size overflow")))?;
+    if weight_q8_bytes.elem_count() != expected_q8_bytes {
+        candle_core::bail!(
+            "{fn_name}: weight_q8_bytes elem_count {} does not match expected {}",
+            weight_q8_bytes.elem_count(),
+            expected_q8_bytes
+        );
+    }
+
+    let dtype = x.dtype();
+    if !matches!(dtype, DType::BF16 | DType::F32 | DType::F16) {
+        candle_core::bail!(
+            "{fn_name}: unsupported activation dtype {:?} (expected BF16, F32, or F16)",
+            dtype
+        );
+    }
+
+    let m = x.elem_count() / in_dim;
+    let mut out_dims = x_dims.to_vec();
+    *out_dims.last_mut().unwrap() = out_dim;
+    if m == 0 {
+        return Tensor::zeros(out_dims, dtype, x.device());
+    }
 
     let x = if !x.is_contiguous() {
         x.contiguous()?
@@ -1290,19 +1534,6 @@ pub fn fused_metal_q8_0_matmul(
         weight_q8_bytes.clone()
     };
 
-    let x_dims = x.dims();
-    if x_dims.is_empty() || x_dims[x_dims.len() - 1] != in_dim {
-        candle_core::bail!(
-            "fused_metal_q8_0_matmul shape mismatch: x={:?}, expected in_dim={}",
-            x_dims,
-            in_dim
-        );
-    }
-    let m = x.elem_count() / in_dim;
-    let mut out_dims = x_dims.to_vec();
-    *out_dims.last_mut().unwrap() = out_dim;
-
-    let dtype = x.dtype();
     let is_mv = m == 1;
     let use_m5 = !is_mv
         && dtype == DType::BF16
@@ -1988,6 +2219,97 @@ mod tests {
                 );
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fused_metal_kernels_reject_invalid_inputs() -> Result<()> {
+        if !is_metal_device_available() {
+            return Ok(());
+        }
+        let dev = Device::new_metal(0)?;
+
+        // 1. Wrong dtype (F32) rejected cleanly
+        let f32_x = Tensor::ones((1, 4, 8), DType::F32, &dev)?;
+        assert!(fused_metal_rmsnorm(&f32_x, None, 1e-6).is_err());
+        assert!(fused_metal_geglu(&f32_x, &f32_x).is_err());
+        assert!(fused_metal_geglu_gate_up(&f32_x).is_err());
+
+        // 2. 0-D and 0-len last dim rejected cleanly
+        let scalar = Tensor::new(1.0f32, &dev)?.to_dtype(DType::BF16)?;
+        assert!(fused_metal_rmsnorm(&scalar, None, 1e-6).is_err());
+        let zero_d = Tensor::zeros((2, 0), DType::BF16, &dev)?;
+        assert!(fused_metal_rmsnorm(&zero_d, None, 1e-6).is_err());
+
+        // 3. Shape mismatches rejected cleanly
+        let a = Tensor::ones((2, 8), DType::BF16, &dev)?;
+        let b = Tensor::ones((2, 16), DType::BF16, &dev)?;
+        assert!(fused_metal_rmsnorm_residual_add(&a, &b, None, None, 1e-6).is_err());
+        assert!(fused_metal_geglu(&a, &b).is_err());
+        let bad_w = Tensor::ones((4,), DType::BF16, &dev)?;
+        assert!(fused_metal_rmsnorm(&a, Some(&bad_w), 1e-6).is_err());
+
+        // 4. Odd head_dim rejected for 1D RoPE; non-multiple-of-4 rejected for 2D Vision RoPE
+        let odd_d = 3usize;
+        let qk_in = Tensor::ones((1, 2, 1, odd_d), DType::BF16, &dev)?;
+        let qk_w = Tensor::ones((odd_d,), DType::BF16, &dev)?;
+        let cos_odd = Tensor::ones((1, 1, 2, odd_d), DType::BF16, &dev)?;
+        let sin_odd = Tensor::ones((1, 1, 2, odd_d), DType::BF16, &dev)?;
+        assert!(
+            fused_metal_qk_rmsnorm_rope_transpose(
+                &qk_in, &qk_w, &cos_odd, &sin_odd, 1, 2, 1, odd_d, 1e-6
+            )
+            .is_err()
+        );
+        let odd_qkv_in = Tensor::ones((1, 2, 3 * odd_d), DType::BF16, &dev)?;
+        assert!(
+            fused_metal_qkv_rmsnorm_rope_transpose(
+                &odd_qkv_in,
+                &qk_w,
+                &qk_w,
+                None,
+                &cos_odd,
+                &sin_odd,
+                1,
+                2,
+                1,
+                1,
+                odd_d,
+                1e-6,
+                1e-6,
+                1e-6
+            )
+            .is_err()
+        );
+
+        let vis_d = 6usize; // even, but not divisible by 4!
+        let vis_qkv = Tensor::ones((1, 2, 3 * vis_d), DType::BF16, &dev)?;
+        let vis_w = Tensor::ones((vis_d,), DType::BF16, &dev)?;
+        let cos_vis = Tensor::ones((1, 1, 2, vis_d), DType::BF16, &dev)?;
+        let sin_vis = Tensor::ones((1, 1, 2, vis_d), DType::BF16, &dev)?;
+        assert!(
+            fused_metal_vision_qkv_rmsnorm_rope2d_transpose(
+                &vis_qkv, &vis_w, &vis_w, None, &cos_vis, &sin_vis, 1, 2, 1, vis_d, 1e-6
+            )
+            .is_err()
+        );
+
+        // 5. F32 cos/sin rejected cleanly
+        let cos_f32 = Tensor::ones((1, 1, 2, 8), DType::F32, &dev)?;
+        let qk_in_8 = Tensor::ones((1, 2, 8), DType::BF16, &dev)?;
+        let w8 = Tensor::ones((8,), DType::BF16, &dev)?;
+        assert!(
+            fused_metal_qk_rmsnorm_rope_transpose(
+                &qk_in_8, &w8, &cos_f32, &cos_f32, 1, 2, 1, 8, 1e-6
+            )
+            .is_err()
+        );
+
+        // 6. Q8_0 matmul rejects in_dim not divisible by 32
+        let bad_q8 = Tensor::zeros((4, 34), DType::U8, &dev)?;
+        let bad_x = Tensor::ones((1, 16), DType::BF16, &dev)?;
+        assert!(fused_metal_q8_0_matmul(&bad_q8, &bad_x, 4, 16).is_err());
 
         Ok(())
     }

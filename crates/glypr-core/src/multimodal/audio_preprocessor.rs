@@ -327,15 +327,26 @@ pub fn compute_audio_total_tokens(samples_len: usize) -> usize {
 /// - Exact `32767.0` divisor for 16-bit mono 16kHz PCM to preserve bit-exact golden parity
 pub fn decode_wav_reader<R: std::io::Read>(mut reader: hound::WavReader<R>) -> Result<Vec<f32>> {
     let spec = reader.spec();
+    if spec.sample_rate == 0 {
+        bail!("Invalid WAV sample rate: 0");
+    }
     let channels = spec.channels.max(1) as usize;
 
     let raw_interleaved: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader
-            .samples::<f32>()
-            .collect::<std::result::Result<Vec<f32>, _>>()
-            .map_err(|e| anyhow::anyhow!("Failed to read float WAV samples: {e}"))?,
+        hound::SampleFormat::Float => {
+            if spec.bits_per_sample != 32 {
+                bail!("Unsupported float WAV bit depth: {}", spec.bits_per_sample);
+            }
+            reader
+                .samples::<f32>()
+                .collect::<std::result::Result<Vec<f32>, _>>()
+                .map_err(|e| anyhow::anyhow!("Failed to read float WAV samples: {e}"))?
+        }
         hound::SampleFormat::Int => {
             let bits = spec.bits_per_sample;
+            if ![8, 16, 24, 32].contains(&bits) {
+                bail!("Unsupported WAV bit depth: {}", bits);
+            }
             if bits <= 16 {
                 let scale = if bits == 8 { 127.0f32 } else { 32767.0f32 };
                 reader
@@ -373,14 +384,62 @@ pub fn decode_wav_reader<R: std::io::Read>(mut reader: hound::WavReader<R>) -> R
         let src_rate = spec.sample_rate as f64;
         let dst_rate = AUDIO_SAMPLE_RATE as f64;
         let ratio = src_rate / dst_rate;
-        let out_len = ((mono.len() as f64) / ratio).round() as usize;
+
+        // Apply zero-phase windowed-sinc FIR anti-aliasing low-pass filter before downsampling.
+        let filtered_storage: Vec<f32>;
+        let src_samples: &[f32] = if src_rate > dst_rate {
+            const HALF_TAPS: isize = 15; // 31-tap symmetric FIR
+            const NUM_TAPS: usize = (2 * HALF_TAPS + 1) as usize;
+            let fc = 0.45 * (dst_rate / src_rate);
+            let m = (2 * HALF_TAPS) as f64;
+            let mut kernel = [0.0f64; NUM_TAPS];
+            let mut sum = 0.0f64;
+            for (idx, k) in (-HALF_TAPS..=HALF_TAPS).enumerate() {
+                let n = (k + HALF_TAPS) as f64;
+                let sinc = if k == 0 {
+                    2.0 * fc
+                } else {
+                    let x = std::f64::consts::PI * (k as f64);
+                    (2.0 * fc * x).sin() / x
+                };
+                // Blackman window for strong stopband attenuation
+                let win = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * n / m).cos()
+                    + 0.08 * (4.0 * std::f64::consts::PI * n / m).cos();
+                let w = sinc * win;
+                kernel[idx] = w;
+                sum += w;
+            }
+            let inv_sum = 1.0 / sum;
+            let mut kernel_f32 = [0.0f32; NUM_TAPS];
+            for (dst, &src) in kernel_f32.iter_mut().zip(kernel.iter()) {
+                *dst = (src * inv_sum) as f32;
+            }
+
+            let max_idx = (mono.len() - 1) as isize;
+            let mut out = Vec::with_capacity(mono.len());
+            for i in 0..mono.len() {
+                let mut acc = 0.0f32;
+                let center = i as isize;
+                for (k_idx, &coef) in kernel_f32.iter().enumerate() {
+                    let s_idx = (center + (k_idx as isize) - HALF_TAPS).clamp(0, max_idx) as usize;
+                    acc += mono[s_idx] * coef;
+                }
+                out.push(acc);
+            }
+            filtered_storage = out;
+            &filtered_storage
+        } else {
+            &mono
+        };
+
+        let out_len = (((src_samples.len() as f64) / ratio).round() as usize).max(1);
         let mut resampled = Vec::with_capacity(out_len);
         for i in 0..out_len {
             let src_pos = (i as f64) * ratio;
             let idx = src_pos.floor() as usize;
             let frac = (src_pos - (idx as f64)) as f32;
-            let s0 = mono[idx.min(mono.len() - 1)];
-            let s1 = mono[(idx + 1).min(mono.len() - 1)];
+            let s0 = src_samples[idx.min(src_samples.len() - 1)];
+            let s1 = src_samples[(idx + 1).min(src_samples.len() - 1)];
             resampled.push(s0 + frac * (s1 - s0));
         }
         Ok(resampled)
@@ -490,6 +549,101 @@ mod tests {
             max_err < 1e-6,
             "Twiddle drift exceeded bound: {:e}",
             max_err
+        );
+    }
+
+    fn make_raw_pcm_wav(
+        sample_rate: u32,
+        channels: u16,
+        bits_per_sample: u16,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let bytes_per_sample = bits_per_sample.div_ceil(8).max(1);
+        let block_align = channels * bytes_per_sample;
+        let byte_rate = sample_rate * (block_align as u32);
+        let data_len = data.len() as u32;
+        let riff_size = 36u32 + data_len;
+
+        let mut buf = Vec::with_capacity(44 + data.len());
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&riff_size.to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    #[test]
+    fn test_decode_wav_reader_rejects_unsupported_bit_depths() {
+        for bad_bits in [0u16, 7, 65] {
+            let bytes = make_raw_pcm_wav(16000, 1, bad_bits, &[0u8; 8]);
+            let err = decode_wav_bytes(&bytes)
+                .expect_err(&format!("bit depth {bad_bits} should be rejected"));
+            assert!(
+                err.to_string().contains("Unsupported WAV bit depth")
+                    || err.to_string().contains("Failed to parse WAV"),
+                "unexpected error for bit depth {bad_bits}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_wav_reader_single_sample_high_rate_nonempty() {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut buf = Vec::new();
+        {
+            let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buf), spec).unwrap();
+            writer.write_sample(16384i16).unwrap();
+            writer.finalize().unwrap();
+        }
+        let decoded = decode_wav_bytes(&buf).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!((decoded[0] - (16384.0 / 32767.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_decode_wav_reader_fir_lpf_attenuates_aliasing_48k_to_16k() {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut buf = Vec::new();
+        {
+            let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buf), spec).unwrap();
+            // 12 kHz sine wave (above 16 kHz Nyquist = 8 kHz) at 48 kHz sample rate
+            let n_samples = 4800; // 0.1s
+            for i in 0..n_samples {
+                let t = (i as f32) / 48000.0;
+                let s = (2.0 * std::f32::consts::PI * 12000.0 * t).sin();
+                writer.write_sample(s).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let decoded = decode_wav_bytes(&buf).unwrap();
+        assert_eq!(decoded.len(), 1600);
+        // Skip edge transient (first/last 16 samples) and verify strong stopband attenuation
+        let steady = &decoded[16..decoded.len() - 16];
+        let rms = (steady.iter().map(|&x| x * x).sum::<f32>() / (steady.len() as f32)).sqrt();
+        // Unattenuated sine RMS is ~0.707; 31-tap Blackman FIR at fc=0.15 attenuates 12 kHz > 40 dB
+        assert!(
+            rms < 0.02,
+            "12 kHz above-Nyquist tone was not sufficiently attenuated: rms={rms}"
         );
     }
 }
