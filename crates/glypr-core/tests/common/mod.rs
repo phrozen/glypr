@@ -46,6 +46,18 @@ pub fn allow_missing_weights() -> bool {
 /// failure rather than a corrupt weight file or runtime inference error.
 pub fn is_missing_weight_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
+        if let Some(glypr_err) = cause.downcast_ref::<glypr_core::GlyprError>() {
+            match glypr_err {
+                glypr_core::GlyprError::OfflineCacheMiss { .. }
+                | glypr_core::GlyprError::CoreMLNotFound { .. } => return true,
+                glypr_core::GlyprError::Io(io_err)
+                    if io_err.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
         if let Some(io_err) = cause.downcast_ref::<std::io::Error>()
             && io_err.kind() == std::io::ErrorKind::NotFound
         {
@@ -55,19 +67,27 @@ pub fn is_missing_weight_error(err: &anyhow::Error) -> bool {
         msg.contains("Failed to resolve '")
             || msg.contains("Failed to initialize Hugging Face Hub API client")
             || msg.contains("No such file or directory")
+            || msg.contains("offline mode is enabled")
     })
 }
 
 /// Converts missing-weight / Hub resolution errors into `Ok(None)` when
 /// [`allow_missing_weights()`] is enabled, while preserving all other errors.
-pub fn try_or_skip_missing<T>(res: Result<T>, context_label: &str) -> Result<Option<T>> {
+pub fn try_or_skip_missing<T, E: Into<anyhow::Error>>(
+    res: std::result::Result<T, E>,
+    context_label: &str,
+) -> Result<Option<T>> {
     match res {
         Ok(val) => Ok(Some(val)),
-        Err(err) if allow_missing_weights() && is_missing_weight_error(&err) => {
-            eprintln!("Skipping {context_label} (GLYPR_ALLOW_MISSING_WEIGHTS=1): {err:#}");
-            Ok(None)
+        Err(err) => {
+            let err: anyhow::Error = err.into();
+            if allow_missing_weights() && is_missing_weight_error(&err) {
+                eprintln!("Skipping {context_label} (GLYPR_ALLOW_MISSING_WEIGHTS=1): {err:#}");
+                Ok(None)
+            } else {
+                Err(err)
+            }
         }
-        Err(err) => Err(err),
     }
 }
 
@@ -102,11 +122,11 @@ pub fn golden_dir() -> PathBuf {
 }
 
 fn load_gguf_fixture(device: Device, use_q8: bool, label: &str) -> Result<Option<SharedEmbedder>> {
-    let base_gguf = match try_or_skip_missing(glypr_core::hub::resolve_canonical_model(use_q8), label)?
-    {
-        Some(path) => path,
-        None => return Ok(None),
-    };
+    let base_gguf =
+        match try_or_skip_missing(glypr_core::hub::resolve_canonical_model(use_q8), label)? {
+            Some(path) => path,
+            None => return Ok(None),
+        };
 
     let mut embedder = if use_q8 {
         GlyprEmbedder::load_gguf_q8(&base_gguf, &device)?
@@ -119,21 +139,25 @@ fn load_gguf_fixture(device: Device, use_q8: bool, label: &str) -> Result<Option
             embedder.attach_multimodal_projector(&mmproj)?;
         }
         Ok(_) => {}
-        Err(err) if allow_missing_weights() && is_missing_weight_error(&err) => {
-            eprintln!("Note: optional mmproj not cached for {label}: {err:#}");
+        Err(err) => {
+            let anyhow_err: anyhow::Error = err.into();
+            if allow_missing_weights() && is_missing_weight_error(&anyhow_err) {
+                eprintln!("Note: optional mmproj not cached for {label}: {anyhow_err:#}");
+            } else {
+                return Err(anyhow_err);
+            }
         }
-        Err(err) => return Err(err),
     }
 
     Ok(Some(Arc::new(Mutex::new(embedder))))
 }
 
 fn load_safetensors_fixture(device: Device, label: &str) -> Result<Option<SharedEmbedder>> {
-    let weights_path =
-        match try_or_skip_missing(glypr_core::hub::resolve_google_weights(), label)? {
-            Some(path) => path,
-            None => return Ok(None),
-        };
+    let weights_path = match try_or_skip_missing(glypr_core::hub::resolve_google_weights(), label)?
+    {
+        Some(path) => path,
+        None => return Ok(None),
+    };
     let snapshot_dir = weights_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Invalid Safetensors path: {}", weights_path.display()))?;

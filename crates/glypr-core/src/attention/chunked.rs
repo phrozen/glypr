@@ -89,8 +89,13 @@ impl AttentionBackend for ChunkedSlidingAttention {
         let chunk_size = window;
         let num_chunks = s.div_ceil(chunk_size);
 
-        // Precompute static mask tensors once outside the chunk loop
-        let static_masks = if attention_mask.is_none() {
+        // Precompute static mask tensors once outside the chunk loop whenever no dense
+        // [B, 1, S, S] sliding-window mask was supplied (i.e. unmasked or [B, 1, 1, S] padding-only mask).
+        let needs_static_masks = match attention_mask {
+            None => true,
+            Some(mask) => mask.dim(2)? == 1,
+        };
+        let static_masks = if needs_static_masks {
             Some(get_static_chunk_masks(window, device, orig_dtype)?)
         } else {
             None
@@ -118,15 +123,18 @@ impl AttentionBackend for ChunkedSlidingAttention {
             let k_chunk_t = k_chunk.transpose(2, 3)?.contiguous()?;
             let mut attn_weights = q_chunk.matmul(&k_chunk_t)?;
 
-            // Apply attention mask
+            // Apply provided attention mask ([B, 1, 1, S] padding mask or [B, 1, S, S] dense mask)
             if let Some(mask) = attention_mask {
-                // Slice provided global/padding mask
-                let mask_chunk = mask
-                    .narrow(2, q_start, q_len)?
-                    .narrow(3, kv_start, kv_len)?;
+                let mask_chunk = if mask.dim(2)? == 1 {
+                    mask.narrow(3, kv_start, kv_len)?
+                } else {
+                    mask.narrow(2, q_start, q_len)?
+                        .narrow(3, kv_start, kv_len)?
+                };
                 attn_weights = attn_weights.broadcast_add(&mask_chunk)?;
-            } else if let Some((ref mask_first, ref mask_middle, ref mask_last)) = static_masks {
-                // Zero-allocation path using precomputed static masks
+            }
+            if let Some((ref mask_first, ref mask_middle, ref mask_last)) = static_masks {
+                // Zero-allocation path using precomputed static sliding-window masks
                 if chunk_idx == 0 {
                     let m = if q_len == window && kv_len == 2 * window {
                         mask_first

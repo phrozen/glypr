@@ -2,52 +2,178 @@ use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use candle_core::{DType, Device};
-use glypr_core::GlyprEmbedder;
+use glypr_core::{GlyprEmbedder, GlyprError};
 use glypr_server::{
     AppState, HealthResponse, ModelListResponse, build_router, spawn_inference_engine,
 };
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-async fn start_test_server() -> Result<(String, tokio::task::JoinHandle<()>)> {
-    let device = if candle_core::utils::metal_is_available() {
-        Device::new_metal(0).unwrap_or(Device::Cpu)
-    } else {
-        Device::Cpu
-    };
+fn safe_test_device() -> Device {
+    #[cfg(feature = "metal")]
+    if glypr_core::metal_kernels::is_metal_device_available()
+        && let Ok(dev) = Device::new_metal(0)
+    {
+        return dev;
+    }
+    Device::Cpu
+}
+
+fn allow_missing_weights() -> bool {
+    matches!(
+        std::env::var("GLYPR_ALLOW_MISSING_WEIGHTS")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true"
+    )
+}
+
+fn is_missing_weight_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        if let Some(glypr_err) = cause.downcast_ref::<GlyprError>() {
+            match glypr_err {
+                GlyprError::OfflineCacheMiss { .. } | GlyprError::CoreMLNotFound { .. } => {
+                    return true;
+                }
+                GlyprError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>()
+            && io_err.kind() == std::io::ErrorKind::NotFound
+        {
+            return true;
+        }
+        let msg = cause.to_string();
+        msg.contains("Failed to resolve '")
+            || msg.contains("Failed to initialize Hugging Face Hub API client")
+            || msg.contains("No such file or directory")
+            || msg.contains("offline mode is enabled")
+    })
+}
+
+fn spawn_persistent_test_server(with_mmproj: bool) -> Result<Option<String>> {
+    let device = safe_test_device();
     let dtype = if device.is_metal() {
         DType::BF16
     } else {
         DType::F32
     };
 
-    let model_path = glypr_core::hub::resolve_default_gguf()?;
+    let model_path = match glypr_core::hub::resolve_default_gguf() {
+        Ok(p) => p,
+        Err(e) => {
+            let err: anyhow::Error = e.into();
+            if allow_missing_weights() && is_missing_weight_error(&err) {
+                return Ok(None);
+            }
+            return Err(err);
+        }
+    };
+
     let mut embedder = GlyprEmbedder::load_gguf(&model_path, &device, dtype)?;
     embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
 
-    let engine = spawn_inference_engine(embedder, 32, "embeddinggemma-2".to_string());
-    let state = Arc::new(AppState { engine });
-    let app = build_router(state);
+    if with_mmproj {
+        let mmproj_path = match glypr_core::hub::resolve_default_mmproj() {
+            Ok(p) => p,
+            Err(e) => {
+                let err: anyhow::Error = e.into();
+                if allow_missing_weights() && is_missing_weight_error(&err) {
+                    return Ok(None);
+                }
+                return Err(err);
+            }
+        };
+        if !mmproj_path.exists() {
+            if allow_missing_weights() {
+                return Ok(None);
+            }
+            anyhow::bail!("mmproj checkpoint not found at {:?}", mmproj_path);
+        }
+        embedder.attach_multimodal_projector(&mmproj_path)?;
+    }
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    let base_url = format!("http://{}", addr);
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String>>();
+    std::thread::Builder::new()
+        .name(if with_mmproj {
+            "glypr-test-srv-mm".into()
+        } else {
+            "glypr-test-srv-text".into()
+        })
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send(Err(e.into()));
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                let engine = spawn_inference_engine(embedder, 32, "embeddinggemma-2".to_string());
+                let state = Arc::new(AppState { engine });
+                let app = build_router(state);
 
-    let handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+                let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        let _ = tx.send(Err(e.into()));
+                        return;
+                    }
+                };
+                let addr = match listener.local_addr() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        let _ = tx.send(Err(e.into()));
+                        return;
+                    }
+                };
+                let _ = tx.send(Ok(format!("http://{}", addr)));
+                let _ = axum::serve(listener, app).await;
+            });
+        })?;
 
-    Ok((base_url, handle))
+    let url = rx
+        .recv()
+        .map_err(|e| anyhow::anyhow!("Test server thread exited before ready: {e}"))??;
+    Ok(Some(url))
+}
+
+fn get_or_init_server(
+    cell: &OnceLock<std::result::Result<Option<String>, String>>,
+    with_mmproj: bool,
+) -> Result<Option<String>> {
+    let cached = cell
+        .get_or_init(|| spawn_persistent_test_server(with_mmproj).map_err(|e| format!("{e:#}")));
+    match cached {
+        Ok(url) => Ok(url.clone()),
+        Err(msg) => Err(anyhow::anyhow!("{msg}")),
+    }
+}
+
+fn shared_text_server_url() -> Result<Option<String>> {
+    static TEXT_SERVER: OnceLock<std::result::Result<Option<String>, String>> = OnceLock::new();
+    get_or_init_server(&TEXT_SERVER, false)
+}
+
+fn shared_multimodal_server_url() -> Result<Option<String>> {
+    static MM_SERVER: OnceLock<std::result::Result<Option<String>, String>> = OnceLock::new();
+    get_or_init_server(&MM_SERVER, true)
 }
 
 #[tokio::test]
 async fn test_server_health_and_models() -> Result<()> {
-    let (base_url, _server) = match start_test_server().await {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("Skipping test: model not available ({})", e);
-            return Ok(());
-        }
+    let Some(base_url) = shared_text_server_url()? else {
+        eprintln!("Skipping test_server_health_and_models (GLYPR_ALLOW_MISSING_WEIGHTS=1)");
+        return Ok(());
     };
 
     let client = reqwest::Client::new();
@@ -72,12 +198,8 @@ async fn test_server_health_and_models() -> Result<()> {
 
 #[tokio::test]
 async fn test_server_embeddings_minimal_request() -> Result<()> {
-    let (base_url, _server) = match start_test_server().await {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("Skipping test: model not available ({})", e);
-            return Ok(());
-        }
+    let Some(base_url) = shared_text_server_url()? else {
+        return Ok(());
     };
 
     let client = reqwest::Client::new();
@@ -109,12 +231,8 @@ async fn test_server_embeddings_minimal_request() -> Result<()> {
 
 #[tokio::test]
 async fn test_server_embeddings_batch_and_mrl() -> Result<()> {
-    let (base_url, _server) = match start_test_server().await {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("Skipping test: model not available ({})", e);
-            return Ok(());
-        }
+    let Some(base_url) = shared_text_server_url()? else {
+        return Ok(());
     };
 
     let client = reqwest::Client::new();
@@ -150,12 +268,8 @@ async fn test_server_embeddings_batch_and_mrl() -> Result<()> {
 
 #[tokio::test]
 async fn test_server_embeddings_quantization_formats() -> Result<()> {
-    let (base_url, _server) = match start_test_server().await {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("Skipping test: model not available ({})", e);
-            return Ok(());
-        }
+    let Some(base_url) = shared_text_server_url()? else {
+        return Ok(());
     };
 
     let client = reqwest::Client::new();
@@ -218,12 +332,8 @@ async fn test_server_embeddings_quantization_formats() -> Result<()> {
 
 #[tokio::test]
 async fn test_server_concurrent_requests_batching() -> Result<()> {
-    let (base_url, _server) = match start_test_server().await {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("Skipping test: model not available ({})", e);
-            return Ok(());
-        }
+    let Some(base_url) = shared_text_server_url()? else {
+        return Ok(());
     };
 
     let client = reqwest::Client::new();
@@ -260,12 +370,8 @@ async fn test_server_concurrent_requests_batching() -> Result<()> {
 
 #[tokio::test]
 async fn test_server_error_handling() -> Result<()> {
-    let (base_url, _server) = match start_test_server().await {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("Skipping test: model not available ({})", e);
-            return Ok(());
-        }
+    let Some(base_url) = shared_text_server_url()? else {
+        return Ok(());
     };
 
     let client = reqwest::Client::new();
@@ -300,46 +406,9 @@ async fn test_server_error_handling() -> Result<()> {
 
 #[tokio::test]
 async fn test_server_embeddings_multimodal_request() -> Result<()> {
-    let device = if candle_core::utils::metal_is_available() {
-        Device::new_metal(0).unwrap_or(Device::Cpu)
-    } else {
-        Device::Cpu
-    };
-    let dtype = if device.is_metal() {
-        DType::BF16
-    } else {
-        DType::F32
-    };
-
-    let base_gguf = match glypr_core::hub::resolve_default_gguf() {
-        Ok(p) => p,
-        Err(_) => return Ok(()),
-    };
-    let mmproj_gguf = match glypr_core::hub::resolve_default_mmproj() {
-        Ok(p) => p,
-        Err(_) => return Ok(()),
-    };
-
-    if !base_gguf.exists() || !mmproj_gguf.exists() {
-        eprintln!("Checkpoints not found, skipping multimodal test");
+    let Some(base_url) = shared_multimodal_server_url()? else {
         return Ok(());
-    }
-
-    let mut embedder = GlyprEmbedder::load_gguf(&base_gguf, &device, dtype)?;
-    embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
-    embedder.attach_multimodal_projector(&mmproj_gguf)?;
-
-    let engine = spawn_inference_engine(embedder, 32, "embeddinggemma-2".to_string());
-    let state = Arc::new(AppState { engine });
-    let app = build_router(state);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    let base_url = format!("http://{}", addr);
-
-    let _handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    };
 
     let client = reqwest::Client::new();
 
@@ -465,13 +534,9 @@ async fn test_server_embeddings_multimodal_request() -> Result<()> {
 
 #[tokio::test]
 async fn test_server_multimodal_rejected_without_mmproj() -> Result<()> {
-    // start_test_server starts a server WITHOUT mmproj
-    let (base_url, _server) = match start_test_server().await {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("Skipping test: model not available ({})", e);
-            return Ok(());
-        }
+    // shared_text_server_url starts a server WITHOUT mmproj
+    let Some(base_url) = shared_text_server_url()? else {
+        return Ok(());
     };
 
     let client = reqwest::Client::new();
@@ -516,46 +581,9 @@ async fn test_server_multimodal_rejected_without_mmproj() -> Result<()> {
 
 #[tokio::test]
 async fn test_server_concurrent_multimodal_batching() -> Result<()> {
-    let device = if candle_core::utils::metal_is_available() {
-        Device::new_metal(0).unwrap_or(Device::Cpu)
-    } else {
-        Device::Cpu
-    };
-    let dtype = if device.is_metal() {
-        DType::BF16
-    } else {
-        DType::F32
-    };
-
-    let base_gguf = match glypr_core::hub::resolve_default_gguf() {
-        Ok(p) => p,
-        Err(_) => return Ok(()),
-    };
-    let mmproj_gguf = match glypr_core::hub::resolve_canonical_mmproj(false) {
-        Ok(p) => p,
-        Err(_) => return Ok(()),
-    };
-
-    if !base_gguf.exists() || !mmproj_gguf.exists() {
-        eprintln!("Checkpoints not found, skipping concurrent multimodal test");
+    let Some(base_url) = shared_multimodal_server_url()? else {
         return Ok(());
-    }
-
-    let mut embedder = GlyprEmbedder::load_gguf(&base_gguf, &device, dtype)?;
-    embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
-    embedder.attach_multimodal_projector(&mmproj_gguf)?;
-
-    let engine = spawn_inference_engine(embedder, 32, "embeddinggemma-2".to_string());
-    let state = Arc::new(AppState { engine });
-    let app = build_router(state);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    let base_url = format!("http://{}", addr);
-
-    let _handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    };
 
     let client = reqwest::Client::new();
 

@@ -319,4 +319,43 @@ mod tests {
         assert_eq!(int8_cosine_similarity(&[], &[]), 0.0);
         assert_eq!(binary_cosine_similarity(&[], &[]), 0.0);
     }
+
+    #[test]
+    fn test_int8_dot_product_unaligned_and_aligned_lengths() {
+        for len in [7usize, 19, 128] {
+            let a: Vec<i8> = (0..len)
+                .map(|i| ((i as isize * 13 % 25) - 12) as i8)
+                .collect();
+            let b: Vec<i8> = (0..len)
+                .map(|i| (((i as isize * 7 + 3) % 21) - 10) as i8)
+                .collect();
+            let expected: i32 = a
+                .iter()
+                .zip(b.iter())
+                .map(|(&x, &y)| (x as i32) * (y as i32))
+                .sum();
+            assert_eq!(
+                int8_dot_product(&a, &b),
+                expected,
+                "int8_dot_product mismatch for len={len}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_quantize_int8_clamping_and_edge_vectors() {
+        let clamped = quantize_int8(&[1.5, -2.0, 1.0, -1.0, 1.0001, -1.0001]);
+        assert_eq!(clamped, vec![127, -127, 127, -127, 127, -127]);
+
+        // Zero vectors in cosine_similarity
+        let zeros = vec![0.0f32; 8];
+        let nonzero = vec![1.0f32; 8];
+        assert_eq!(cosine_similarity(&zeros, &nonzero), 0.0);
+        assert_eq!(cosine_similarity(&nonzero, &zeros), 0.0);
+        assert_eq!(cosine_similarity(&zeros, &zeros), 0.0);
+
+        // Empty slice and zero slice in l2_normalize
+        assert!(l2_normalize(&[]).is_empty());
+        assert_eq!(l2_normalize(&[0.0, 0.0]), vec![0.0, 0.0]);
+    }
 }

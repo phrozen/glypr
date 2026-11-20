@@ -521,4 +521,39 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn test_coreml_text_missing_path_and_empty_dir_errors() {
+        let missing_path = std::env::temp_dir().join(format!(
+            "glypr_coreml_text_missing_{}.mlmodelc",
+            std::process::id()
+        ));
+        let err_path =
+            CoreMLTextBackbone::from_path(&missing_path, CoreMLComputeUnits::CpuAndNeuralEngine)
+                .err()
+                .expect("from_path on missing file must fail");
+        assert!(matches!(err_path, GlyprError::CoreMLNotFound { .. }));
+
+        let missing_dir = std::env::temp_dir().join(format!(
+            "glypr_coreml_text_missing_dir_{}",
+            std::process::id()
+        ));
+        let err_missing_dir =
+            CoreMLTextBackbone::from_dir(&missing_dir, CoreMLComputeUnits::CpuAndNeuralEngine)
+                .err()
+                .expect("from_dir on missing dir must fail");
+        assert!(matches!(err_missing_dir, GlyprError::CoreMLNotFound { .. }));
+
+        let empty_dir = std::env::temp_dir().join(format!(
+            "glypr_coreml_text_empty_dir_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        let err_empty =
+            CoreMLTextBackbone::from_dir(&empty_dir, CoreMLComputeUnits::CpuAndNeuralEngine)
+                .err()
+                .expect("from_dir on empty dir must fail");
+        assert!(matches!(err_empty, GlyprError::ModelLoad(_)));
+        let _ = std::fs::remove_dir_all(&empty_dir);
+    }
 }

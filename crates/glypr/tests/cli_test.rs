@@ -1,8 +1,19 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+fn allow_missing_weights() -> bool {
+    matches!(
+        std::env::var("GLYPR_ALLOW_MISSING_WEIGHTS")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true"
+    )
+}
+
 fn should_skip_weight_test() -> bool {
-    if std::env::var("GLYPR_ALLOW_MISSING_WEIGHTS").is_err() {
+    if !allow_missing_weights() {
         return false;
     }
     let cache_dir = std::env::var("HF_HUB_CACHE")
@@ -43,6 +54,34 @@ fn test_cli_help() {
     assert!(stdout.contains("--offline"));
     assert!(stdout.contains("--text-backend"));
     assert!(!stdout.contains("sim")); // sim was removed for V1
+}
+
+#[test]
+fn test_cli_serve_help() {
+    let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["serve", "--help"])
+        .output()
+        .expect("Failed to execute glypr serve --help");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for expected in [
+        "--host",
+        "--port",
+        "--max-batch-size",
+        "--model-id",
+        "--max-body-mb",
+        "--max-batch-items",
+        "--request-timeout-secs",
+        "--batch-wait-us",
+        "--allow-local-files",
+        "--warmup-coreml",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "serve --help missing '{expected}':\n{stdout}"
+        );
+    }
 }
 
 #[test]

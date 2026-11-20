@@ -293,4 +293,60 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_get_aspect_ratio_preserving_size_edge_cases() {
+        // 0xN and Nx0 must error
+        assert!(get_aspect_ratio_preserving_size(0, 100, 16, 2520, 3).is_err());
+        assert!(get_aspect_ratio_preserving_size(100, 0, 16, 2520, 3).is_err());
+
+        // Extreme 1000x10 banner (height=1000, width=10) at budget=70 (max_patches=630):
+        // width collapses below 48 and clamps to side_mult=48, height clamps to max_side_length=3360
+        let (h_tall, w_tall) = get_aspect_ratio_preserving_size(1000, 10, 16, 70 * 9, 3).unwrap();
+        assert_eq!(w_tall, 48);
+        assert_eq!(h_tall, 70 * 48);
+        assert_eq!(h_tall % 48, 0);
+        assert_eq!(w_tall % 48, 0);
+
+        // Extreme 10x1000 banner (height=10, width=1000) clamps symmetrically
+        let (h_wide, w_wide) = get_aspect_ratio_preserving_size(10, 1000, 16, 70 * 9, 3).unwrap();
+        assert_eq!(h_wide, 48);
+        assert_eq!(w_wide, 70 * 48);
+
+        // Tiny 16x16 image at budget=16 (max_patches=144) scales cleanly to 192x192
+        let (h_tiny, w_tiny) = get_aspect_ratio_preserving_size(16, 16, 16, 16 * 9, 3).unwrap();
+        assert_eq!((h_tiny, w_tiny), (192, 192));
+
+        // Landscape 1080x1920 vs Portrait 1920x1080 at budget=280 (max_patches=2520)
+        let (lh, lw) = get_aspect_ratio_preserving_size(1080, 1920, 16, 280 * 9, 3).unwrap();
+        let (ph, pw) = get_aspect_ratio_preserving_size(1920, 1080, 16, 280 * 9, 3).unwrap();
+        assert!(lw > lh, "landscape expected lw > lh, got {lh}x{lw}");
+        assert!(ph > pw, "portrait expected ph > pw, got {ph}x{pw}");
+        assert_eq!((lh, lw), (pw, ph));
+        assert_eq!(lh % 48, 0);
+        assert_eq!(lw % 48, 0);
+        assert!((lh / 16) * (lw / 16) <= 280 * 9);
+    }
+
+    #[test]
+    fn test_validate_vision_budget_bounds() {
+        assert!(matches!(
+            validate_vision_budget(15).unwrap_err(),
+            GlyprError::InvalidVisionBudget {
+                budget: 15,
+                min: 16,
+                max: 2048
+            }
+        ));
+        assert!(validate_vision_budget(16).is_ok());
+        assert!(validate_vision_budget(2048).is_ok());
+        assert!(matches!(
+            validate_vision_budget(2049).unwrap_err(),
+            GlyprError::InvalidVisionBudget {
+                budget: 2049,
+                min: 16,
+                max: 2048
+            }
+        ));
+    }
 }

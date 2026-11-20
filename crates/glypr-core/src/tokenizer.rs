@@ -755,4 +755,184 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("empty"));
     }
+
+    #[test]
+    fn test_from_gguf_metadata_missing_keys_error() {
+        let mut meta = HashMap::new();
+        assert!(GlyprTokenizer::from_gguf_metadata(&meta).is_err());
+
+        meta.insert(
+            "tokenizer.ggml.tokens".to_string(),
+            Value::Array(vec![Value::String("<unk>".to_string())]),
+        );
+        // Missing merges
+        assert!(GlyprTokenizer::from_gguf_metadata(&meta).is_err());
+
+        // Non-array merges
+        meta.insert("tokenizer.ggml.merges".to_string(), Value::U32(42));
+        assert!(GlyprTokenizer::from_gguf_metadata(&meta).is_err());
+
+        // Non-array tokens
+        meta.insert("tokenizer.ggml.tokens".to_string(), Value::Bool(true));
+        meta.insert("tokenizer.ggml.merges".to_string(), Value::Array(vec![]));
+        assert!(GlyprTokenizer::from_gguf_metadata(&meta).is_err());
+    }
+
+    #[test]
+    fn test_encode_adds_bos_eos_idempotently() {
+        let tok = build_synthetic_gguf_tokenizer();
+        let plain = tok.encode("Hello").unwrap();
+        assert_eq!(plain, vec![TOKEN_BOS, 17, TOKEN_EOS]);
+
+        // Vocab contains "<s>" at index 2 and "</s>" at index 1; encoding them directly
+        // must not duplicate BOS/EOS.
+        let with_specials = tok.encode("<s>Hello</s>").unwrap();
+        assert_eq!(with_specials.first(), Some(&TOKEN_BOS));
+        assert_eq!(with_specials.last(), Some(&TOKEN_EOS));
+        assert_eq!(
+            with_specials.iter().filter(|&&id| id == TOKEN_BOS).count(),
+            1
+        );
+        assert_eq!(
+            with_specials.iter().filter(|&&id| id == TOKEN_EOS).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_encode_batch_padded_with_limit_masks_and_rejects_oversized() {
+        let tok = build_synthetic_gguf_tokenizer();
+        let dev = candle_core::Device::Cpu;
+
+        // Empty batch must fail
+        assert!(tok.encode_batch_padded_with_limit(&[], 16, &dev).is_err());
+
+        // "Hello" -> [2, 17, 1] (len 3); "Hello world" -> [2, 17, 22, 1] (len 4)
+        let (ids, mask) = tok
+            .encode_batch_padded_with_limit(&["Hello", "Hello world"], 4, &dev)
+            .unwrap();
+        assert_eq!(ids.dims(), &[2, 4]);
+        assert_eq!(mask.dims(), &[2, 4]);
+        assert_eq!(
+            ids.to_vec2::<u32>().unwrap(),
+            vec![vec![2, 17, 1, 0], vec![2, 17, 22, 1]]
+        );
+        assert_eq!(
+            mask.to_vec2::<u32>().unwrap(),
+            vec![vec![1, 1, 1, 0], vec![1, 1, 1, 1]]
+        );
+
+        // Oversized item rejected cleanly
+        let err = tok
+            .encode_batch_padded_with_limit(&["Hello", "Hello world"], 3, &dev)
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds maximum context limit"));
+    }
+
+    #[test]
+    fn test_encode_interleaved_manual_tags_vs_auto_prepend() {
+        let tok = build_synthetic_gguf_tokenizer();
+        let media = [
+            MediaPlaceholder::Image { num_soft_tokens: 3 },
+            MediaPlaceholder::Audio { num_soft_tokens: 2 },
+        ];
+
+        // Auto-prepend when no manual tags exist: <bos> <boi> <image>*3 <eoi> <boa> <audio>*2 <eoa> Hello <eos>
+        let (auto_tokens, auto_slots) = tok.encode_interleaved(Some("Hello"), &media).unwrap();
+        assert_eq!(auto_slots.len(), 2);
+        assert_eq!(auto_slots[0].start_idx, 2);
+        assert_eq!(auto_slots[0].length, 3);
+        assert_eq!(auto_slots[1].start_idx, 7);
+        assert_eq!(auto_slots[1].length, 2);
+        assert_eq!(auto_tokens[0], TOKEN_BOS);
+        assert_eq!(auto_tokens[1], TOKEN_BOI);
+        assert_eq!(&auto_tokens[2..5], &[TOKEN_IMAGE; 3]);
+        assert_eq!(auto_tokens[5], TOKEN_EOI);
+        assert_eq!(auto_tokens[6], TOKEN_BOA);
+        assert_eq!(&auto_tokens[7..9], &[TOKEN_AUDIO; 2]);
+        assert_eq!(auto_tokens[9], TOKEN_EOA);
+        assert_eq!(auto_tokens[10], 17); // "Hello"
+        assert_eq!(auto_tokens[11], TOKEN_EOS);
+
+        // Manual tags place slots at the exact tag positions
+        let (manual_tokens, manual_slots) = tok
+            .encode_interleaved(Some("Hello <|image|> foo <|audio|>"), &media)
+            .unwrap();
+        assert_eq!(manual_slots.len(), 2);
+        assert_eq!(manual_slots[0].length, 3);
+        assert_eq!(manual_slots[1].length, 2);
+        assert!(manual_slots[0].start_idx > 2);
+        assert_eq!(
+            &manual_tokens[manual_slots[0].start_idx..manual_slots[0].start_idx + 3],
+            &[TOKEN_IMAGE; 3]
+        );
+        assert_eq!(
+            &manual_tokens[manual_slots[1].start_idx..manual_slots[1].start_idx + 2],
+            &[TOKEN_AUDIO; 2]
+        );
+        assert_eq!(manual_tokens.first(), Some(&TOKEN_BOS));
+        assert_eq!(manual_tokens.last(), Some(&TOKEN_EOS));
+    }
+
+    #[test]
+    fn test_encode_modality_sequence_task_prefix_placement() {
+        let tok = build_synthetic_gguf_tokenizer();
+        let img = image::DynamicImage::new_rgb8(48, 48);
+        let task = crate::task::Task::SearchQuery;
+        let expected_prefix_ids = tok
+            .tokenizer
+            .encode(task.prompt_prefix().unwrap().as_str(), false)
+            .unwrap()
+            .get_ids()
+            .to_vec();
+
+        // Case 1: Leading Text part gets prefix prepended before first text, before media slot
+        let (tokens_text_first, slots_text_first) = tok
+            .encode_modality_sequence(
+                &[
+                    crate::multimodal::ModalityPart::Text("Hello"),
+                    crate::multimodal::ModalityPart::Image {
+                        image: &img,
+                        budget: Some(16),
+                    },
+                ],
+                task,
+            )
+            .unwrap();
+        assert_eq!(slots_text_first.len(), 1);
+        let boi_pos_1 = tokens_text_first
+            .iter()
+            .position(|&t| t == TOKEN_BOI)
+            .unwrap();
+        assert!(boi_pos_1 > 1 + expected_prefix_ids.len());
+        assert_eq!(
+            &tokens_text_first[1..1 + expected_prefix_ids.len()],
+            expected_prefix_ids.as_slice()
+        );
+
+        // Case 2: Leading Media part gets prefix emitted before <boi>
+        let (tokens_media_first, slots_media_first) = tok
+            .encode_modality_sequence(
+                &[
+                    crate::multimodal::ModalityPart::Image {
+                        image: &img,
+                        budget: Some(16),
+                    },
+                    crate::multimodal::ModalityPart::Text("Hello"),
+                ],
+                task,
+            )
+            .unwrap();
+        assert_eq!(slots_media_first.len(), 1);
+        let boi_pos_2 = tokens_media_first
+            .iter()
+            .position(|&t| t == TOKEN_BOI)
+            .unwrap();
+        assert_eq!(boi_pos_2, 1 + expected_prefix_ids.len());
+        assert_eq!(
+            &tokens_media_first[1..boi_pos_2],
+            expected_prefix_ids.as_slice()
+        );
+        assert_eq!(slots_media_first[0].start_idx, boi_pos_2 + 1);
+    }
 }

@@ -260,6 +260,48 @@ impl EngineHandle {
 
         results.into_iter().collect()
     }
+
+    /// Create a lightweight mock [`EngineHandle`] backed by a Tokio task for Tier 0 HTTP
+    /// contract tests without loading model weights.
+    pub fn mock<F>(
+        meta: ModelMeta,
+        allow_local_files: bool,
+        max_batch_items: usize,
+        handler: F,
+    ) -> Self
+    where
+        F: Fn(&PreparedItem, &OwnedTask, Option<usize>) -> InferResult + Send + Sync + 'static,
+    {
+        let (tx, mut rx) = mpsc::channel::<WorkerMessage>(1024);
+        let handler = Arc::new(handler);
+
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    WorkerMessage::Single(req) => {
+                        let res = handler(&req.item, &req.task, req.truncate_dim);
+                        let _ = req.sender.send(res);
+                    }
+                    WorkerMessage::Batch(batch_req) => {
+                        let results: Vec<InferResult> = batch_req
+                            .items
+                            .iter()
+                            .map(|item| handler(item, &batch_req.task, batch_req.truncate_dim))
+                            .collect();
+                        let _ = batch_req.sender.send(results);
+                    }
+                }
+            }
+        });
+
+        Self {
+            sender: tx,
+            meta: Arc::new(meta),
+            allow_local_files,
+            max_batch_items: max_batch_items.max(1),
+            request_timeout_secs: 30,
+        }
+    }
 }
 
 /// Spawn the background inference engine on a dedicated OS thread with default server limits.

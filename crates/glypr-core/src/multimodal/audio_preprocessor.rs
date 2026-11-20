@@ -646,4 +646,71 @@ mod tests {
             "12 kHz above-Nyquist tone was not sufficiently attenuated: rms={rms}"
         );
     }
+
+    #[test]
+    fn test_preprocess_audio_empty_and_short_edge_cases() {
+        // Empty audio must fail
+        let err = preprocess_audio(&[]).unwrap_err();
+        assert!(err.to_string().contains("empty"), "unexpected error: {err}");
+
+        // 100 samples (< 321 after left-pad of 160 -> 260 < 321) pads to 321 and yields 1 frame
+        let short = vec![0.1f32; 100];
+        let processed = preprocess_audio(&short).unwrap();
+        assert_eq!(processed.num_frames, 1);
+        assert_eq!(processed.num_mels, AUDIO_NUM_MELS);
+        assert_eq!(processed.features.len(), AUDIO_NUM_MELS);
+        assert!(
+            processed.features.iter().all(|v| v.is_finite()),
+            "short audio features contained non-finite values"
+        );
+    }
+
+    #[test]
+    fn test_decode_wav_reader_8bit_32bit_and_corrupt_empty() {
+        // 8-bit integer mono PCM
+        let spec_i8 = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 8,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut buf8 = Vec::new();
+        {
+            let mut writer =
+                hound::WavWriter::new(std::io::Cursor::new(&mut buf8), spec_i8).unwrap();
+            writer.write_sample(127i8).unwrap();
+            writer.write_sample(-127i8).unwrap();
+            writer.write_sample(0i8).unwrap();
+            writer.finalize().unwrap();
+        }
+        let dec8 = decode_wav_bytes(&buf8).unwrap();
+        assert_eq!(dec8.len(), 3);
+        assert!((dec8[0] - 1.0).abs() < 1e-5);
+        assert!((dec8[1] + 1.0).abs() < 1e-5);
+        assert!((dec8[2] - 0.0).abs() < 1e-5);
+
+        // 32-bit integer mono PCM
+        let spec_i32 = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut buf32 = Vec::new();
+        {
+            let mut writer =
+                hound::WavWriter::new(std::io::Cursor::new(&mut buf32), spec_i32).unwrap();
+            writer.write_sample(i32::MAX).unwrap();
+            writer.write_sample(0i32).unwrap();
+            writer.finalize().unwrap();
+        }
+        let dec32 = decode_wav_bytes(&buf32).unwrap();
+        assert_eq!(dec32.len(), 2);
+        assert!((dec32[0] - 1.0).abs() < 1e-5);
+        assert!((dec32[1] - 0.0).abs() < 1e-5);
+
+        // Empty and corrupt WAV bytes must fail cleanly
+        assert!(decode_wav_bytes(&[]).is_err());
+        assert!(decode_wav_bytes(b"not a valid wav header").is_err());
+    }
 }

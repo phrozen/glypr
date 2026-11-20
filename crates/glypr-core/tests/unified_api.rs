@@ -1,11 +1,11 @@
+mod common;
+
 use anyhow::Result;
-use candle_core::Device;
 use glypr_core::{
-    GlyprEmbedder, ModalityPart, Task, VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH,
-    VISION_BUDGET_LOW, VISION_BUDGET_MAX, VISION_BUDGET_MEDIUM, VISION_BUDGET_MIN,
-    VISION_BUDGET_ULTRA, cosine_similarity, l2_normalize, truncate_mrl, validate_vision_budget,
+    ModalityPart, Task, VISION_BUDGET_DEFAULT, VISION_BUDGET_HIGH, VISION_BUDGET_LOW,
+    VISION_BUDGET_MAX, VISION_BUDGET_MEDIUM, VISION_BUDGET_MIN, VISION_BUDGET_ULTRA,
+    cosine_similarity, l2_normalize, truncate_mrl, validate_vision_budget,
 };
-use std::path::PathBuf;
 
 #[test]
 fn test_task_formatting_and_parsing() {
@@ -147,36 +147,12 @@ fn test_vision_budget_constants_and_validation() {
 
 #[test]
 fn test_unified_api_model_inference() -> Result<()> {
-    let gguf_path = glypr_core::hub::resolve_default_gguf()?;
-    if !gguf_path.exists() {
-        eprintln!(
-            "Skipping inference test: GGUF model not found at {:?}",
-            gguf_path
-        );
+    let Some(shared) = common::shared_gguf_bf16_metal()? else {
         return Ok(());
-    }
-
-    let device = if candle_core::utils::metal_is_available() {
-        Device::new_metal(0).unwrap_or(Device::Cpu)
-    } else {
-        Device::Cpu
     };
-
-    let mut embedder = GlyprEmbedder::load_gguf_bf16(&gguf_path, &device)?;
-
-    let mmproj_path = glypr_core::hub::resolve_default_mmproj()?;
-    let has_mmproj = mmproj_path.exists();
-    if has_mmproj {
-        embedder.attach_multimodal_projector(&mmproj_path)?;
-    }
-
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let golden_dir = repo_root.join("tests/golden_vectors");
+    let embedder = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let has_mmproj = embedder.has_multimodal();
+    let golden_dir = common::golden_dir();
 
     // 1. Text embedding with Task enum
     let q_emb = embedder.embed_text("what is gravitational lensing?", Task::SearchQuery)?;
