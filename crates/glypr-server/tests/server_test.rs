@@ -610,3 +610,361 @@ async fn test_server_concurrent_multimodal_batching() -> Result<()> {
 
     Ok(())
 }
+
+fn build_tiny_test_embedder(max_seq_len: usize, with_dummy_mmproj: bool) -> GlyprEmbedder {
+    use candle_core::Tensor;
+    use candle_core::quantized::gguf_file::Value;
+    use glypr_core::_candle_nn::{Embedding, Linear};
+    use glypr_core::{
+        EmbeddingGemma2Model, LinearOp, MultimodalProjector, TextBackendPolicy,
+        VisionBackendPolicy, attention, config, layer, mlp, norm, ple, rope,
+        tokenizer::GlyprTokenizer,
+    };
+    use std::collections::HashMap;
+
+    let hidden_size = 8usize;
+    let intermediate_size = 16usize;
+    let num_heads = 2usize;
+    let num_kv_heads = 1usize;
+    let head_dim = 4usize;
+    let embedding_dim = 64usize;
+    let hidden_size_per_layer_input = 8usize;
+    let vocab_size = 16usize;
+    let device = Device::Cpu;
+    let dtype = DType::F32;
+
+    let mut rope_parameters = HashMap::new();
+    rope_parameters.insert(
+        "sliding_attention".to_string(),
+        config::RoPEParameters {
+            rope_theta: 10_000.0,
+            rope_type: "default".to_string(),
+        },
+    );
+    rope_parameters.insert(
+        "full_attention".to_string(),
+        config::RoPEParameters {
+            rope_theta: 1_000_000.0,
+            rope_type: "default".to_string(),
+        },
+    );
+
+    let text_config = config::TextConfig {
+        hidden_size,
+        intermediate_size,
+        num_hidden_layers: 1,
+        num_attention_heads: num_heads,
+        num_key_value_heads: num_kv_heads,
+        head_dim,
+        vocab_size,
+        embedding_dim,
+        max_position_embeddings: 128,
+        sliding_window: 512,
+        rms_norm_eps: 1e-6,
+        hidden_size_per_layer_input,
+        layer_types: vec![config::LayerType::SlidingAttention],
+        per_layer_config: HashMap::new(),
+        rope_parameters,
+        pad_token_id: 0,
+        bos_token_id: 2,
+        eos_token_id: 1,
+    };
+
+    let ones = |shape: (usize, usize)| -> LinearOp {
+        let w = Tensor::ones(shape, dtype, &device).unwrap();
+        LinearOp::new_standard(Linear::new(w, None))
+    };
+    let norm_w = |len: usize| -> norm::RMSNorm {
+        norm::RMSNorm::new(Some(Tensor::ones((len,), dtype, &device).unwrap()), 1e-6)
+    };
+
+    let embed_weight =
+        candle_core::Tensor::arange(0u32, (vocab_size * hidden_size) as u32, &device)
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap()
+            .reshape((vocab_size, hidden_size))
+            .unwrap();
+    let embed_tokens = Embedding::new(embed_weight, hidden_size);
+
+    let ple = ple::TextPLE::new(
+        ones((hidden_size_per_layer_input, hidden_size)),
+        (hidden_size as f64).powf(-0.5),
+        norm_w(hidden_size_per_layer_input),
+        1,
+        hidden_size_per_layer_input,
+    );
+
+    let layer = layer::EncoderLayer {
+        self_attn: attention::SelfAttention::new(
+            ones((num_heads * head_dim, hidden_size)),
+            ones((num_kv_heads * head_dim, hidden_size)),
+            ones((num_kv_heads * head_dim, hidden_size)),
+            ones((hidden_size, num_heads * head_dim)),
+            norm_w(head_dim),
+            norm_w(head_dim),
+            norm::RMSNorm::new(None, 1e-6),
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            Some(text_config.sliding_window),
+        ),
+        mlp: mlp::MLP::new(
+            ones((intermediate_size, hidden_size)),
+            ones((intermediate_size, hidden_size)),
+            ones((hidden_size, intermediate_size)),
+        ),
+        input_layernorm: norm_w(hidden_size),
+        post_attention_layernorm: norm_w(hidden_size),
+        pre_feedforward_layernorm: norm_w(hidden_size),
+        post_feedforward_layernorm: norm_w(hidden_size),
+        ple_block: ple::TextPLEBlock::new(
+            ones((hidden_size_per_layer_input, hidden_size)),
+            ones((hidden_size, hidden_size_per_layer_input)),
+            norm_w(hidden_size),
+        ),
+        layer_scalar: candle_core::Tensor::ones((1,), dtype, &device).unwrap(),
+    };
+
+    let model = EmbeddingGemma2Model {
+        config: text_config,
+        embed_tokens,
+        embed_scale: (hidden_size as f64).sqrt(),
+        ple,
+        layers: vec![layer],
+        norm: norm_w(hidden_size),
+        embedding_projection: ones((embedding_dim, hidden_size)),
+        rope_sliding: rope::RotaryEmbedding::new(head_dim, 10_000.0, &device).unwrap(),
+        rope_full: rope::RotaryEmbedding::new(head_dim, 1_000_000.0, &device).unwrap(),
+        device: device.clone(),
+        dtype,
+    };
+
+    let vocab = vec!["<unk>", "</s>", "<s>", "a", "b", "\u{2581}"];
+    let mut meta = HashMap::new();
+    meta.insert(
+        "tokenizer.ggml.tokens".to_string(),
+        Value::Array(
+            vocab
+                .into_iter()
+                .map(|s| Value::String(s.to_string()))
+                .collect(),
+        ),
+    );
+    meta.insert(
+        "tokenizer.ggml.merges".to_string(),
+        Value::Array(Vec::new()),
+    );
+    let tokenizer = GlyprTokenizer::from_gguf_metadata(&meta).unwrap();
+
+    let multimodal = if with_dummy_mmproj {
+        Some(MultimodalProjector {
+            vision_tower: None,
+            audio_tower: None,
+            config: config::MultimodalConfig::from_gguf_metadata(&HashMap::new()),
+            device: Device::Cpu,
+            dtype: DType::F32,
+        })
+    } else {
+        None
+    };
+
+    GlyprEmbedder {
+        model,
+        tokenizer,
+        device,
+        dtype,
+        multimodal,
+        max_seq_len,
+        #[cfg(any(feature = "coreml", feature = "ane"))]
+        coreml_vision: None,
+        #[cfg(any(feature = "coreml", feature = "ane"))]
+        coreml_text: None,
+        vision_backend: VisionBackendPolicy::Auto,
+        text_backend: TextBackendPolicy::Auto,
+    }
+}
+
+fn build_tiny_test_router(
+    max_seq_len: usize,
+    with_dummy_mmproj: bool,
+    max_batch_items: usize,
+) -> axum::Router {
+    use glypr_server::{
+        ServerConfig, build_router_with_config, spawn_inference_engine_with_config,
+    };
+
+    let embedder = build_tiny_test_embedder(max_seq_len, with_dummy_mmproj);
+    let config = ServerConfig {
+        max_batch_size: 32,
+        max_batch_items,
+        allow_local_files: false,
+        ..Default::default()
+    };
+    let engine = spawn_inference_engine_with_config(embedder, &config);
+    let state = Arc::new(AppState { engine });
+    build_router_with_config(state, &config)
+}
+
+async fn send_router_request(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    body_str: Option<String>,
+) -> Result<(axum::http::StatusCode, serde_json::Value)> {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let mut builder = Request::builder().method(method).uri(uri);
+    let body = if let Some(s) = body_str {
+        builder = builder.header("content-type", "application/json");
+        Body::from(s)
+    } else {
+        Body::empty()
+    };
+    let req = builder.body(body)?;
+    let resp = app.oneshot(req).await?;
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await?;
+    let val: serde_json::Value = serde_json::from_slice(&bytes)?;
+    Ok((status, val))
+}
+
+#[tokio::test]
+async fn test_server_contract_validation_ready_and_error_json() -> Result<()> {
+    let app = build_tiny_test_router(64, true, 4);
+
+    // 1. /ready and /health and /v1/models
+    let (status, ready_body) = send_router_request(app.clone(), "GET", "/ready", None).await?;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(ready_body["status"], "ready");
+
+    let (status, health_body) = send_router_request(app.clone(), "GET", "/health", None).await?;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(health_body["status"], "ok");
+    assert_eq!(health_body["multimodal"], true);
+    assert_eq!(health_body["has_audio_projector"], false);
+    assert_eq!(health_body["ane_text_enabled"], false);
+
+    let (status, models_body) = send_router_request(app.clone(), "GET", "/v1/models", None).await?;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(models_body["data"][0]["embedding_dim"], 64);
+
+    // 2. Malformed JSON and invalid encoding_format return 400 OpenAI JSON (not 422)
+    let (status, bad_json_body) = send_router_request(
+        app.clone(),
+        "POST",
+        "/v1/embeddings",
+        Some("{not valid json".to_string()),
+    )
+    .await?;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(bad_json_body["error"]["type"], "invalid_request_error");
+
+    let (status, bad_enum_body) = send_router_request(
+        app.clone(),
+        "POST",
+        "/v1/embeddings",
+        Some(json!({"input": "hello", "encoding_format": "bogus"}).to_string()),
+    )
+    .await?;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(bad_enum_body["error"]["type"], "invalid_request_error");
+
+    // 3. Binary with non-multiple-of-64 dimensions rejected upfront (400)
+    let (status, _) = send_router_request(
+        app.clone(),
+        "POST",
+        "/v1/embeddings",
+        Some(json!({"input": "hello", "encoding_format": "binary", "dimensions": 32}).to_string()),
+    )
+    .await?;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+    // 4. MediaInputItem setting both image and audio rejected (400)
+    let (status, _) = send_router_request(
+        app.clone(),
+        "POST",
+        "/v1/embeddings",
+        Some(json!({"input": {"image": "abc", "audio": "def"}}).to_string()),
+    )
+    .await?;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+    // 5. Audio without audio projector rejected (400)
+    let (status, _) = send_router_request(
+        app.clone(),
+        "POST",
+        "/v1/embeddings",
+        Some(json!({"input": {"audio": "AAAA"}}).to_string()),
+    )
+    .await?;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+    // 6. Local file path rejected when allow_local_files == false (400)
+    let (status, local_body) = send_router_request(
+        app.clone(),
+        "POST",
+        "/v1/embeddings",
+        Some(json!({"input": {"image": "/etc/passwd"}}).to_string()),
+    )
+    .await?;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    assert!(
+        local_body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--allow-local-files")
+    );
+
+    // 7. max_batch_items enforced (400)
+    let (status, _) = send_router_request(
+        app,
+        "POST",
+        "/v1/embeddings",
+        Some(json!({"input": ["hello", "hello", "hello", "hello", "hello"]}).to_string()),
+    )
+    .await?;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_server_batch_error_isolation() -> Result<()> {
+    // max_seq_len = 5 tokens
+    let app = build_tiny_test_router(5, false, 32);
+
+    let valid_fut = send_router_request(
+        app.clone(),
+        "POST",
+        "/v1/embeddings",
+        Some(json!({"input": "a"}).to_string()),
+    );
+
+    // > 5 tokens ("abababab" = 10 tokens with BOS/EOS) fails preflight/isolation
+    let oversized_fut = send_router_request(
+        app,
+        "POST",
+        "/v1/embeddings",
+        Some(json!({"input": "abababab"}).to_string()),
+    );
+
+    let (valid_res, oversized_res) = tokio::join!(valid_fut, oversized_fut);
+    let (valid_status, valid_body) = valid_res?;
+    let (oversized_status, _) = oversized_res?;
+
+    assert_eq!(
+        valid_status,
+        axum::http::StatusCode::OK,
+        "Healthy concurrent request must not be poisoned by oversized sibling"
+    );
+    assert_eq!(
+        valid_body["data"][0]["embedding"].as_array().unwrap().len(),
+        64
+    );
+    assert_eq!(oversized_status, axum::http::StatusCode::BAD_REQUEST);
+
+    Ok(())
+}

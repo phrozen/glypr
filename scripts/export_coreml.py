@@ -12,14 +12,16 @@ the Apple Neural Engine (ANE) via `ComputeUnit.CPU_AND_NE`.
 """
 
 import argparse
+import json
 import math
 import os
 import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import safetensors.torch
@@ -374,17 +376,22 @@ class CleanGemma2TextBackbone(nn.Module):
         vocab_size: int = 262144,
         hidden_size: int = 512,
         intermediate_size: int = 2048,
+        num_hidden_layers: int = 24,
+        num_heads: int = 4,
+        sliding_window: int = 512,
         out_features: int = 768,
         eps: float = 1e-6,
     ):
         super().__init__()
         self.seq_len = seq_len
         self.hidden_size = hidden_size
+        self.num_hidden_layers = num_hidden_layers
+        self.sliding_window = sliding_window
 
         self.embed_tokens = nn.Embedding(vocab_size, hidden_size)
         self.embed_scale = math.sqrt(hidden_size)
 
-        self.ple_proj = nn.Linear(hidden_size, 24 * hidden_size, bias=False)
+        self.ple_proj = nn.Linear(hidden_size, num_hidden_layers * hidden_size, bias=False)
         self.ple_norm = CleanRMSNorm(hidden_size, eps=eps)
 
         self.register_buffer("cos_sliding", torch.zeros(1, 1, seq_len, 256))
@@ -392,20 +399,36 @@ class CleanGemma2TextBackbone(nn.Module):
         self.register_buffer("cos_full", torch.zeros(1, 1, seq_len, 512))
         self.register_buffer("sin_full", torch.zeros(1, 1, seq_len, 512))
 
-        if seq_len > 512:
+        if seq_len > sliding_window:
             idx = torch.arange(seq_len)
             diff = (idx.unsqueeze(0) - idx.unsqueeze(1)).abs()
-            sw_mask = torch.where(diff > 512, -10000.0, 0.0).view(1, 1, seq_len, seq_len)
+            sw_mask = torch.where(diff > sliding_window, -10000.0, 0.0).view(1, 1, seq_len, seq_len)
             self.register_buffer("sliding_window_mask", sw_mask)
         else:
             self.sliding_window_mask = None
 
         self.layers = nn.ModuleList()
-        for i in range(24):
+        for i in range(num_hidden_layers):
             if (i + 1) % 6 == 0:
-                layer = CleanTextEncoderLayer(seq_len, hidden_size, num_heads=4, num_kv_heads=1, head_dim=512, intermediate_size=intermediate_size, eps=eps)
+                layer = CleanTextEncoderLayer(
+                    seq_len,
+                    hidden_size,
+                    num_heads=num_heads,
+                    num_kv_heads=1,
+                    head_dim=512,
+                    intermediate_size=intermediate_size,
+                    eps=eps,
+                )
             else:
-                layer = CleanTextEncoderLayer(seq_len, hidden_size, num_heads=4, num_kv_heads=2, head_dim=256, intermediate_size=intermediate_size, eps=eps)
+                layer = CleanTextEncoderLayer(
+                    seq_len,
+                    hidden_size,
+                    num_heads=num_heads,
+                    num_kv_heads=2,
+                    head_dim=256,
+                    intermediate_size=intermediate_size,
+                    eps=eps,
+                )
             self.layers.append(layer)
 
         self.norm = CleanRMSNorm(hidden_size, eps=eps)
@@ -434,7 +457,7 @@ class CleanGemma2TextBackbone(nn.Module):
         x = self.embed_tokens(input_ids) * self.embed_scale
 
         ple_raw = self.ple_proj(x) * (1.0 / self.embed_scale)
-        ple_reshaped = ple_raw.reshape(1, self.seq_len, 24, self.hidden_size)
+        ple_reshaped = ple_raw.reshape(1, self.seq_len, self.num_hidden_layers, self.hidden_size)
         ple_inputs = self.ple_norm(ple_reshaped)
 
         # Broadcastable additive mask: [1, 1, 1, seq_len]
@@ -470,16 +493,78 @@ class CleanGemma2TextBackbone(nn.Module):
 # 4. Model Loading & Weight Migration
 # ===========================================================================
 
-def resolve_safetensors_path(model_id: str) -> Path:
-    """Locate local cached model.safetensors or download via HuggingFace Hub."""
-    direct_path = Path(model_id)
-    if direct_path.is_file() and direct_path.name.endswith(".safetensors"):
-        return direct_path
+PRESETS: Dict[str, Tuple[int, int]] = {
+    "140-portrait": (42, 27),   # 1134 patches -> 126 soft tokens (432x672 px)
+    "140-std": (42, 30),        # 1260 patches -> 140 soft tokens (480x672 px)
+    "140-square": (33, 33),     # 1089 patches -> 121 soft tokens (528x528 px)
+    "140-landscape": (27, 42),  # 1134 patches -> 126 soft tokens (672x432 px)
+    "280-portrait": (57, 42),   # 2394 patches -> 266 soft tokens (672x912 px)
+    "280-std": (60, 42),        # 2520 patches -> 280 soft tokens (672x960 px)
+    "280-square": (48, 48),     # 2304 patches -> 256 soft tokens (768x768 px)
+    "280-landscape": (42, 57),  # 2394 patches -> 266 soft tokens (912x672 px)
+}
 
-    # Check common cache locations
+DEFAULT_VISION_PRESETS = ["140-portrait", "280-portrait", "280-square", "280-landscape"]
+
+
+def is_offline_env() -> bool:
+    return os.environ.get("HF_HUB_OFFLINE", "").strip().lower() in ("1", "true", "yes")
+
+
+def _load_sharded_index(index_path: Path, model_id: str, offline: bool) -> List[Path]:
+    with open(index_path, "r", encoding="utf-8") as f:
+        index_data = json.load(f)
+    weight_map = index_data.get("weight_map", {})
+    shard_names = sorted(set(weight_map.values()))
+    if not shard_names:
+        raise RuntimeError(f"Empty weight_map in safetensors index: {index_path}")
+    shard_paths: List[Path] = []
+    for name in shard_names:
+        cand = index_path.parent / name
+        if cand.is_file():
+            shard_paths.append(cand)
+        elif offline:
+            raise FileNotFoundError(
+                f"Offline mode enabled and shard '{name}' for '{model_id}' is missing in {index_path.parent}"
+            )
+        else:
+            from huggingface_hub import hf_hub_download
+            shard_paths.append(Path(hf_hub_download(repo_id=model_id, filename=name)))
+    return shard_paths
+
+
+def resolve_safetensors_and_config(
+    model_id: str,
+    offline: bool = False,
+) -> Tuple[List[Path], Optional[Dict[str, Any]]]:
+    """Locate single or sharded safetensors weights and optional config.json from local path, HF cache, or HF Hub."""
+    offline_active = offline or is_offline_env()
+    direct_path = Path(model_id)
+
+    def read_config_in_dir(d: Path) -> Optional[Dict[str, Any]]:
+        cfg_file = d / "config.json"
+        if cfg_file.is_file():
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return None
+
+    if direct_path.is_file() and direct_path.name.endswith(".safetensors"):
+        return [direct_path], read_config_in_dir(direct_path.parent)
+
+    if direct_path.is_dir():
+        single = direct_path / "model.safetensors"
+        index = direct_path / "model.safetensors.index.json"
+        cfg = read_config_in_dir(direct_path)
+        if single.is_file():
+            return [single], cfg
+        if index.is_file():
+            return _load_sharded_index(index, model_id, offline=True), cfg
+        raise FileNotFoundError(f"No model.safetensors or model.safetensors.index.json found in {direct_path}")
+
+    # Check common Hugging Face cache locations
     search_roots = [
         os.environ.get("HF_HUB_CACHE"),
-        os.environ.get("HF_HOME", "") + "/hub" if os.environ.get("HF_HOME") else None,
+        os.path.join(os.environ["HF_HOME"], "hub") if os.environ.get("HF_HOME") else None,
         os.path.expanduser("~/.cache/huggingface/hub"),
     ]
     repo_folder = f"models--{model_id.replace('/', '--')}"
@@ -488,28 +573,96 @@ def resolve_safetensors_path(model_id: str) -> Path:
         if root and os.path.isdir(root):
             cand = Path(root) / repo_folder / "snapshots"
             if cand.is_dir():
-                for snapshot in cand.iterdir():
+                for snapshot in sorted(cand.iterdir()):
+                    if not snapshot.is_dir():
+                        continue
+                    cfg = read_config_in_dir(snapshot)
                     st_file = snapshot / "model.safetensors"
                     if st_file.is_file():
                         print(f"Found cached safetensors at: {st_file}")
-                        return st_file
+                        return [st_file], cfg
+                    idx_file = snapshot / "model.safetensors.index.json"
+                    if idx_file.is_file():
+                        print(f"Found cached sharded safetensors index at: {idx_file}")
+                        return _load_sharded_index(idx_file, model_id, offline=offline_active), cfg
 
-    # Fallback to downloading
-    print(f"Downloading {model_id}/model.safetensors via huggingface_hub...")
+    if offline_active:
+        raise RuntimeError(
+            f"Offline mode enabled and '{model_id}' is not cached in local Hugging Face cache. "
+            f"Run without --offline or pass a local model directory / .safetensors path."
+        )
+
     from huggingface_hub import hf_hub_download
-    path = hf_hub_download(repo_id=model_id, filename="model.safetensors")
-    return Path(path)
+    cfg: Optional[Dict[str, Any]] = None
+    try:
+        cfg_path = Path(hf_hub_download(repo_id=model_id, filename="config.json"))
+        cfg = read_config_in_dir(cfg_path.parent)
+    except Exception:
+        cfg = None
+
+    try:
+        print(f"Downloading {model_id}/model.safetensors via huggingface_hub...")
+        path = Path(hf_hub_download(repo_id=model_id, filename="model.safetensors"))
+        return [path], cfg
+    except Exception:
+        print(f"Trying sharded {model_id}/model.safetensors.index.json via huggingface_hub...")
+        idx_path = Path(hf_hub_download(repo_id=model_id, filename="model.safetensors.index.json"))
+        return _load_sharded_index(idx_path, model_id, offline=False), cfg
 
 
-def load_clean_vision_model(st_weights: Dict[str, torch.Tensor], patch_h: int, patch_w: int) -> CleanGemma2VisionTower:
+def resolve_safetensors_path(model_id: str) -> Path:
+    """Backwards-compatible single-file resolver."""
+    paths, _ = resolve_safetensors_and_config(model_id, offline=False)
+    return paths[0]
+
+
+def load_safetensors_weights(paths: List[Path]) -> Dict[str, torch.Tensor]:
+    merged: Dict[str, torch.Tensor] = {}
+    for p in paths:
+        part = safetensors.torch.load_file(str(p))
+        merged.update(part)
+    return merged
+
+
+def _extract_model_hparams(config: Optional[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if not config:
+        return {}, {}
+    tc = config.get("text_config", config)
+    vc = config.get("vision_config", {})
+    return tc, vc
+
+
+def load_clean_vision_model(
+    st_weights: Dict[str, torch.Tensor],
+    patch_h: int,
+    patch_w: int,
+    vision_cfg: Optional[Dict[str, Any]] = None,
+) -> CleanGemma2VisionTower:
     """Instantiate CleanGemma2VisionTower and transfer weights from state dict."""
-    model = CleanGemma2VisionTower(patch_h=patch_h, patch_w=patch_w)
+    vcfg = vision_cfg or {}
+    hidden_size = int(vcfg.get("hidden_size", 768))
+    num_layers = int(vcfg.get("num_hidden_layers", 16))
+    num_heads = int(vcfg.get("num_attention_heads", 12))
+    head_dim = int(vcfg.get("head_dim", hidden_size // num_heads))
+    intermediate_size = int(vcfg.get("intermediate_size", 3072))
+    eps = float(vcfg.get("rms_norm_eps", 1e-6))
+
+    model = CleanGemma2VisionTower(
+        patch_h=patch_h,
+        patch_w=patch_w,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        intermediate_size=intermediate_size,
+        eps=eps,
+    )
 
     model.input_proj.weight.data.copy_(st_weights["vision_tower.patch_embedder.input_proj.weight"].float())
     pos_table = st_weights["vision_tower.patch_embedder.position_embedding_table"].float()
     model.init_static_buffers(pos_table)
 
-    for i in range(16):
+    for i in range(num_layers):
         prefix = f"vision_tower.encoder.layers.{i}."
         dst = model.layers[i]
 
@@ -533,16 +686,40 @@ def load_clean_vision_model(st_weights: Dict[str, torch.Tensor], patch_h: int, p
     return model
 
 
-def load_clean_text_model(st_weights: Dict[str, torch.Tensor], seq_len: int) -> CleanGemma2TextBackbone:
+def load_clean_text_model(
+    st_weights: Dict[str, torch.Tensor],
+    seq_len: int,
+    text_cfg: Optional[Dict[str, Any]] = None,
+) -> CleanGemma2TextBackbone:
     """Instantiate CleanGemma2TextBackbone and transfer weights from state dict."""
-    model = CleanGemma2TextBackbone(seq_len=seq_len)
+    tcfg = text_cfg or {}
+    vocab_size = int(tcfg.get("vocab_size", st_weights["language_model.embed_tokens.weight"].shape[0]))
+    hidden_size = int(tcfg.get("hidden_size", st_weights["language_model.embed_tokens.weight"].shape[1]))
+    intermediate_size = int(tcfg.get("intermediate_size", 2048))
+    num_hidden_layers = int(tcfg.get("num_hidden_layers", 24))
+    num_heads = int(tcfg.get("num_attention_heads", 4))
+    sliding_window = int(tcfg.get("sliding_window", 512))
+    out_features = int(tcfg.get("embedding_dim", st_weights["language_model.embedding_projection.weight"].shape[0]))
+    eps = float(tcfg.get("rms_norm_eps", 1e-6))
+
+    model = CleanGemma2TextBackbone(
+        seq_len=seq_len,
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=num_hidden_layers,
+        num_heads=num_heads,
+        sliding_window=sliding_window,
+        out_features=out_features,
+        eps=eps,
+    )
     model.init_static_rope()
 
     model.embed_tokens.weight.data.copy_(st_weights["language_model.embed_tokens.weight"].float())
     model.ple_proj.weight.data.copy_(st_weights["language_model.ple.per_layer_model_projection.weight"].float())
     model.ple_norm.weight.data.copy_(st_weights["language_model.ple.per_layer_projection_norm.weight"].float())
 
-    for i in range(24):
+    for i in range(num_hidden_layers):
         prefix = f"language_model.layers.{i}."
         dst = model.layers[i]
 
@@ -581,7 +758,7 @@ def compile_mlpackage(mlpackage_path: Path) -> Path:
     compiled_name = mlpackage_path.stem + ".mlmodelc"
     out_dir = mlpackage_path.parent
     target_path = out_dir / compiled_name
-    print(f"Compiling Core ML model via ct.models.utils.compile_model...")
+    print("Compiling Core ML model via ct.models.utils.compile_model...")
     t0 = time.time()
     compiled_temp = ct.models.utils.compile_model(str(mlpackage_path))
     if target_path.exists():
@@ -599,7 +776,10 @@ def export_vision_tower(
     quantize: str = "w8a16",
     do_compile: bool = True,
     do_verify: bool = True,
-) -> Path:
+    clean_mlpackage: bool = True,
+    vision_cfg: Optional[Dict[str, Any]] = None,
+    preset_name: Optional[str] = None,
+) -> Dict[str, Any]:
     num_patches = patch_h * patch_w
     num_soft_tokens = (patch_h // 3) * (patch_w // 3)
     target_name = f"gemma2_vision_tower_p{num_patches}_t{num_soft_tokens}_h{patch_h}_w{patch_w}_{quantize}"
@@ -610,7 +790,7 @@ def export_vision_tower(
     print(f"Destination: {package_path}")
     print("---------------------------------------------------------------------------")
 
-    model = load_clean_vision_model(st_weights, patch_h=patch_h, patch_w=patch_w)
+    model = load_clean_vision_model(st_weights, patch_h=patch_h, patch_w=patch_w, vision_cfg=vision_cfg)
     dummy_pixels = torch.randn(1, num_patches, 768)
 
     with torch.no_grad():
@@ -652,10 +832,25 @@ def export_vision_tower(
         print(f"Vision Tower Cosine Similarity vs PyTorch FP32: {cos_sim:.6f}")
         assert cos_sim > 0.998, f"Vision parity failed: {cos_sim} < 0.998"
 
+    artifact_path = package_path
     if do_compile:
-        compile_mlpackage(package_path)
+        artifact_path = compile_mlpackage(package_path)
+        if clean_mlpackage and package_path.exists():
+            shutil.rmtree(package_path)
+            print(f"Cleaned intermediate .mlpackage: {package_path}")
 
-    return package_path
+    return {
+        "target": "vision",
+        "preset": preset_name,
+        "name": target_name,
+        "artifact": artifact_path.name,
+        "patch_h": patch_h,
+        "patch_w": patch_w,
+        "num_patches": num_patches,
+        "num_soft_tokens": num_soft_tokens,
+        "quantize": quantize,
+        "deployment_target": "macOS14",
+    }
 
 
 def export_text_backbone(
@@ -665,7 +860,9 @@ def export_text_backbone(
     quantize: str = "w8a16",
     do_compile: bool = True,
     do_verify: bool = True,
-) -> Path:
+    clean_mlpackage: bool = True,
+    text_cfg: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     target_name = f"gemma2_text_backbone_s{seq_len}_{quantize}"
     package_path = output_dir / f"{target_name}.mlpackage"
 
@@ -674,7 +871,7 @@ def export_text_backbone(
     print(f"Destination: {package_path}")
     print("---------------------------------------------------------------------------")
 
-    model = load_clean_text_model(st_weights, seq_len=seq_len)
+    model = load_clean_text_model(st_weights, seq_len=seq_len, text_cfg=text_cfg)
 
     # Realistic prompt tokens ("task: SearchQuery | query: What causes the northern lights?")
     sample_tokens = [2, 603, 235292, 1146, 235284, 1489, 235292, 235248, 1841, 6496, 573, 11956, 5028, 235336]
@@ -726,10 +923,91 @@ def export_text_backbone(
         print(f"Text Backbone Cosine Similarity vs PyTorch FP32: {cos_sim:.6f}")
         assert cos_sim > 0.995, f"Text parity failed: {cos_sim} < 0.995"
 
+    artifact_path = package_path
     if do_compile:
-        compile_mlpackage(package_path)
+        artifact_path = compile_mlpackage(package_path)
+        if clean_mlpackage and package_path.exists():
+            shutil.rmtree(package_path)
+            print(f"Cleaned intermediate .mlpackage: {package_path}")
 
-    return package_path
+    return {
+        "target": "text",
+        "name": target_name,
+        "artifact": artifact_path.name,
+        "seq_len": seq_len,
+        "quantize": quantize,
+        "deployment_target": "macOS14",
+    }
+
+
+def parse_vision_presets(spec: str) -> List[str]:
+    raw = spec.strip()
+    if raw == "all":
+        return list(PRESETS.keys())
+    if raw == "default":
+        return list(DEFAULT_VISION_PRESETS)
+    chosen: List[str] = []
+    for part in raw.split(","):
+        name = part.strip()
+        if not name:
+            continue
+        if name not in PRESETS:
+            valid = ", ".join(list(PRESETS.keys()) + ["default", "all"])
+            raise ValueError(f"Unknown vision preset '{name}'. Valid options: {valid}")
+        if name not in chosen:
+            chosen.append(name)
+    if not chosen:
+        raise ValueError("Empty --vision-preset list")
+    return chosen
+
+
+def parse_text_seq_lens(single: int, multi: Optional[str]) -> List[int]:
+    if not multi:
+        if single <= 0:
+            raise ValueError(f"--text-seq-len must be > 0, got {single}")
+        return [single]
+    lens: List[int] = []
+    for part in multi.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        val = int(item)
+        if val <= 0:
+            raise ValueError(f"All values in --text-seq-lens must be > 0, got {val}")
+        if val not in lens:
+            lens.append(val)
+    if not lens:
+        raise ValueError("Empty --text-seq-lens list")
+    return lens
+
+
+def write_manifest(output_dir: Path, model_id: str, quantize: str, entries: List[Dict[str, Any]]) -> Path:
+    manifest_path = output_dir / "manifest.json"
+    existing_models: Dict[str, Dict[str, Any]] = {}
+    if manifest_path.is_file():
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                prev = json.load(f)
+            for item in prev.get("models", []):
+                if "artifact" in item:
+                    existing_models[item["artifact"]] = item
+        except Exception:
+            pass
+
+    for item in entries:
+        existing_models[item["artifact"]] = item
+
+    manifest = {
+        "schema_version": 1,
+        "model_id": model_id,
+        "quantize": quantize,
+        "deployment_target": "macOS14",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "models": list(existing_models.values()),
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest_path
 
 
 # ===========================================================================
@@ -737,25 +1015,61 @@ def export_text_backbone(
 # ===========================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Export EmbeddingGemma 2 Subsystems to Core ML for Apple Neural Engine (ANE)")
-    PRESETS = {
-        "140-portrait": (42, 27),  # 1134 patches -> 126 soft tokens (672x432 px for standard portrait documents)
-        "140-std": (42, 30),       # 1260 patches -> 140 soft tokens (672x480 px)
-        "280-portrait": (57, 42),  # 2394 patches -> 266 soft tokens (912x672 px for standard portrait documents)
-        "280-std": (60, 42),       # 2520 patches -> 280 soft tokens (960x672 px)
-    }
+    preset_list = ", ".join(PRESETS.keys())
+    parser = argparse.ArgumentParser(
+        description="Export EmbeddingGemma 2 Subsystems to Core ML for Apple Neural Engine (ANE)"
+    )
 
-    parser.add_argument("--model-id", type=str, default="google/embeddinggemma-2", help="Hugging Face model ID or path to safetensors")
-    parser.add_argument("--output-dir", type=Path, default=Path("models/coreml"), help="Directory for exported .mlpackage and .mlmodelc")
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default="google/embeddinggemma-2",
+        help="Hugging Face model ID, local model directory, or path to safetensors",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("models/coreml"),
+        help="Directory for exported .mlmodelc (and optional .mlpackage) artifacts",
+    )
     parser.add_argument("--target", choices=["all", "vision", "text"], default="all", help="Subsystems to export")
-    parser.add_argument("--vision-preset", choices=list(PRESETS.keys()), default="140-portrait",
-                        help="Vision patch grid preset: '140-portrait' (42x27=1134 patches), '140-std' (42x30=1260 patches), '280-portrait' (57x42=2394 patches), '280-std' (60x42=2520 patches)")
+    parser.add_argument(
+        "--vision-preset",
+        type=str,
+        default="140-portrait",
+        help=f"Comma-separated vision presets, 'default' (140-portrait,280-portrait,280-square,280-landscape), or 'all'. Available: {preset_list}",
+    )
     parser.add_argument("--text-seq-len", type=int, default=512, help="Static sequence length for resident RAG text model (default: 512)")
+    parser.add_argument(
+        "--text-seq-lens",
+        type=str,
+        default=None,
+        help="Comma-separated static sequence lengths for text buckets (e.g. '128,512,1024'); overrides --text-seq-len",
+    )
     parser.add_argument("--quantize", choices=["w8a16", "fp16"], default="w8a16", help="Linear quantization mode (w8a16 recommended for ANE)")
     parser.add_argument("--no-compile", action="store_true", help="Skip compilation to .mlmodelc")
     parser.add_argument("--no-verify", action="store_true", help="Skip parity verification against PyTorch")
+    parser.add_argument(
+        "--keep-mlpackage",
+        action="store_true",
+        help="Retain intermediate .mlpackage bundles after compiling to .mlmodelc (deleted by default)",
+    )
+    parser.add_argument(
+        "--clean-mlpackage",
+        action="store_true",
+        help="Compatibility no-op alias (intermediate .mlpackage bundles are already cleaned by default after compile)",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Fail immediately if weights/config are not present in local HF cache",
+    )
 
     args = parser.parse_args()
+    vision_presets = parse_vision_presets(args.vision_preset) if args.target in ["all", "vision"] else []
+    text_seq_lens = parse_text_seq_lens(args.text_seq_len, args.text_seq_lens) if args.target in ["all", "text"] else []
+    clean_mlpackage = not args.keep_mlpackage
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     print("===========================================================================")
@@ -763,43 +1077,57 @@ def main():
     print("===========================================================================")
     print(f"  Model ID       : {args.model_id}")
     print(f"  Target         : {args.target}")
-    print(f"  Vision Preset  : {args.vision_preset}")
-    print(f"  Text Seq Len   : {args.text_seq_len}")
+    print(f"  Vision Presets : {vision_presets}")
+    print(f"  Text Seq Lens  : {text_seq_lens}")
     print(f"  Quantization   : {args.quantize}")
+    print(f"  Clean .mlpkg   : {clean_mlpackage and not args.no_compile}")
     print(f"  Output Dir     : {args.output_dir.resolve()}")
     print("===========================================================================")
 
-    st_path = resolve_safetensors_path(args.model_id)
+    st_paths, raw_cfg = resolve_safetensors_and_config(args.model_id, offline=args.offline)
+    text_cfg, vision_cfg = _extract_model_hparams(raw_cfg)
     t0 = time.time()
-    print(f"Loading weights from: {st_path} ...")
-    st_weights = safetensors.torch.load_file(str(st_path))
+    print(f"Loading weights from {len(st_paths)} file(s): {[str(p) for p in st_paths]} ...")
+    st_weights = load_safetensors_weights(st_paths)
     print(f"Loaded {len(st_weights)} tensors in {time.time()-t0:.2f}s")
 
-    patch_h, patch_w = PRESETS[args.vision_preset]
+    manifest_entries: List[Dict[str, Any]] = []
 
     if args.target in ["all", "vision"]:
-        export_vision_tower(
-            st_weights=st_weights,
-            output_dir=args.output_dir,
-            patch_h=patch_h,
-            patch_w=patch_w,
-            quantize=args.quantize,
-            do_compile=not args.no_compile,
-            do_verify=not args.no_verify,
-        )
+        for preset_name in vision_presets:
+            patch_h, patch_w = PRESETS[preset_name]
+            meta = export_vision_tower(
+                st_weights=st_weights,
+                output_dir=args.output_dir,
+                patch_h=patch_h,
+                patch_w=patch_w,
+                quantize=args.quantize,
+                do_compile=not args.no_compile,
+                do_verify=not args.no_verify,
+                clean_mlpackage=clean_mlpackage,
+                vision_cfg=vision_cfg,
+                preset_name=preset_name,
+            )
+            manifest_entries.append(meta)
 
     if args.target in ["all", "text"]:
-        export_text_backbone(
-            st_weights=st_weights,
-            output_dir=args.output_dir,
-            seq_len=args.text_seq_len,
-            quantize=args.quantize,
-            do_compile=not args.no_compile,
-            do_verify=not args.no_verify,
-        )
+        for seq_len in text_seq_lens:
+            meta = export_text_backbone(
+                st_weights=st_weights,
+                output_dir=args.output_dir,
+                seq_len=seq_len,
+                quantize=args.quantize,
+                do_compile=not args.no_compile,
+                do_verify=not args.no_verify,
+                clean_mlpackage=clean_mlpackage,
+                text_cfg=text_cfg,
+            )
+            manifest_entries.append(meta)
 
+    manifest_path = write_manifest(args.output_dir, args.model_id, args.quantize, manifest_entries)
+    print(f"\nWrote Core ML manifest: {manifest_path}")
     print("\n===========================================================================")
-    print("  Phase A Core ML Export Complete!")
+    print("  Core ML Export Complete!")
     print(f"  Artifacts saved in: {args.output_dir.resolve()}")
     print("===========================================================================")
 

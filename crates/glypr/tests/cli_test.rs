@@ -1,6 +1,31 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+fn should_skip_weight_test() -> bool {
+    if std::env::var("GLYPR_ALLOW_MISSING_WEIGHTS").is_err() {
+        return false;
+    }
+    let cache_dir = std::env::var("HF_HUB_CACHE")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| std::env::var("HF_HOME").map(|h| std::path::PathBuf::from(h).join("hub")))
+        .or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".cache/huggingface/hub"))
+        })
+        .unwrap_or_else(|_| std::path::PathBuf::from(".cache/huggingface/hub"));
+    let repo_dir = cache_dir.join("models--ggml-org--embeddinggemma-2-GGUF/snapshots");
+    if !repo_dir.is_dir() {
+        return true;
+    }
+    let has_bf16 = std::fs::read_dir(&repo_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| e.path().join("embeddinggemma-2-BF16.gguf").exists());
+    !has_bf16
+}
+
 #[test]
 fn test_cli_help() {
     let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
@@ -14,7 +39,42 @@ fn test_cli_help() {
     assert!(stdout.contains("serve"));
     assert!(stdout.contains("pull"));
     assert!(stdout.contains("info"));
+    assert!(stdout.contains("inspect"));
+    assert!(stdout.contains("--offline"));
+    assert!(stdout.contains("--text-backend"));
     assert!(!stdout.contains("sim")); // sim was removed for V1
+}
+
+#[test]
+fn test_cli_embed_help_lists_all_tasks_and_new_flags() {
+    let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["embed", "--help"])
+        .output()
+        .expect("Failed to execute glypr embed --help");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for expected in [
+        "--batch",
+        "--jsonl",
+        "--image",
+        "--audio",
+        "--text-file",
+        "search_query",
+        "document",
+        "code_retrieval",
+        "question_answering",
+        "fact_checking",
+        "classification",
+        "clustering",
+        "sentence_similarity",
+        "raw",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "embed --help missing '{expected}':\n{stdout}"
+        );
+    }
 }
 
 #[test]
@@ -34,13 +94,185 @@ fn test_cli_info() {
     assert!(stdout.contains("Hardware & Runtime:"));
     assert!(stdout.contains("8,192 tokens"));
     assert!(stdout.contains("Attention Kernels (--attention):"));
+    assert!(stdout.contains("Supported Tasks (--task):"));
     assert!(stdout.contains("Output Dimensions (--dim):"));
     assert!(stdout.contains("Encoding Format (--encoding):"));
     assert!(stdout.contains("Vision Budget (--image-token-budget):"));
+    assert!(stdout.contains("Neural Engine (ANE):"));
+}
+
+#[test]
+fn test_cli_flag_contradictions_and_preload_validation() {
+    // 1. --bf16 --q8 contradiction
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["--bf16", "--q8", "info"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+
+    // 2. --device cpu --metal contradiction
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["--device", "cpu", "--metal", "info"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+
+    // 3. --dim 0 and --dim 1024 rejected before loading model
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["embed", "--dim", "0", "hi"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Invalid --dim 0"));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["embed", "--dim", "1024", "hi"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Invalid --dim 1024"));
+
+    // 4. --encoding binary --dim 100 rejected before loading model
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["embed", "--encoding", "binary", "--dim", "100", "hi"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("multiple of 64"));
+
+    // 5. --image-token-budget out of range rejected before loading model
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["embed", "--image-token-budget", "5", "hi"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+
+    // 6. Missing media extension positional arg errors immediately
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["--bf16-mmproj", "embed", "./does_not_exist_glypr_test.png"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Media file not found"));
+
+    // 7. Explicit missing --coreml-dir fails fast
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args([
+            "--coreml-dir",
+            "/tmp/nonexistent_glypr_coreml_dir_999",
+            "embed",
+            "hi",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+
+    // 8. Offline pull cache miss fails cleanly without network
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["--offline", "--q8", "pull"])
+        .env("HF_HUB_CACHE", "/tmp/empty_glypr_hf_cache_test")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("offline mode is enabled"));
+
+    // 8b. --batch conflicts with --jsonl; missing explicit --image / --text-file fail fast;
+    // README.md is treated as text (reaches --dim validation rather than failing as media)
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["embed", "--batch", "--jsonl", "hi"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args([
+            "--bf16-mmproj",
+            "embed",
+            "--image",
+            "/tmp/nonexistent_glypr_img.png",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Media file not found"));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["embed", "--text-file", "/tmp/nonexistent_glypr_txt.txt"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Text file not found"));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["embed", "README.md", "--dim", "1024"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Invalid --dim 1024"));
+
+    // 9. Compile-time ANE feature error or contradiction
+    #[cfg(not(any(feature = "coreml", feature = "ane")))]
+    {
+        let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+            .args(["--ane", "embed", "hi"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--features ane"));
+    }
+    #[cfg(any(feature = "coreml", feature = "ane"))]
+    {
+        let out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+            .args(["--ane", "--vision-backend", "metal", "embed", "hi"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("Contradictory flags"));
+    }
+}
+
+#[test]
+fn test_cli_inspect_synthetic_gguf() {
+    let tmp = std::env::temp_dir().join(format!("glypr_inspect_test_{}.gguf", std::process::id()));
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"GGUF");
+    bytes.extend_from_slice(&3u32.to_le_bytes()); // version 3
+    bytes.extend_from_slice(&0u64.to_le_bytes()); // tensor_count = 0
+    bytes.extend_from_slice(&1u64.to_le_bytes()); // metadata_kv_count = 1
+    let key = b"general.architecture";
+    bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(key);
+    bytes.extend_from_slice(&8u32.to_le_bytes()); // GGUF_TYPE_STRING = 8
+    let val = b"embeddinggemma2";
+    bytes.extend_from_slice(&(val.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(val);
+    std::fs::write(&tmp, &bytes).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["inspect", tmp.to_str().unwrap()])
+        .output()
+        .expect("Failed to run glypr inspect");
+
+    let _ = std::fs::remove_file(&tmp);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("GGUF File:"));
+    assert!(stdout.contains("embeddinggemma2"));
+    assert!(stdout.contains("Tensors: 0"));
 }
 
 #[test]
 fn test_cli_pull_dry_or_cached() {
+    if should_skip_weight_test() {
+        eprintln!(
+            "Skipping test_cli_pull_dry_or_cached: GLYPR_ALLOW_MISSING_WEIGHTS=1 and cache empty"
+        );
+        return;
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
         .args(["--q8", "pull"])
         .output()
@@ -53,6 +285,10 @@ fn test_cli_pull_dry_or_cached() {
 
 #[test]
 fn test_cli_embed_text_json_truncated_dim() {
+    if should_skip_weight_test() {
+        eprintln!("Skipping test_cli_embed_text_json_truncated_dim: GLYPR_ALLOW_MISSING_WEIGHTS=1");
+        return;
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
         .args([
             "embed",
@@ -79,6 +315,10 @@ fn test_cli_embed_text_json_truncated_dim() {
 
 #[test]
 fn test_cli_embed_stdin_piped() {
+    if should_skip_weight_test() {
+        eprintln!("Skipping test_cli_embed_stdin_piped: GLYPR_ALLOW_MISSING_WEIGHTS=1");
+        return;
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_glypr"))
         .args(["embed", "--dim", "64", "-o", "json"])
         .stdin(Stdio::piped())
@@ -104,7 +344,73 @@ fn test_cli_embed_stdin_piped() {
 }
 
 #[test]
+fn test_cli_embed_batch_and_jsonl_and_readme_literal() {
+    if should_skip_weight_test() {
+        eprintln!("Skipping batch/jsonl/readme test: GLYPR_ALLOW_MISSING_WEIGHTS=1");
+        return;
+    }
+
+    // 1. Existing non-media file like README.md embeds as literal text
+    let readme_out = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["embed", "README.md", "--dim", "64", "-o", "json"])
+        .output()
+        .unwrap();
+    assert!(readme_out.status.success());
+    let vec: Vec<f32> = serde_json::from_slice(&readme_out.stdout).unwrap();
+    assert_eq!(vec.len(), 64);
+
+    // 2. --batch via STDIN lines
+    let mut child = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["embed", "--batch", "--dim", "64", "-o", "json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"first line\nsecond line\n")
+        .unwrap();
+    let batch_out = child.wait_with_output().unwrap();
+    assert!(batch_out.status.success());
+    let lines: Vec<&str> = std::str::from_utf8(&batch_out.stdout)
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 2);
+
+    // 3. --jsonl streaming
+    let mut child = Command::new(env!("CARGO_BIN_EXE_glypr"))
+        .args(["embed", "--jsonl", "--dim", "64"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"{\"text\":\"hello\",\"task\":\"SearchQuery\"}\nplain line\n")
+        .unwrap();
+    let jsonl_out = child.wait_with_output().unwrap();
+    assert!(jsonl_out.status.success());
+    let jsonl_lines: Vec<&str> = std::str::from_utf8(&jsonl_out.stdout)
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(jsonl_lines.len(), 2);
+    let obj0: serde_json::Value = serde_json::from_str(jsonl_lines[0]).unwrap();
+    assert_eq!(obj0["index"], 0);
+    assert_eq!(obj0["dim"], 64);
+}
+
+#[test]
 fn test_cli_embed_q8_int8_json() {
+    if should_skip_weight_test() {
+        eprintln!("Skipping test_cli_embed_q8_int8_json: GLYPR_ALLOW_MISSING_WEIGHTS=1");
+        return;
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
         .args([
             "--q8",
@@ -132,6 +438,10 @@ fn test_cli_embed_q8_int8_json() {
 
 #[test]
 fn test_cli_embed_q8_int_json() {
+    if should_skip_weight_test() {
+        eprintln!("Skipping test_cli_embed_q8_int_json: GLYPR_ALLOW_MISSING_WEIGHTS=1");
+        return;
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
         .args([
             "--q8",
@@ -159,6 +469,10 @@ fn test_cli_embed_q8_int_json() {
 
 #[test]
 fn test_cli_embed_binary_raw_bytes() {
+    if should_skip_weight_test() {
+        eprintln!("Skipping test_cli_embed_binary_raw_bytes: GLYPR_ALLOW_MISSING_WEIGHTS=1");
+        return;
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_glypr"))
         .args([
             "embed",
@@ -180,6 +494,10 @@ fn test_cli_embed_binary_raw_bytes() {
 
 #[test]
 fn test_cli_embed_multimodal_interleaved() {
+    if should_skip_weight_test() {
+        eprintln!("Skipping test_cli_embed_multimodal_interleaved: GLYPR_ALLOW_MISSING_WEIGHTS=1");
+        return;
+    }
     let image_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../tests/golden_vectors/multimodal_test_image.png"
@@ -238,6 +556,10 @@ fn test_cli_embed_multimodal_fails_without_mmproj() {
 
 #[test]
 fn test_cli_attention_modes() {
+    if should_skip_weight_test() {
+        eprintln!("Skipping test_cli_attention_modes: GLYPR_ALLOW_MISSING_WEIGHTS=1");
+        return;
+    }
     // 1. Explicit --attention chunked
     let output_chunked = Command::new(env!("CARGO_BIN_EXE_glypr"))
         .args([
@@ -273,6 +595,10 @@ fn test_cli_attention_modes() {
 
 #[test]
 fn test_cli_embed_jpeg_and_webp() {
+    if should_skip_weight_test() {
+        eprintln!("Skipping test_cli_embed_jpeg_and_webp: GLYPR_ALLOW_MISSING_WEIGHTS=1");
+        return;
+    }
     let png_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../tests/golden_vectors/multimodal_test_image.png"

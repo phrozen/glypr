@@ -1,8 +1,44 @@
+//! # `glypr-core`: Native Rust Inference Engine for EmbeddingGemma 2
+//!
+//! `glypr-core` provides a self-contained, hardware-accelerated embedding engine supporting
+//! text, images, audio, and interleaved multimodal inputs from a single `.gguf` container
+//! (or Hugging Face Safetensors directory).
+//!
+//! ## Backends & Cargo Features
+//! - **Default (`[]`)**: Portable CPU SIMD (`pulp` AVX2/AVX-512/NEON) with zero external runtime dependencies.
+//! - **`metal`**: Apple Silicon Metal GPU (`BF16`) with compiled shader caching.
+//! - **`metal-flash-attn`**: Hardware-fused Metal FlashAttention kernels (`mpp::tensor_ops` on M5, `simdgroup_matrix` on M1–M4).
+//! - **`coreml` / `ane`**: Apple Neural Engine (ANE) acceleration via compiled CoreML `.mlmodelc` vision and text models.
+//! - **`accelerate`**: Apple Accelerate BLAS backend for CPU execution.
+//!
+//! ## Quick Start
+//! ```no_run
+//! use glypr_core::{AttentionMode, GlyprEmbedder, Task};
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! let mut embedder = GlyprEmbedder::builder()
+//!     .gguf_canonical(false)
+//!     .attention_mode(AttentionMode::ChunkedSliding)
+//!     .build()?;
+//!
+//! let query = embedder.embed_text("What causes gravitational lensing?", Task::SearchQuery)?;
+//! let truncated = embedder.embed_text_with_dim(
+//!     "What causes gravitational lensing?",
+//!     Task::SearchQuery,
+//!     Some(256),
+//! )?;
+//! assert_eq!(query.len(), 768);
+//! assert_eq!(truncated.len(), 256);
+//! # Ok(())
+//! # }
+//! ```
+
 pub mod attention;
 pub mod config;
 #[cfg(feature = "coreml")]
 pub mod coreml;
 pub mod cpu_simd;
+pub mod error;
 pub mod hub;
 pub mod layer;
 pub mod linear;
@@ -20,8 +56,11 @@ pub mod tokenizer;
 pub mod util;
 
 pub use attention::AttentionMode;
+#[doc(hidden)]
+pub use candle_nn as _candle_nn;
 #[cfg(feature = "coreml")]
-pub use coreml::{CoreMLComputeUnits, CoreMLTextBackbone, CoreMLVisionTower};
+pub use coreml::{CoreMLTextBackbone, CoreMLVisionTower, VisionGridInfo};
+pub use error::GlyprError;
 pub use linear::LinearOp;
 pub use model::EmbeddingGemma2Model;
 pub use multimodal::{
@@ -40,11 +79,119 @@ pub use util::{
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Module, Tensor};
 use config::TextConfig;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokenizer::GlyprTokenizer;
 
 // 8,192 content tokens + 128 tokens headroom for task prefixes, document titles, and special tokens
 pub const DEFAULT_MAX_SEQ_LEN: usize = 8192 + 128; // 8,320 tokens
+
+/// Compute unit selection for CoreML / Apple Neural Engine execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreMLComputeUnits {
+    /// Route to CPU and Apple Neural Engine (recommended for ANE efficiency).
+    #[default]
+    CpuAndNeuralEngine,
+    /// Allow CoreML to schedule across CPU, GPU, and Neural Engine.
+    All,
+    /// Restrict CoreML execution to CPU and GPU.
+    CpuAndGpu,
+    /// Restrict CoreML execution to CPU only.
+    CpuOnly,
+}
+
+impl CoreMLComputeUnits {
+    /// Canonical CLI/display string (`"ane"`, `"all"`, `"gpu"`, `"cpu"`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CpuAndNeuralEngine => "ane",
+            Self::All => "all",
+            Self::CpuAndGpu => "gpu",
+            Self::CpuOnly => "cpu",
+        }
+    }
+}
+
+impl std::fmt::Display for CoreMLComputeUnits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for CoreMLComputeUnits {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "ane" | "cpu_and_ne" | "cpu_and_neural_engine" | "neural_engine" => {
+                Ok(Self::CpuAndNeuralEngine)
+            }
+            "all" => Ok(Self::All),
+            "gpu" | "cpu_and_gpu" => Ok(Self::CpuAndGpu),
+            "cpu" | "cpu_only" => Ok(Self::CpuOnly),
+            other => anyhow::bail!(
+                "Invalid CoreML compute units '{other}'; expected one of: ane, all, gpu, cpu"
+            ),
+        }
+    }
+}
+
+/// Routing policy for pure-text execution when a CoreML text backbone is attached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextBackendPolicy {
+    /// Route pure text sequences in the ANE sweet spot (`64..=seq_len` tokens, `batch_size <= 4`)
+    /// to CoreML ANE when attached; keep `<64` tokens, `>seq_len`, `batch_size > 4`, and multimodal on Metal/CPU.
+    #[default]
+    Auto,
+    /// Require ANE CoreML text backbone; error if no CoreML text model is attached or `seq_len` exceeds limit.
+    AneStrict,
+    /// Force Metal/CPU text backbone even when a CoreML text model is attached.
+    Metal,
+}
+
+impl TextBackendPolicy {
+    /// Canonical string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::AneStrict => "ane_strict",
+            Self::Metal => "metal",
+        }
+    }
+}
+
+impl std::fmt::Display for TextBackendPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for TextBackendPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "ane" | "ane_strict" | "strict" => Ok(Self::AneStrict),
+            "metal" | "gpu" | "cpu" => Ok(Self::Metal),
+            other => anyhow::bail!(
+                "Invalid text backend policy '{other}'; expected one of: auto, ane, metal"
+            ),
+        }
+    }
+}
+
+/// Summary of CoreML vision and text models attached from a directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoreMLAttachReport {
+    /// `(patch_height, patch_width)` grids loaded for ANE vision.
+    pub vision_grids: Vec<(usize, usize)>,
+    /// Static `seq_len` buckets loaded for ANE text.
+    pub text_seq_lens: Vec<usize>,
+    /// Non-fatal diagnostics if one modality was absent in the directory.
+    pub warnings: Vec<String>,
+}
 
 pub struct GlyprEmbedder {
     pub model: EmbeddingGemma2Model,
@@ -56,7 +203,10 @@ pub struct GlyprEmbedder {
     pub max_seq_len: usize,
     #[cfg(feature = "coreml")]
     pub coreml_vision: Option<CoreMLVisionTower>,
+    #[cfg(feature = "coreml")]
+    pub coreml_text: Option<CoreMLTextBackbone>,
     pub vision_backend: VisionBackendPolicy,
+    pub text_backend: TextBackendPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -138,7 +288,231 @@ impl<'a> MultimodalInput<'a> {
     }
 }
 
+#[derive(Debug, Clone)]
+enum BuilderModelSource {
+    Canonical { use_q8: bool },
+    GgufFile(PathBuf),
+    SafetensorsDir(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+enum BuilderMmprojSource {
+    Canonical { use_q8: bool },
+    File(PathBuf),
+}
+
+/// Fluent builder for configuring and loading a [`GlyprEmbedder`].
+///
+/// Automatically detects Apple Metal availability when `device` is unset, picks
+/// `DType::BF16` on Metal or `DType::F32` on CPU, and wires optional `mmproj` and
+/// CoreML (ANE) vision + text models.
+pub struct GlyprBuilder {
+    model_source: BuilderModelSource,
+    mmproj_source: Option<BuilderMmprojSource>,
+    device: Option<Device>,
+    dtype: Option<DType>,
+    attention_mode: Option<AttentionMode>,
+    vision_backend: VisionBackendPolicy,
+    text_backend: TextBackendPolicy,
+    coreml_dir: Option<PathBuf>,
+    coreml_compute_units: CoreMLComputeUnits,
+    max_seq_len: usize,
+    offline: bool,
+}
+
+impl Default for GlyprBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GlyprBuilder {
+    /// Create a new builder configured for canonical BF16 GGUF weights and auto device detection.
+    pub fn new() -> Self {
+        Self {
+            model_source: BuilderModelSource::Canonical { use_q8: false },
+            mmproj_source: None,
+            device: None,
+            dtype: None,
+            attention_mode: None,
+            vision_backend: VisionBackendPolicy::Auto,
+            text_backend: TextBackendPolicy::Auto,
+            coreml_dir: None,
+            coreml_compute_units: CoreMLComputeUnits::CpuAndNeuralEngine,
+            max_seq_len: DEFAULT_MAX_SEQ_LEN,
+            offline: false,
+        }
+    }
+
+    /// Use canonical Hugging Face GGUF weights (`use_q8 = false` for BF16, `true` for Q8_0).
+    pub fn gguf_canonical(mut self, use_q8: bool) -> Self {
+        self.model_source = BuilderModelSource::Canonical { use_q8 };
+        self
+    }
+
+    /// Load base model weights from a local `.gguf` file.
+    pub fn gguf_file<P: AsRef<Path>>(mut self, path: P) -> Self {
+        self.model_source = BuilderModelSource::GgufFile(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Load base model weights from a Hugging Face Safetensors directory (`config.json`, `tokenizer.json`, `model.safetensors`).
+    pub fn safetensors_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
+        self.model_source = BuilderModelSource::SafetensorsDir(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// Attach canonical Hugging Face GGUF multimodal projector (`use_q8 = false` for BF16, `true` for Q8_0).
+    pub fn mmproj_canonical(mut self, use_q8: bool) -> Self {
+        self.mmproj_source = Some(BuilderMmprojSource::Canonical { use_q8 });
+        self
+    }
+
+    /// Attach a multimodal projector from a local `mmproj-*.gguf` file.
+    pub fn mmproj_file<P: AsRef<Path>>(mut self, path: P) -> Self {
+        self.mmproj_source = Some(BuilderMmprojSource::File(path.as_ref().to_path_buf()));
+        self
+    }
+
+    /// Override the compute device (defaults to auto-detecting safe Metal availability, else CPU).
+    pub fn device(mut self, device: Device) -> Self {
+        self.device = Some(device);
+        self
+    }
+
+    /// Override the tensor dtype (defaults to `BF16` on Metal and `F32` on CPU).
+    pub fn dtype(mut self, dtype: DType) -> Self {
+        self.dtype = Some(dtype);
+        self
+    }
+
+    /// Set the attention kernel mode (`Auto` picks `MetalFlash` on Metal or `ChunkedSliding` on CPU).
+    pub fn attention_mode(mut self, mode: AttentionMode) -> Self {
+        self.attention_mode = Some(mode);
+        self
+    }
+
+    /// Set routing policy for vision execution (`Auto`, `AneStrict`, `Metal`).
+    pub fn vision_backend(mut self, policy: VisionBackendPolicy) -> Self {
+        self.vision_backend = policy;
+        self
+    }
+
+    /// Set routing policy for pure-text ANE execution (`Auto`, `AneStrict`, `Metal`).
+    pub fn text_backend(mut self, policy: TextBackendPolicy) -> Self {
+        self.text_backend = policy;
+        self
+    }
+
+    /// Attach compiled CoreML `.mlmodelc` vision and text models from `dir`.
+    pub fn coreml_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
+        self.coreml_dir = Some(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// Set CoreML compute units (defaults to `CpuAndNeuralEngine`).
+    pub fn coreml_compute_units(mut self, units: CoreMLComputeUnits) -> Self {
+        self.coreml_compute_units = units;
+        self
+    }
+
+    /// Override maximum supported token context length (default `8,320`).
+    pub fn max_seq_len(mut self, len: usize) -> Self {
+        self.max_seq_len = len;
+        self
+    }
+
+    /// Enable or disable strict offline Hub resolution (never hits network).
+    pub fn offline(mut self, offline: bool) -> Self {
+        self.offline = offline;
+        self
+    }
+
+    /// Construct and initialize the [`GlyprEmbedder`].
+    pub fn build(self) -> Result<GlyprEmbedder> {
+        let device = match self.device {
+            Some(d) => d,
+            None => {
+                #[cfg(feature = "metal")]
+                {
+                    if metal_kernels::is_metal_device_available() {
+                        Device::new_metal(0)?
+                    } else {
+                        Device::Cpu
+                    }
+                }
+                #[cfg(not(feature = "metal"))]
+                {
+                    Device::Cpu
+                }
+            }
+        };
+
+        let dtype = self
+            .dtype
+            .unwrap_or_else(|| GlyprEmbedder::default_dtype_for_device(&device));
+
+        let mut embedder = match self.model_source {
+            BuilderModelSource::Canonical { use_q8 } => {
+                let path = hub::resolve_canonical_model_with_options(use_q8, self.offline)?;
+                GlyprEmbedder::load_gguf(path, &device, dtype)?
+            }
+            BuilderModelSource::GgufFile(path) => GlyprEmbedder::load_gguf(path, &device, dtype)?,
+            BuilderModelSource::SafetensorsDir(dir) => GlyprEmbedder::load(dir, &device, dtype)?,
+        };
+
+        embedder.set_max_seq_len(self.max_seq_len);
+        embedder.set_vision_backend(self.vision_backend);
+        embedder.set_text_backend(self.text_backend);
+
+        if let Some(mode) = self.attention_mode {
+            embedder.set_attention_mode(mode);
+        }
+
+        if let Some(mmproj) = self.mmproj_source {
+            match mmproj {
+                BuilderMmprojSource::Canonical { use_q8 } => {
+                    let path = hub::resolve_canonical_mmproj_with_options(use_q8, self.offline)?;
+                    embedder.attach_multimodal_projector(path)?;
+                }
+                BuilderMmprojSource::File(path) => {
+                    embedder.attach_multimodal_projector(path)?;
+                }
+            }
+        }
+
+        if let Some(dir) = self.coreml_dir {
+            #[cfg(feature = "coreml")]
+            {
+                let _ = embedder.attach_coreml_dir(&dir, self.coreml_compute_units)?;
+            }
+            #[cfg(not(feature = "coreml"))]
+            {
+                let _ = (dir, self.coreml_compute_units);
+                anyhow::bail!(
+                    "CoreML directory specified, but glypr-core was built without --features coreml / ane"
+                );
+            }
+        }
+
+        Ok(embedder)
+    }
+}
+
 impl GlyprEmbedder {
+    /// Create a fluent [`GlyprBuilder`] for configuring and loading a `GlyprEmbedder`.
+    pub fn builder() -> GlyprBuilder {
+        GlyprBuilder::new()
+    }
+
+    fn default_dtype_for_device(device: &Device) -> DType {
+        if device.is_metal() {
+            DType::BF16
+        } else {
+            DType::F32
+        }
+    }
+
     pub fn load<P: AsRef<Path>>(model_dir: P, device: &Device, dtype: DType) -> Result<Self> {
         let dir = model_dir.as_ref();
         let config_path = dir.join("config.json");
@@ -167,7 +541,10 @@ impl GlyprEmbedder {
             max_seq_len: DEFAULT_MAX_SEQ_LEN,
             #[cfg(feature = "coreml")]
             coreml_vision: None,
+            #[cfg(feature = "coreml")]
+            coreml_text: None,
             vision_backend: VisionBackendPolicy::Auto,
+            text_backend: TextBackendPolicy::Auto,
         })
     }
 
@@ -204,28 +581,83 @@ impl GlyprEmbedder {
             max_seq_len: DEFAULT_MAX_SEQ_LEN,
             #[cfg(feature = "coreml")]
             coreml_vision: None,
+            #[cfg(feature = "coreml")]
+            coreml_text: None,
             vision_backend: VisionBackendPolicy::Auto,
+            text_backend: TextBackendPolicy::Auto,
         })
     }
 
     /// Load self-contained BF16 GGUF file (e.g., `embeddinggemma-2-BF16.gguf`)
     pub fn load_gguf_bf16<P: AsRef<Path>>(gguf_path: P, device: &Device) -> Result<Self> {
-        let dtype = if device.is_metal() {
-            DType::BF16
-        } else {
-            DType::F32
-        };
-        Self::load_gguf(gguf_path, device, dtype)
+        Self::load_gguf(gguf_path, device, Self::default_dtype_for_device(device))
     }
 
     /// Load self-contained Q8_0 quantized GGUF file (e.g., `embeddinggemma-2-Q8_0.gguf`)
     pub fn load_gguf_q8<P: AsRef<Path>>(gguf_path: P, device: &Device) -> Result<Self> {
-        let dtype = if device.is_metal() {
-            DType::BF16
-        } else {
-            DType::F32
-        };
-        Self::load_gguf(gguf_path, device, dtype)
+        Self::load_gguf(gguf_path, device, Self::default_dtype_for_device(device))
+    }
+
+    /// Read-only reference to the underlying Gemma 2 backbone model.
+    pub fn model(&self) -> &EmbeddingGemma2Model {
+        &self.model
+    }
+
+    /// Mutable reference to the underlying Gemma 2 backbone model.
+    pub fn model_mut(&mut self) -> &mut EmbeddingGemma2Model {
+        &mut self.model
+    }
+
+    /// Read-only reference to the reconstructed BPE tokenizer.
+    pub fn tokenizer(&self) -> &GlyprTokenizer {
+        &self.tokenizer
+    }
+
+    /// Active execution device (Metal GPU or CPU).
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    /// Active tensor dtype (`BF16` on Metal, `F32` on CPU).
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+
+    /// Attached GGUF multimodal projector, if any.
+    pub fn multimodal(&self) -> Option<&MultimodalProjector> {
+        self.multimodal.as_ref()
+    }
+
+    /// Maximum supported input sequence length in tokens.
+    pub fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
+
+    /// Native embedding dimensionality of the loaded model (typically `768`).
+    pub fn embedding_dim(&self) -> usize {
+        self.model.config.embedding_dim
+    }
+
+    /// Configured vision backend routing policy.
+    pub fn vision_backend(&self) -> VisionBackendPolicy {
+        self.vision_backend
+    }
+
+    /// Configured pure-text ANE routing policy.
+    pub fn text_backend(&self) -> TextBackendPolicy {
+        self.text_backend
+    }
+
+    #[cfg(feature = "coreml")]
+    /// Attached CoreML Vision Tower, if any.
+    pub fn coreml_vision(&self) -> Option<&CoreMLVisionTower> {
+        self.coreml_vision.as_ref()
+    }
+
+    #[cfg(feature = "coreml")]
+    /// Attached CoreML Text Backbone, if any.
+    pub fn coreml_text(&self) -> Option<&CoreMLTextBackbone> {
+        self.coreml_text.as_ref()
     }
 
     /// Dynamically attach an optional multimodal projector GGUF (`mmproj-*.gguf`)
@@ -247,10 +679,101 @@ impl GlyprEmbedder {
     pub fn attach_coreml_vision_dir<P: AsRef<Path>>(
         &mut self,
         dir: P,
-        compute_units: coreml::CoreMLComputeUnits,
+        compute_units: CoreMLComputeUnits,
     ) -> Result<()> {
         let tower = CoreMLVisionTower::from_dir(dir, compute_units)?;
         self.coreml_vision = Some(tower);
+        Ok(())
+    }
+
+    #[cfg(feature = "coreml")]
+    /// Dynamically attach a compiled CoreML Text Backbone (`.mlmodelc`) for ANE text acceleration.
+    pub fn attach_coreml_text(&mut self, text_backbone: CoreMLTextBackbone) {
+        self.coreml_text = Some(text_backbone);
+    }
+
+    #[cfg(feature = "coreml")]
+    /// Dynamically attach CoreML Text Backbone models discovered in a directory (e.g. `models/coreml`).
+    pub fn attach_coreml_text_dir<P: AsRef<Path>>(
+        &mut self,
+        dir: P,
+        compute_units: CoreMLComputeUnits,
+    ) -> Result<()> {
+        let backbone = CoreMLTextBackbone::from_dir(dir, compute_units)?;
+        self.coreml_text = Some(backbone);
+        Ok(())
+    }
+
+    #[cfg(feature = "coreml")]
+    /// Discover and attach both CoreML Vision and CoreML Text models found in `dir`.
+    ///
+    /// Succeeds as long as at least one modality (vision or text) loads cleanly from `dir`;
+    /// fails only if neither vision nor text `.mlmodelc` bundles could be loaded.
+    pub fn attach_coreml_dir<P: AsRef<Path>>(
+        &mut self,
+        dir: P,
+        compute_units: CoreMLComputeUnits,
+    ) -> Result<CoreMLAttachReport> {
+        let dir_ref = dir.as_ref();
+        if !dir_ref.is_dir() {
+            let err = GlyprError::CoreMLNotFound {
+                path: dir_ref.to_path_buf(),
+            };
+            return Err(anyhow::Error::new(err)).with_context(|| {
+                format!("CoreML models directory not found at {}", dir_ref.display())
+            });
+        }
+
+        let mut report = CoreMLAttachReport::default();
+
+        match CoreMLVisionTower::from_dir(dir_ref, compute_units) {
+            Ok(tower) => {
+                report.vision_grids = tower.supported_grids();
+                self.coreml_vision = Some(tower);
+            }
+            Err(e) => {
+                report
+                    .warnings
+                    .push(format!("CoreML vision not loaded: {e}"));
+            }
+        }
+
+        match CoreMLTextBackbone::from_dir(dir_ref, compute_units) {
+            Ok(backbone) => {
+                report.text_seq_lens = backbone.supported_seq_lens();
+                self.coreml_text = Some(backbone);
+            }
+            Err(e) => {
+                report.warnings.push(format!("CoreML text not loaded: {e}"));
+            }
+        }
+
+        if report.vision_grids.is_empty() && report.text_seq_lens.is_empty() {
+            let err = GlyprError::CoreMLNotFound {
+                path: dir_ref.to_path_buf(),
+            };
+            return Err(anyhow::Error::new(err)).with_context(|| {
+                format!(
+                    "No usable CoreML vision or text models found in {}: {}",
+                    dir_ref.display(),
+                    report.warnings.join(" | ")
+                )
+            });
+        }
+
+        Ok(report)
+    }
+
+    #[cfg(feature = "coreml")]
+    /// Pre-warm all attached CoreML vision and text models so the first inference request
+    /// does not pay cold ANE graph compilation latency.
+    pub fn warmup_coreml(&self) -> Result<()> {
+        if let Some(cv) = &self.coreml_vision {
+            cv.warmup()?;
+        }
+        if let Some(ct) = &self.coreml_text {
+            ct.warmup()?;
+        }
         Ok(())
     }
 
@@ -261,6 +784,16 @@ impl GlyprEmbedder {
 
     pub fn with_vision_backend(mut self, policy: VisionBackendPolicy) -> Self {
         self.vision_backend = policy;
+        self
+    }
+
+    /// Set routing policy for pure-text execution (Auto, AneStrict, Metal).
+    pub fn set_text_backend(&mut self, policy: TextBackendPolicy) {
+        self.text_backend = policy;
+    }
+
+    pub fn with_text_backend(mut self, policy: TextBackendPolicy) -> Self {
+        self.text_backend = policy;
         self
     }
 
@@ -290,6 +823,25 @@ impl GlyprEmbedder {
         }
     }
 
+    /// Whether a CoreML Text Backbone is attached.
+    pub fn has_coreml_text(&self) -> bool {
+        #[cfg(feature = "coreml")]
+        {
+            self.coreml_text.is_some()
+        }
+        #[cfg(not(feature = "coreml"))]
+        {
+            false
+        }
+    }
+
+    /// Whether an audio projector is attached (`mmproj` audio tower).
+    pub fn has_audio_projector(&self) -> bool {
+        self.multimodal
+            .as_ref()
+            .is_some_and(|m| m.audio_tower.is_some())
+    }
+
     /// Validate and normalize an optional Matryoshka (MRL) truncation dimension.
     ///
     /// Rejects `Some(0)` and `Some(d)` where `d > self.model.config.embedding_dim`,
@@ -298,12 +850,25 @@ impl GlyprEmbedder {
         let embedding_dim = self.model.config.embedding_dim;
         match truncate_dim {
             None => Ok(None),
-            Some(0) => anyhow::bail!("truncate_dim cannot be 0"),
-            Some(d) if d > embedding_dim => anyhow::bail!(
-                "truncate_dim ({}) exceeds model embedding_dim ({})",
-                d,
-                embedding_dim
-            ),
+            Some(0) => {
+                let err = GlyprError::InvalidMrlDimension {
+                    dim: 0,
+                    max: embedding_dim,
+                };
+                Err(anyhow::Error::new(err)).context("truncate_dim cannot be 0")
+            }
+            Some(d) if d > embedding_dim => {
+                let err = GlyprError::InvalidMrlDimension {
+                    dim: d,
+                    max: embedding_dim,
+                };
+                Err(anyhow::Error::new(err)).with_context(|| {
+                    format!(
+                        "truncate_dim ({}) exceeds model embedding_dim ({})",
+                        d, embedding_dim
+                    )
+                })
+            }
             Some(d) if d == embedding_dim => Ok(None),
             Some(d) => Ok(Some(d)),
         }
@@ -311,52 +876,101 @@ impl GlyprEmbedder {
 
     /// Encode a single image item using the routed vision engine (ANE CoreML or Metal/CPU GGUF).
     pub fn encode_image_part(&self, image: &image::DynamicImage, budget: usize) -> Result<Tensor> {
-        let processed = crate::multimodal::preprocess_image(image, budget, 16, 3)?;
+        with_autorelease_pool(|| {
+            let processed = crate::multimodal::preprocess_image(image, budget, 16, 3)?;
 
-        #[cfg(feature = "coreml")]
-        {
-            let use_coreml = match self.vision_backend {
-                VisionBackendPolicy::Auto => self.coreml_vision.as_ref().is_some_and(|cv| {
-                    cv.supports_grid(processed.patch_height, processed.patch_width)
-                }),
-                VisionBackendPolicy::AneStrict => {
-                    let cv = self.coreml_vision.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "AneStrict vision backend requested, but no CoreML vision tower attached"
-                        )
-                    })?;
-                    if !cv.supports_grid(processed.patch_height, processed.patch_width) {
-                        anyhow::bail!(
-                            "AneStrict vision routing failed: image produced {}x{} patches ({} total), but loaded CoreML models only support grids {:?}",
+            #[cfg(feature = "coreml")]
+            {
+                let debug_routing = std::env::var_os("GLYPR_DEBUG").is_some();
+                let use_coreml = match self.vision_backend {
+                    VisionBackendPolicy::Auto => self.coreml_vision.as_ref().is_some_and(|cv| {
+                        let matched = cv.supports_grid(processed.patch_height, processed.patch_width);
+                        if debug_routing && !matched {
+                            eprintln!(
+                                "[glypr:ane] Vision grid {}x{} ({} patches, {}x{} px) missed CoreML buckets {:?}; falling back to Metal/CPU mmproj",
+                                processed.patch_height,
+                                processed.patch_width,
+                                processed.num_patches,
+                                processed.target_width,
+                                processed.target_height,
+                                cv.supported_grids()
+                            );
+                        }
+                        matched
+                    }),
+                    VisionBackendPolicy::AneStrict => {
+                        let cv = self.coreml_vision.as_ref().ok_or_else(|| {
+                            anyhow::Error::new(GlyprError::MissingMultimodalEngine).context(
+                                "AneStrict vision backend requested, but no CoreML vision tower is attached",
+                            )
+                        })?;
+                        if !cv.supports_grid(processed.patch_height, processed.patch_width) {
+                            let err = GlyprError::UnsupportedCoreMLPatchGrid {
+                                patch_height: processed.patch_height,
+                                patch_width: processed.patch_width,
+                                num_patches: processed.num_patches,
+                                supported_grids: cv.supported_grids(),
+                            };
+                            return Err(anyhow::Error::new(err)).with_context(|| {
+                                format!(
+                                    "AneStrict vision routing failed: image produced {}x{} patches ({} total, {}x{} px), \
+                                     but loaded CoreML models only support grids {:?}. Adjust --image-token-budget or export \
+                                     with 'uv run python scripts/export_coreml.py --vision-preset all'.",
+                                    processed.patch_height,
+                                    processed.patch_width,
+                                    processed.num_patches,
+                                    processed.target_width,
+                                    processed.target_height,
+                                    cv.supported_grids()
+                                )
+                            });
+                        }
+                        true
+                    }
+                    VisionBackendPolicy::Metal => false,
+                };
+
+                if use_coreml && let Some(cv) = &self.coreml_vision {
+                    if debug_routing {
+                        eprintln!(
+                            "[glypr:ane] Vision hit: {}x{} patches ({} tokens) -> CoreML ANE",
                             processed.patch_height,
                             processed.patch_width,
-                            processed.num_patches,
-                            cv.supported_grids()
+                            processed.num_soft_tokens
                         );
                     }
-                    true
+                    return cv.encode_to_tensor_dtype(&processed, &self.device, self.dtype);
                 }
-                VisionBackendPolicy::Metal => false,
-            };
-
-            if use_coreml && let Some(cv) = &self.coreml_vision {
-                return cv.encode_to_tensor_dtype(&processed, &self.device, self.dtype);
             }
-        }
 
-        // Standard Candle / GGUF path
-        let projector = self.multimodal.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "No vision engine available for image (CoreML model does not support {}x{} patches ({} total) and no GGUF mmproj attached)",
-                processed.patch_height,
-                processed.patch_width,
-                processed.num_patches
-            )
-        })?;
-        let tower = projector.vision_tower.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Vision Tower is not available in attached multimodal projector")
-        })?;
-        Ok(tower.encode(&processed)?)
+            // Standard Candle / GGUF path
+            let projector = self.multimodal.as_ref().ok_or_else(|| {
+                #[cfg(feature = "coreml")]
+                let loaded_grids = self
+                    .coreml_vision
+                    .as_ref()
+                    .map(|cv| format!("{:?}", cv.supported_grids()))
+                    .unwrap_or_else(|| "none".to_string());
+                #[cfg(not(feature = "coreml"))]
+                let loaded_grids = "coreml disabled".to_string();
+
+                anyhow::Error::new(GlyprError::MissingMultimodalEngine).context(format!(
+                    "No vision engine available for image: {}x{} patches ({} total, {}x{} px); \
+                     loaded CoreML grids: {}, and no GGUF mmproj is attached. \
+                     Adjust --image-token-budget, pass --bf16-mmproj, or export this aspect ratio.",
+                    processed.patch_height,
+                    processed.patch_width,
+                    processed.num_patches,
+                    processed.target_width,
+                    processed.target_height,
+                    loaded_grids
+                ))
+            })?;
+            let tower = projector.vision_tower.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Vision Tower is not available in attached multimodal projector")
+            })?;
+            Ok(tower.encode(&processed)?)
+        })
     }
 
     /// Encode an arbitrary composite sequence: text + multiple images + audio + video frames
@@ -517,8 +1131,18 @@ impl GlyprEmbedder {
     /// Encode a single text input formatted according to the specified Task.
     /// Returns a native 768-dimensional L2-normalized embedding vector.
     pub fn embed_text(&self, text: &str, task: Task) -> Result<Vec<f32>> {
+        self.embed_text_with_dim(text, task, None)
+    }
+
+    /// Encode a single text input formatted according to `task` with optional MRL dimension truncation.
+    pub fn embed_text_with_dim(
+        &self,
+        text: &str,
+        task: Task,
+        truncate_dim: Option<usize>,
+    ) -> Result<Vec<f32>> {
         let formatted = task.format_text(text);
-        self.encode_single_text(&formatted, None)
+        self.encode_single_text(&formatted, truncate_dim)
     }
 
     /// Encode a batch of texts formatted according to the specified Task.
@@ -536,10 +1160,98 @@ impl GlyprEmbedder {
     /// `embedder.embed_interleaved(&[ModalityPart::Text("..."), ModalityPart::Image { ... }], Task::SearchQuery)`
     /// Returns native 768-dimensional L2-normalized embedding vector.
     pub fn embed_interleaved(&self, parts: &[ModalityPart], task: Task) -> Result<Vec<f32>> {
-        with_autorelease_pool(|| self.embed_interleaved_inner(parts, task))
+        self.embed_interleaved_with_dim(parts, task, None)
     }
 
-    fn embed_interleaved_inner(&self, parts: &[ModalityPart], task: Task) -> Result<Vec<f32>> {
+    /// Encode an ordered sequence of multimodal parts with optional MRL dimension truncation.
+    pub fn embed_interleaved_with_dim(
+        &self,
+        parts: &[ModalityPart],
+        task: Task,
+        truncate_dim: Option<usize>,
+    ) -> Result<Vec<f32>> {
+        let truncate_dim = self.validate_truncate_dim(truncate_dim)?;
+        with_autorelease_pool(|| self.embed_interleaved_inner(parts, task, truncate_dim))
+    }
+
+    /// Attempt to route a pure-text token sequence to the attached `CoreMLTextBackbone` according to
+    /// [`TextBackendPolicy`]. Returns `Ok(Some(vec))` if handled on ANE, or `Ok(None)` to fall
+    /// through to Metal/CPU.
+    fn try_route_pure_text_ane(
+        &self,
+        token_ids: &[u32],
+        truncate_dim: Option<usize>,
+    ) -> Result<Option<Vec<f32>>> {
+        #[cfg(not(feature = "coreml"))]
+        {
+            let _ = (token_ids, truncate_dim);
+            if self.text_backend == TextBackendPolicy::AneStrict {
+                anyhow::bail!(
+                    "AneStrict text backend requested, but glypr-core was built without --features coreml / ane"
+                );
+            }
+            Ok(None)
+        }
+
+        #[cfg(feature = "coreml")]
+        {
+            let debug_routing = std::env::var_os("GLYPR_DEBUG").is_some();
+            match self.text_backend {
+                TextBackendPolicy::Metal => Ok(None),
+                TextBackendPolicy::AneStrict => {
+                    let ct = self.coreml_text.as_ref().ok_or_else(|| {
+                        anyhow::Error::new(GlyprError::CoreMLNotFound {
+                            path: PathBuf::from("models/coreml"),
+                        })
+                        .context(
+                            "AneStrict text backend requested, but no CoreML text backbone is attached",
+                        )
+                    })?;
+                    let ids_i32: Vec<i32> = token_ids.iter().map(|&id| id as i32).collect();
+                    if debug_routing {
+                        eprintln!(
+                            "[glypr:ane] Text strict route: {} tokens -> CoreML ANE (max {})",
+                            token_ids.len(),
+                            ct.seq_len()
+                        );
+                    }
+                    Ok(Some(ct.embed_token_ids_with_dim(&ids_i32, truncate_dim)?))
+                }
+                TextBackendPolicy::Auto => {
+                    let Some(ct) = &self.coreml_text else {
+                        return Ok(None);
+                    };
+                    if (64..=ct.seq_len()).contains(&token_ids.len()) {
+                        if debug_routing {
+                            eprintln!(
+                                "[glypr:ane] Text sweet-spot hit: {} tokens in [64..={}] -> CoreML ANE",
+                                token_ids.len(),
+                                ct.seq_len()
+                            );
+                        }
+                        let ids_i32: Vec<i32> = token_ids.iter().map(|&id| id as i32).collect();
+                        Ok(Some(ct.embed_token_ids_with_dim(&ids_i32, truncate_dim)?))
+                    } else {
+                        if debug_routing {
+                            eprintln!(
+                                "[glypr:ane] Text {} tokens outside ANE sweet spot [64..={}]; routing to Metal/CPU",
+                                token_ids.len(),
+                                ct.seq_len()
+                            );
+                        }
+                        Ok(None)
+                    }
+                }
+            }
+        }
+    }
+
+    fn embed_interleaved_inner(
+        &self,
+        parts: &[ModalityPart],
+        task: Task,
+        truncate_dim: Option<usize>,
+    ) -> Result<Vec<f32>> {
         let has_media = parts.iter().any(|p| !matches!(p, ModalityPart::Text(_)));
         let has_coreml_vision = {
             #[cfg(feature = "coreml")]
@@ -562,13 +1274,26 @@ impl GlyprEmbedder {
         let seq_len = token_ids.len();
 
         if seq_len > self.max_seq_len {
-            anyhow::bail!(
-                "Interleaved multimodal sequence length ({} tokens) exceeds maximum context limit ({} tokens). \
-                 Preflight check failed before neural encoding (parts: {}).",
-                seq_len,
-                self.max_seq_len,
-                parts.len()
-            );
+            let err = GlyprError::ContextLimitExceeded {
+                actual: seq_len,
+                max: self.max_seq_len,
+            };
+            return Err(anyhow::Error::new(err)).with_context(|| {
+                format!(
+                    "Interleaved multimodal sequence length ({} tokens) exceeds maximum context limit ({} tokens). \
+                     Preflight check failed before neural encoding (parts: {}).",
+                    seq_len,
+                    self.max_seq_len,
+                    parts.len()
+                )
+            });
+        }
+
+        // 1b. Pure-text ANE routing (when sequence contains no media parts)
+        if !has_media
+            && let Some(ane_vec) = self.try_route_pure_text_ane(&token_ids, truncate_dim)?
+        {
+            return Ok(ane_vec);
         }
 
         // 2. Neural tower execution for media parts
@@ -583,7 +1308,8 @@ impl GlyprEmbedder {
                 }
                 ModalityPart::Audio { samples } => {
                     let projector = self.multimodal.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!("Audio encoding requires attached GGUF mmproj")
+                        anyhow::Error::new(GlyprError::MissingAudioProjector)
+                            .context("Audio encoding requires attached GGUF mmproj")
                     })?;
                     let (soft_toks, _) = projector.encode_audio(samples)?;
                     soft_tensors.push(soft_toks);
@@ -603,7 +1329,9 @@ impl GlyprEmbedder {
         let merged_embeds = splice_soft_tokens(&text_embeds, seq_len, &slots, &soft_tensors)?;
 
         let token_embeds = self.model.forward_embeds(&merged_embeds, None)?;
-        let pooled = self.model.pool_and_normalize(&token_embeds, None, None)?;
+        let pooled = self
+            .model
+            .pool_and_normalize(&token_embeds, None, truncate_dim)?;
         let pooled_f32 = pooled.to_dtype(DType::F32)?;
         let vec = pooled_f32.squeeze(0)?.to_vec1::<f32>()?;
         Ok(vec)
@@ -735,12 +1463,9 @@ impl GlyprEmbedder {
             return Ok(Vec::new());
         }
         if b == 1 {
-            let single = self.embed_interleaved(&inputs[0].parts, inputs[0].task)?;
-            let vec = match truncate_dim {
-                Some(dim) => truncate_mrl(&single, dim)?,
-                None => single,
-            };
-            return Ok(vec![vec]);
+            let single =
+                self.embed_interleaved_with_dim(&inputs[0].parts, inputs[0].task, truncate_dim)?;
+            return Ok(vec![single]);
         }
 
         with_autorelease_pool(|| self.embed_batch_inner(inputs, truncate_dim))
@@ -773,6 +1498,73 @@ impl GlyprEmbedder {
             anyhow::bail!(
                 "Multimodal input received in batch, but multimodal engine is not attached."
             );
+        }
+
+        // 1b. Pure-text ANE routing check (isolated cleanly before Metal batching path)
+        if !has_any_media {
+            #[cfg(not(feature = "coreml"))]
+            if self.text_backend == TextBackendPolicy::AneStrict {
+                anyhow::bail!(
+                    "AneStrict text backend requested, but glypr-core was built without --features coreml / ane"
+                );
+            }
+
+            #[cfg(feature = "coreml")]
+            if self.text_backend != TextBackendPolicy::Metal {
+                let try_ane = match self.text_backend {
+                    TextBackendPolicy::AneStrict => true,
+                    TextBackendPolicy::Auto => self.coreml_text.is_some() && b <= 4,
+                    TextBackendPolicy::Metal => false,
+                };
+                if try_ane {
+                    let ct = self.coreml_text.as_ref().ok_or_else(|| {
+                        anyhow::Error::new(GlyprError::CoreMLNotFound {
+                            path: PathBuf::from("models/coreml"),
+                        })
+                        .context(
+                            "AneStrict text backend requested, but no CoreML text backbone is attached",
+                        )
+                    })?;
+
+                    let mut tokenized = Vec::with_capacity(b);
+                    let mut all_fit_ane = true;
+                    for (item_idx, inp) in inputs.iter().enumerate() {
+                        let (ids, _) = self
+                            .tokenizer
+                            .encode_modality_sequence(&inp.parts, inp.task)?;
+                        if ids.len() > self.max_seq_len {
+                            let err = GlyprError::ContextLimitExceeded {
+                                actual: ids.len(),
+                                max: self.max_seq_len,
+                            };
+                            return Err(anyhow::Error::new(err)).with_context(|| {
+                                format!(
+                                    "Batch item {} sequence length ({}) exceeds maximum context limit ({})",
+                                    item_idx,
+                                    ids.len(),
+                                    self.max_seq_len
+                                )
+                            });
+                        }
+                        if self.text_backend == TextBackendPolicy::Auto
+                            && !(64..=ct.seq_len()).contains(&ids.len())
+                        {
+                            all_fit_ane = false;
+                            break;
+                        }
+                        tokenized.push(ids);
+                    }
+
+                    if all_fit_ane {
+                        let mut results = Vec::with_capacity(b);
+                        for ids in tokenized {
+                            let ids_i32: Vec<i32> = ids.into_iter().map(|id| id as i32).collect();
+                            results.push(ct.embed_token_ids_with_dim(&ids_i32, truncate_dim)?);
+                        }
+                        return Ok(results);
+                    }
+                }
+            }
         }
 
         // 2. Pre-extract and batch-encode all images across all items
@@ -949,12 +1741,22 @@ impl GlyprEmbedder {
             let token_ids = self.tokenizer.encode(text)?;
             let seq_len = token_ids.len();
             if seq_len > self.max_seq_len {
-                anyhow::bail!(
-                    "Text sequence length ({} tokens) exceeds maximum context limit ({} tokens)",
-                    seq_len,
-                    self.max_seq_len
-                );
+                let err = GlyprError::ContextLimitExceeded {
+                    actual: seq_len,
+                    max: self.max_seq_len,
+                };
+                return Err(anyhow::Error::new(err)).with_context(|| {
+                    format!(
+                        "Text sequence length ({} tokens) exceeds maximum context limit ({} tokens)",
+                        seq_len, self.max_seq_len
+                    )
+                });
             }
+
+            if let Some(ane_vec) = self.try_route_pure_text_ane(&token_ids, truncate_dim)? {
+                return Ok(ane_vec);
+            }
+
             let input_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
 
             // Forward through backbone
@@ -1249,8 +2051,85 @@ mod tests {
             max_seq_len: DEFAULT_MAX_SEQ_LEN,
             #[cfg(feature = "coreml")]
             coreml_vision: None,
+            #[cfg(feature = "coreml")]
+            coreml_text: None,
             vision_backend: VisionBackendPolicy::Auto,
+            text_backend: TextBackendPolicy::Auto,
         }
+    }
+
+    #[test]
+    fn test_backend_policy_and_compute_units_parsing() {
+        assert_eq!(
+            "auto".parse::<TextBackendPolicy>().unwrap(),
+            TextBackendPolicy::Auto
+        );
+        assert_eq!(
+            "ane".parse::<TextBackendPolicy>().unwrap(),
+            TextBackendPolicy::AneStrict
+        );
+        assert_eq!(
+            "metal".parse::<TextBackendPolicy>().unwrap(),
+            TextBackendPolicy::Metal
+        );
+        assert!("unknown".parse::<TextBackendPolicy>().is_err());
+
+        assert_eq!(
+            "ane".parse::<CoreMLComputeUnits>().unwrap(),
+            CoreMLComputeUnits::CpuAndNeuralEngine
+        );
+        assert_eq!(
+            "all".parse::<CoreMLComputeUnits>().unwrap(),
+            CoreMLComputeUnits::All
+        );
+        assert_eq!(
+            "gpu".parse::<CoreMLComputeUnits>().unwrap(),
+            CoreMLComputeUnits::CpuAndGpu
+        );
+        assert_eq!(
+            "cpu".parse::<CoreMLComputeUnits>().unwrap(),
+            CoreMLComputeUnits::CpuOnly
+        );
+        assert!("tpu".parse::<CoreMLComputeUnits>().is_err());
+    }
+
+    #[test]
+    fn test_accessors_and_ane_strict_text_rejection() {
+        let mut embedder = build_tiny_embedder();
+        assert_eq!(embedder.embedding_dim(), 16);
+        assert_eq!(embedder.max_seq_len(), DEFAULT_MAX_SEQ_LEN);
+        assert!(!embedder.has_coreml_text());
+        assert!(!embedder.has_audio_projector());
+        assert_eq!(embedder.text_backend(), TextBackendPolicy::Auto);
+
+        let v = embedder
+            .embed_text_with_dim("hello", Task::Raw, Some(8))
+            .unwrap();
+        assert_eq!(v.len(), 8);
+
+        let v_interleaved = embedder
+            .embed_interleaved_with_dim(&[ModalityPart::Text("hello")], Task::Raw, Some(8))
+            .unwrap();
+        assert_eq!(v_interleaved.len(), 8);
+
+        embedder.set_text_backend(TextBackendPolicy::AneStrict);
+        assert!(embedder.embed_text("hello", Task::Raw).is_err());
+        assert!(
+            embedder
+                .embed_interleaved(&[ModalityPart::Text("hello")], Task::Raw)
+                .is_err()
+        );
+        assert!(
+            embedder
+                .embed_batch(
+                    &[
+                        MultimodalInput::text("hello", Task::Raw),
+                        MultimodalInput::text("hello world", Task::Raw),
+                    ],
+                    None
+                )
+                .is_err()
+        );
     }
 
     #[test]

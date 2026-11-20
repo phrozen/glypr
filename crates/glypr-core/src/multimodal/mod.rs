@@ -46,3 +46,35 @@ pub enum VisionBackendPolicy {
     /// Force execution on Candle Metal / CPU mmproj, bypassing CoreML even if models are present.
     Metal,
 }
+
+impl VisionBackendPolicy {
+    /// Canonical lowercase string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::AneStrict => "ane_strict",
+            Self::Metal => "metal",
+        }
+    }
+}
+
+impl std::fmt::Display for VisionBackendPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for VisionBackendPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "ane" | "ane_strict" | "strict" => Ok(Self::AneStrict),
+            "metal" | "gpu" | "cpu" => Ok(Self::Metal),
+            other => anyhow::bail!(
+                "Invalid vision backend policy '{other}'; expected one of: auto, ane, metal"
+            ),
+        }
+    }
+}

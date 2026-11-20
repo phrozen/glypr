@@ -106,14 +106,16 @@ The CLI defaults to `--device auto` (Metal GPU on Apple Silicon, falling back to
 # Pre-fetch all 4 canonical models (BF16 & Q8_0 base models + multimodal projectors)
 glypr pull
 
-# Or selectively cache only Q8_0 weights:
+# Or selectively cache only Q8_0 weights (or Safetensors for CoreML export):
 glypr pull --q8 --q8-mmproj
+glypr pull --safetensors
 ```
 
-### 2. Inspect Cache & Device Backend (`glypr info`)
+### 2. Inspect Cache, Hardware & Model Artifacts (`glypr info` / `glypr inspect`)
 
 ```bash
 glypr info
+glypr inspect models/coreml/gemma2_text_backbone_s512_w8a16.mlmodelc
 ```
 
 ### 3. Generate Embeddings (`glypr embed`)
@@ -130,29 +132,40 @@ glypr --q8 embed "What is quantum mechanics?" --dim 256 -o json
 glypr embed "fn binary_search(arr: &[i32], target: i32)" --task CodeRetrieval --dim 512
 ```
 
-#### Pipe via Standard Input (STDIN)
+#### Batch & Streaming JSONL (`--batch` / `--jsonl`) & Explicit File Flags
 ```bash
 # Pipe text from stdin
 cat query.txt | glypr embed -o json
 
-# High-throughput streaming
-echo "Fast stream test" | glypr embed --encoding int8 -o json
+# Batch independent lines from STDIN in a single model load
+printf "First query\nSecond query\n" | glypr embed --batch -o json
+
+# Stream JSONL objects with per-line task/dim/image metadata
+printf '{"text":"What causes aurora?","task":"SearchQuery"}\n{"text":"Aurora borealis","task":"Document","title":"Physics"}\n' | glypr embed --jsonl
+
+# Explicit media/text file flags (avoids path-vs-literal-text ambiguity)
+glypr --bf16-mmproj embed --text-file notes.md --image ./scene.png
 ```
 
 #### Apple Neural Engine (ANE) Acceleration (`--ane`)
+Requires CoreML `.mlmodelc` bundles exported via `scripts/export_coreml.py` (discovered automatically from `--coreml-dir`, `$GLYPR_COREML_DIR`, `./models/coreml`, or `~/Library/Application Support/glypr/coreml`). Matching vision presets (`140-portrait`, `280-portrait`, `280-square`, `280-landscape`) accelerate images, while `--text-backend auto` routes pure-text queries in the `[64..=seq_len]` sweet spot (`batch <= 4`) to ANE:
 ```bash
-# 1. Hybrid Mode: Vision Tower on ANE + Text Backbone on Metal GPU
+# 1. Export multi-aspect vision + 512-token text models (intermediate .mlpackage cleaned by default; pass --keep-mlpackage to retain)
+uv run python scripts/export_coreml.py --target all --vision-preset default --output-dir models/coreml
+
+# 2. Hybrid Mode: Vision Tower on ANE + Text Backbone on Metal/ANE
 glypr --ane embed "Card illustration:" ./portrait.png "and description."
 
-# 2. Zero-mmproj Standalone Image Embedding (runs directly on ANE without GGUF mmproj!)
-glypr --ane embed ./portrait.png
+# 3. Zero-mmproj Standalone Image Embedding (runs directly on ANE without GGUF mmproj!)
+glypr --ane embed ./portrait.png --image-token-budget 140
 
-# 3. Explicit Vision Backend Routing (--vision-backend auto|ane|metal)
-glypr --ane --vision-backend ane embed ./portrait.png
+# 4. Strict ANE routing for vision or pure text (--text-backend auto|ane|metal)
+glypr --ane --vision-backend ane embed ./portrait.png --image-token-budget 140
+glypr --ane --text-backend ane embed "RAG passage within 512 tokens"
 ```
 
 #### Interleaved Multimodal (Text + Images + Audio)
-Multimodal projector loading is opt-in (defaulting to text-only with 0 extra memory). Pass `--bf16-mmproj` or `--q8-mmproj` to attach a projector. If an argument points to an image (`.png`, `.jpg`, `.webp`) or 16 kHz `.wav` audio file on disk, `glypr` streams it to the multimodal projector:
+Multimodal projector loading is opt-in (defaulting to text-only with 0 extra memory). Pass `--bf16-mmproj` or `--q8-mmproj` to attach a projector. Positional arguments ending in `.png`, `.jpg`, `.jpeg`, `.webp`, or `.wav` are loaded as media files (and error immediately if missing), while non-media strings such as `README.md` embed as literal text:
 ```bash
 # Interleaved Text + Image
 glypr --bf16-mmproj embed "Illustration:" ./scene.png "and description."
@@ -175,15 +188,15 @@ glypr embed "High-throughput search" --encoding binary -o raw > vector.bin
 
 ### 4. OpenAI-Compatible HTTP Serving Engine (`glypr serve`)
 
-Launch a production-ready HTTP server with dynamic batching, MRL truncation, and quantization support:
+Launch a production-ready HTTP server with dynamic batching, MRL truncation, quantization, `/ready` probe, graceful shutdown, and structured `tracing` logs:
 ```bash
 # Start text-only server listening on port 8080 (defaults to auto Metal/CPU device and BF16)
 glypr serve --port 8080 --max-batch-size 32
 
-# Or serve with Apple Neural Engine (ANE) hardware acceleration:
+# Or serve with Apple Neural Engine (ANE) vision + pure-text acceleration (warms up ANE on boot):
 glypr --ane serve --port 8080
 
-# Or serve with multimodal support:
+# Or serve with multimodal support (local path inputs over HTTP are disabled by default; pass --allow-local-files to opt in):
 glypr --bf16-mmproj serve --port 8080
 ```
 

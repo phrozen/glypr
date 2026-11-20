@@ -124,7 +124,21 @@ pub struct ModelObject {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vision_backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ane_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ane_text_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ane_text_seq_len: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_multimodal: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_audio_projector: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_dim: Option<usize>,
 }
 
 /// OpenAI-compatible `GET /v1/models` response body.
@@ -141,8 +155,20 @@ pub struct HealthResponse {
     pub model: String,
     pub device: String,
     pub multimodal: bool,
+    pub has_audio_projector: bool,
     pub vision_backend: String,
+    pub text_backend: String,
     pub ane_enabled: bool,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub ane_supported_patches: Vec<usize>,
+    pub ane_text_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ane_text_seq_len: Option<usize>,
+}
+
+/// Readiness probe response for `GET /ready`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyResponse {
+    pub status: String,
+    pub model: String,
 }
