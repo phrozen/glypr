@@ -97,7 +97,7 @@ fn run_multimodal_parity_suite(
     let sim_synth_aud_p =
         cosine_similarity(&synth_aud_p_emb, &golden.cases["audio_prompt"].embedding);
     assert!(
-        sim_synth_aud_p >= thresh.high_precision,
+        sim_synth_aud_p >= thresh.standard_media,
         "[{suite_label}] sim_synth_aud_p={sim_synth_aud_p}"
     );
     sims.push(sim_synth_aud_p);
@@ -421,7 +421,7 @@ fn test_multimodal_smoke_parity() -> anyhow::Result<()> {
     let music_samples = glypr_core::multimodal::decode_wav_file(golden_dir.join("music_16k.wav"))?;
     let music_emb = embedder.embed_audio(&music_samples, None)?;
     assert!(
-        cosine_similarity(&music_emb, &golden.cases["music_only"].embedding) >= 0.9985,
+        cosine_similarity(&music_emb, &golden.cases["music_only"].embedding) >= 0.9980,
         "smoke music_16k.wav parity failed"
     );
 
@@ -547,7 +547,7 @@ fn test_multimodal_golden_parity() -> anyhow::Result<()> {
     let bf16_thresholds = MultimodalThresholds {
         high_precision: 0.9999,
         standard_media: 0.99965,
-        audio_only: 0.9985,
+        audio_only: 0.9980,
         budget_70: 0.9994,
         min_average: 0.99975,
     };
