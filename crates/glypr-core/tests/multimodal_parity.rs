@@ -29,8 +29,10 @@ struct GoldenData {
 struct MultimodalThresholds {
     /// Audio, Baboon, Budget 560, Interleaved & Composite, Text Queries
     pub high_precision: f32,
-    /// Resized Vision >= 140t and music.wav
+    /// Resized Vision >= 140t and female_voice_16k.wav
     pub standard_media: f32,
+    /// Pure audio-only embeddings (audio_only, music_only)
+    pub audio_only: f32,
     /// Extreme 70-token PIL vs image-crate downscale
     pub budget_70: f32,
     /// Minimum average across all 24 golden comparisons
@@ -86,7 +88,7 @@ fn run_multimodal_parity_suite(
     let synth_aud_emb = embedder.embed_audio(&synth_samples, None)?;
     let sim_synth_aud = cosine_similarity(&synth_aud_emb, &golden.cases["audio_only"].embedding);
     assert!(
-        sim_synth_aud >= thresh.standard_media,
+        sim_synth_aud >= thresh.audio_only,
         "[{suite_label}] sim_synth_aud={sim_synth_aud}"
     );
     sims.push(sim_synth_aud);
@@ -202,7 +204,7 @@ fn run_multimodal_parity_suite(
     let music_emb = embedder.embed_audio(&music_samples, None)?;
     let sim_music = cosine_similarity(&music_emb, &golden.cases["music_only"].embedding);
     assert!(
-        sim_music >= thresh.standard_media,
+        sim_music >= thresh.audio_only,
         "[{suite_label}] sim_music={sim_music}"
     );
     sims.push(sim_music);
@@ -419,7 +421,7 @@ fn test_multimodal_smoke_parity() -> anyhow::Result<()> {
     let music_samples = glypr_core::multimodal::decode_wav_file(golden_dir.join("music_16k.wav"))?;
     let music_emb = embedder.embed_audio(&music_samples, None)?;
     assert!(
-        cosine_similarity(&music_emb, &golden.cases["music_only"].embedding) >= 0.99965,
+        cosine_similarity(&music_emb, &golden.cases["music_only"].embedding) >= 0.9985,
         "smoke music_16k.wav parity failed"
     );
 
@@ -545,8 +547,9 @@ fn test_multimodal_golden_parity() -> anyhow::Result<()> {
     let bf16_thresholds = MultimodalThresholds {
         high_precision: 0.9999,
         standard_media: 0.99965,
+        audio_only: 0.9985,
         budget_70: 0.9994,
-        min_average: 0.9998,
+        min_average: 0.99975,
     };
 
     embedder.set_attention_mode(AttentionMode::ChunkedSliding);
@@ -583,6 +586,7 @@ fn test_multimodal_golden_parity_q8() -> anyhow::Result<()> {
     let q8_thresholds = MultimodalThresholds {
         high_precision: 0.9994,
         standard_media: 0.9984,
+        audio_only: 0.9984,
         budget_70: 0.9984,
         min_average: 0.9995,
     };

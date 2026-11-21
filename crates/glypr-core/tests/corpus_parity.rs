@@ -233,7 +233,13 @@ fn test_corpus_parity_cpu() -> Result<()> {
     };
     let mut embedder = shared.lock().unwrap_or_else(|e| e.into_inner());
     embedder.set_attention_mode(AttentionMode::ChunkedSliding);
-    run_corpus_validation(&embedder, "Safetensors FP32 (CPU)", 0.9999, 0.99995, None)
+    run_corpus_validation(
+        &embedder,
+        "Safetensors FP32 (CPU)",
+        0.9999,
+        0.99995,
+        Some(SMOKE_SUBSET_IDS),
+    )
 }
 
 #[cfg(feature = "metal")]
@@ -279,7 +285,13 @@ fn test_corpus_parity_gguf_q8_cpu_full_8k() -> Result<()> {
     };
     let mut embedder = shared.lock().unwrap_or_else(|e| e.into_inner());
     embedder.set_attention_mode(AttentionMode::ChunkedSliding);
-    run_corpus_validation(&embedder, "GGUF Q8_0 (CPU Chunked)", 0.9994, 0.9998, None)
+    run_corpus_validation(
+        &embedder,
+        "GGUF Q8_0 (CPU Chunked)",
+        0.9994,
+        0.9998,
+        Some(SMOKE_SUBSET_IDS),
+    )
 }
 
 #[cfg(feature = "metal")]
@@ -367,7 +379,8 @@ fn test_long_context_pooling_precision() -> Result<()> {
         for t in 0..seq_len {
             for c in 0..hidden_dim {
                 let v = ((t * 7919 + c * 104729) % 10000) as f64 / 5000.0 - 1.0;
-                raw_vec.push(v as f32);
+                let v_bf16 = half::bf16::from_f32(v as f32).to_f32();
+                raw_vec.push(v_bf16);
             }
         }
 

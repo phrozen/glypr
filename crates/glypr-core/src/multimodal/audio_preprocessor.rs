@@ -86,8 +86,9 @@ pub fn get_hann_window() -> &'static [f32; AUDIO_FRAME_LEN] {
     HANN_WINDOW.get_or_init(|| {
         let mut window = [0.0f32; AUDIO_FRAME_LEN];
         for (n, w) in window.iter_mut().enumerate() {
-            *w = 0.5
-                - 0.5 * (2.0 * std::f32::consts::PI * (n as f32) / (AUDIO_FRAME_LEN as f32)).cos();
+            *w = (0.5
+                - 0.5 * (2.0 * std::f64::consts::PI * (n as f64) / (AUDIO_FRAME_LEN as f64)).cos())
+                as f32;
         }
         window
     })
@@ -110,8 +111,10 @@ fn get_bit_reversal_pairs() -> &'static [(usize, usize); 240] {
     })
 }
 
+#[allow(dead_code)]
 static FFT_512_TWIDDLES: OnceLock<[(f32, f32); 511]> = OnceLock::new();
 
+#[allow(dead_code)]
 fn get_fft_512_twiddles() -> &'static [(f32, f32); 511] {
     FFT_512_TWIDDLES.get_or_init(|| {
         let mut table = [(0.0f32, 0.0f32); 511];
@@ -123,6 +126,27 @@ fn get_fft_512_twiddles() -> &'static [(f32, f32); 511] {
             for k in 0..half {
                 let angle = step_angle * (k as f64);
                 table[offset + k] = (angle.cos() as f32, angle.sin() as f32);
+            }
+            offset += half;
+            len <<= 1;
+        }
+        table
+    })
+}
+
+static FFT_512_TWIDDLES_F64: OnceLock<[(f64, f64); 511]> = OnceLock::new();
+
+fn get_fft_512_twiddles_f64() -> &'static [(f64, f64); 511] {
+    FFT_512_TWIDDLES_F64.get_or_init(|| {
+        let mut table = [(0.0f64, 0.0f64); 511];
+        let mut len = 2;
+        let mut offset = 0;
+        while len <= 512 {
+            let half = len / 2;
+            let step_angle = -std::f64::consts::PI / (half as f64);
+            for k in 0..half {
+                let angle = step_angle * (k as f64);
+                table[offset + k] = (angle.cos(), angle.sin());
             }
             offset += half;
             len <<= 1;
@@ -188,14 +212,21 @@ pub fn create_htk_mel_filterbank(
 
 /// In-place Radix-2 Cooley-Tukey FFT for 512 points using precomputed bit-reversals and twiddles
 pub fn fft_512_in_place(real: &mut [f32; 512], imag: &mut [f32; 512]) {
+    let mut real_f64 = [0.0f64; 512];
+    let mut imag_f64 = [0.0f64; 512];
+    for idx in 0..512 {
+        real_f64[idx] = real[idx] as f64;
+        imag_f64[idx] = imag[idx] as f64;
+    }
+
     // 1. Bit-reversal permutation
     for &(i, j) in get_bit_reversal_pairs() {
-        real.swap(i, j);
-        imag.swap(i, j);
+        real_f64.swap(i, j);
+        imag_f64.swap(i, j);
     }
 
     // 2. Cooley-Tukey butterflies with precomputed twiddles
-    let twiddles = get_fft_512_twiddles();
+    let twiddles = get_fft_512_twiddles_f64();
     let mut len = 2;
     let mut offset = 0;
     while len <= 512 {
@@ -206,22 +237,27 @@ pub fn fft_512_in_place(real: &mut [f32; 512], imag: &mut [f32; 512]) {
         while i < 512 {
             for k in 0..half {
                 let (w_re, w_im) = stage_twiddles[k];
-                let u_re = real[i + k];
-                let u_im = imag[i + k];
+                let u_re = real_f64[i + k];
+                let u_im = imag_f64[i + k];
 
-                let v_re = real[i + k + half] * w_re - imag[i + k + half] * w_im;
-                let v_im = real[i + k + half] * w_im + imag[i + k + half] * w_re;
+                let v_re = real_f64[i + k + half] * w_re - imag_f64[i + k + half] * w_im;
+                let v_im = real_f64[i + k + half] * w_im + imag_f64[i + k + half] * w_re;
 
-                real[i + k] = u_re + v_re;
-                imag[i + k] = u_im + v_im;
+                real_f64[i + k] = u_re + v_re;
+                imag_f64[i + k] = u_im + v_im;
 
-                real[i + k + half] = u_re - v_re;
-                imag[i + k + half] = u_im - v_im;
+                real_f64[i + k + half] = u_re - v_re;
+                imag_f64[i + k + half] = u_im - v_im;
             }
             i += len;
         }
         offset += half;
         len <<= 1;
+    }
+
+    for idx in 0..512 {
+        real[idx] = real_f64[idx] as f32;
+        imag[idx] = imag_f64[idx] as f32;
     }
 }
 

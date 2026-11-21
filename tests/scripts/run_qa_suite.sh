@@ -43,14 +43,14 @@ run_step "[Tier 1] Verify golden vector integrity" \
   uv run python tests/scripts/verify_goldens.py
 
 run_step "[Tier 1] Cargo check workspace (metal,metal-flash-attn,ane)" \
-  cargo check --locked --workspace --all-targets --features metal,metal-flash-attn,ane
+  cargo check --locked --workspace --all-targets --features metal,metal-flash-attn,ane,accelerate
 
 run_step "[Tier 1] Cargo test workspace (metal,metal-flash-attn,ane)" \
-  cargo test --locked --workspace --features metal,metal-flash-attn,ane
+  cargo test --locked --workspace --features metal,metal-flash-attn,ane,accelerate
 
 if [[ "$TIER" == "tier2" ]]; then
   run_step "[Tier 2] Cargo ignored heavy parity tests (release + metal,metal-flash-attn,ane)" \
-    cargo test --locked --workspace --release --features metal,metal-flash-attn,ane -- --ignored
+    cargo test --locked --workspace --release --features metal,metal-flash-attn,ane,accelerate -- --ignored
 
   run_step "[Tier 2] Python baseline pytest suite" \
     uv run pytest tests/test_baseline.py
