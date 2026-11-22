@@ -120,32 +120,32 @@ Validated against official Python `SentenceTransformer("google/embeddinggemma-2"
 | **Case 4** | Audio + Prompt | `"A musical sound"` | 25 | 32 | $> 0.999$ | **0.999852** | ✅ **PASSED** |
 | **Cases 15–18** | Dynamic Budgets | *None* | 70–560 | 74–564 | $> 0.999$ | **0.9994–0.9999** | ✅ **PASSED** |
 
-### Latency & Throughput Benchmark (Apple Silicon Metal GPU, Release Profile):
+### Latency & Throughput Benchmark (`v0.4.0`, Apple Silicon Metal GPU BF16, Release Profile):
 
 ```bash
 cargo test -p glypr-core --release --test bench_multimodal --features metal -- --nocapture
 ```
 
-#### Vision Tower & Card Embedding
+#### Vision Tower & Card Embedding (480×680)
 
-| Component / Metric | Baseline (Pre-Optimization) | Optimized (`main`) | Speedup |
+| Component / Metric | Baseline (Pre-Optimization) | `v0.4.0` (`bench_multimodal`) | Speedup |
 | :--- | :--- | :--- | :--- |
-| **Vision Tower Only (Budget 140)** | ~200.0 ms | **8.30 ms** | **~24x** |
-| **Vision Tower Only (Budget 280)** | ~1,100.0 ms | **12.98 ms** | **~85x** |
-| **Total Card Embedding (Budget 140)** | **269.60 ms** (3.71 cards/sec) | **118.23 ms** (8.46 cards/sec) | **2.28x** |
-| **Total Card Embedding (Budget 280)** | **1,260.99 ms** (0.79 cards/sec) | **255.34 ms** (3.92 cards/sec) | **4.94x** |
+| **Vision Tower Only (Budget 140)** | ~200.0 ms | **5.51 ms** | **~36x** |
+| **Vision Tower Only (Budget 280)** | ~1,100.0 ms | **8.72 ms** | **~126x** |
+| **Total Card Embedding (Budget 140)** | **269.60 ms** (3.71 cards/sec) | **56.65 ms avg** (warm `50.34–51.16 ms`, **17.65 cards/sec**) | **4.76x avg (~5.3x warm)** |
+| **Total Card Embedding (Budget 280)** | **1,260.99 ms** (0.79 cards/sec) | **119.98 ms avg** (warm `105.40–106.10 ms`, **8.33 cards/sec**) | **10.51x avg (~11.9x warm)** |
 
 #### Audio Tower & Auditory Embedding
 
-| Audio Clip Duration | Preprocessor (STFT) | Audio Tower (Conformer) | Total End-to-End Latency | Real-Time Factor (RTF) |
-| :--- | :---: | :---: | :---: | :---: |
-| **1.0s (25 tokens)** | **0.52 ms** (was 2.30 ms) | **6.37 ms** (was 2,896.61 ms, **454x**) | **35.91 ms** | **27.8x real-time** |
-| **5.0s (125 tokens)** | **1.52 ms** (was 11.16 ms) | **8.01 ms** (was 3,170.47 ms, **395x**) | **50.99 ms** | **98.1x real-time** |
-| **12.3s (307 tokens)** | **3.37 ms** (was 27.12 ms) | **11.74 ms** (was 3,184.88 ms, **271x**) | **97.88 ms** | **125.4x real-time** |
+| Audio Clip Duration | Preprocessor (STFT) | Audio Tower (Conformer) | Backbone | Total Avg End-to-End Latency | Real-Time Factor (RTF) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **1.0s Synthetic (25 tokens)** | **0.25 ms** (was 2.30 ms) | **3.80 ms** (was 2,896.61 ms, **762x**) | **18.11 ms** | **21.91 ms** | **45.6x real-time** |
+| **5.0s Music (125 tokens)** | **0.49 ms** (was 11.16 ms) | **6.01 ms** (was 3,170.47 ms, **527x**) | **23.45 ms** | **29.46 ms** | **169.7x real-time** |
+| **12.3s Speech (307 tokens)** | **0.77 ms** (was 27.12 ms) | **8.33 ms** (was 3,184.88 ms, **382x**) | **43.41 ms** | **51.74 ms** | **237.2x real-time** |
 
-#### Unified Multimodal Image Batching (Budget 140)
+#### Unified Multimodal Image Batching (Budget 140, *prior `v0.2.x` reference capture*)
 
-Glypr supports unified multimodal batching across arbitrary modalities (pure text, images, audio, interleaved sequences) through `GlyprEmbedder::embed_batch`. Batching leverages multi-core Rayon image preprocessing, batched rank-3/4 ViT encoders, and Objective-C autorelease pool scoping (`AutoreleaseScope`) to completely eliminate transient VRAM leaks:
+Glypr supports unified multimodal batching across arbitrary modalities (pure text, images, audio, interleaved sequences) through `GlyprEmbedder::embed_batch` (`B = 8` in `v0.4.0` `bench_batch` clocks `vision_140_b8` at `315.96 ms` / `39.50 ms/item` / `25.3 items/s`). Batching leverages multi-core Rayon image preprocessing, batched rank-3/4 ViT encoders, and Objective-C autorelease pool scoping (`AutoreleaseScope`) to completely eliminate transient VRAM leaks:
 
 | Execution Mode | Batch Size | Total Latency | Latency / Image | Throughput | Parity vs Sequential | Peak RSS |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -181,19 +181,19 @@ glypr --bf16-mmproj embed ./card.png --image-token-budget 140
 
 ## 7. Apple Neural Engine (ANE) Vision Tower & Zero-mmproj Mode
 
-In addition to GGUF `mmproj` files, `glypr` v0.3.0 supports hardware vision acceleration on Apple Silicon via the **Apple Neural Engine (ANE)** and native Core ML runtime (`crates/glypr-core/src/coreml/`):
+Introduced in **v0.3.0** and expanded in **v0.4.0**, `glypr` supports hardware vision acceleration on Apple Silicon via the **Apple Neural Engine (ANE)** and native Core ML runtime (`crates/glypr-core/src/coreml/`):
 
 ### Dual-Engine Vision Architecture:
 ```mermaid
 graph TD
     IMG[Image Input: .png / .jpg / .webp] --> PRE[Rayon Preprocessor]
-    PRE -->|Patches: 1134 or 2394| GATE{VisionBackendPolicy}
+    PRE -->|Grid matches compiled _hH_wW bundle| GATE{VisionBackendPolicy}
     
     GATE -->|Auto / AneStrict| ANE[CoreML Vision Tower: Apple Neural Engine]
     GATE -->|Auto Fallback / Metal| GPU[GGUF mmproj Vision Tower: Metal GPU ViT]
     
-    ANE -->|11.17 ms / 23.19 ms Zero-Copy| SPLICER[Token Splicer with DType Cast F32 -> BF16]
-    GPU -->|24.03 ms / 55.30 ms| SPLICER
+    ANE -->|Zero-Copy BorrowedTensor| SPLICER[Token Splicer with DType Cast F32 -> BF16]
+    GPU -->|5.51 ms / 8.72 ms Metal ViT| SPLICER
     
     SPLICER --> LM[EmbeddingGemma 2 Text Backbone on Metal GPU]
 ```
@@ -205,12 +205,17 @@ graph TD
    # Runs image embedding on Apple Neural Engine without downloading mmproj GGUF!
    glypr --ane embed ./portrait.png
    ```
-2. **Deterministic Portrait Presets:**
-   - **Budget 140 Portrait:** $42 \times 27 = 1,134$ patches ($672 \times 432\text{ px}$) $\to 126$ soft tokens (**11.17 ms, 89.5 img/s on ANE vs 24.03 ms on GPU Metal**).
-   - **Budget 280 Portrait:** $57 \times 42 = 2,394$ patches ($912 \times 672\text{ px}$) $\to 266$ soft tokens (**23.19 ms, 43.1 img/s on ANE vs 55.30 ms on GPU Metal**).
-3. **Execution Policy Control (`--vision-backend <auto|ane|metal>`):**
-   - `auto` (default): Routes matching portrait counts to ANE; gracefully falls back to GPU Metal `mmproj` for other budgets or aspect ratios.
-   - `ane`: Strict ANE execution; fails fast with a descriptive error if the patch count is unsupported.
+2. **Multi-Aspect `(patch_height, patch_width)` Grid Presets (`v0.4.0`):**
+   `CoreMLVisionTower` keys loaded bundles by exact `(patch_height, patch_width)` grid (`_h{H}_w{W}` filename tags + `glypr.patch_height` / `glypr.patch_width` metadata), so portrait and landscape images with identical patch counts never collide:
+   - **Budget 140 Portrait (`140-portrait`):** $42 \times 27 = 1,134$ patches ($432 \times 672\text{ px}$) $\to 126$ soft tokens (**11.17 ms, 89.5 img/s** in v0.3.0 ref).
+   - **Budget 140 Landscape (`140-landscape`):** $27 \times 42 = 1,134$ patches ($672 \times 432\text{ px}$) $\to 126$ soft tokens (**`0.999955`** ANE vs Metal `mmproj` in `v0.4.0`).
+   - **Budget 140 Square (`140-square`):** $33 \times 33 = 1,089$ patches ($528 \times 528\text{ px}$) $\to 121$ soft tokens (**`0.999836`** ANE vs Metal `mmproj` / `0.999267` vs PyTorch FP32 in `v0.4.0`).
+   - **Budget 280 Presets (`280-portrait`, `280-std`, `280-square`, `280-landscape`):** Covers portrait ($57 \times 42$, **23.19 ms** in v0.3.0 ref), std ($60 \times 42$), square ($48 \times 48$), and landscape ($42 \times 57$) grids.
+3. **Deterministic Model Discovery (`resolve_coreml_dir`):**
+   CoreML `.mlmodelc` bundles and `manifest.json` are discovered in order: `--coreml-dir <DIR>` $\to$ `$GLYPR_COREML_DIR` $\to$ `./models/coreml` $\to$ user data/cache dir (`~/Library/Application Support/glypr/coreml`). Inspect any bundle with `glypr inspect <PATH>`.
+4. **Execution Policy Control (`--vision-backend <auto|ane|metal>`):**
+   - `auto` (default): Routes matching `(patch_height, patch_width)` grids to ANE; gracefully falls back to GPU Metal `mmproj` for other budgets or aspect ratios.
+   - `ane`: Strict ANE execution; fails fast with a descriptive error listing supported grids if unmatched.
    - `metal`: Forces GPU Metal `mmproj` execution.
-4. **Verified Mathematical Parity:**
-   Hybrid execution (ANE Vision Tower + GPU Metal Text Backbone) achieves **`0.999928`** cosine similarity against the pure GPU Metal GGUF reference pipeline.
+5. **Verified Mathematical Parity:**
+   Hybrid execution achieves **`0.999955`** (`140-landscape`) and **`0.999836`** (`140-square`) cosine similarity against GPU Metal `mmproj` in `v0.4.0` (and `0.999928` on `140-portrait` / `280-portrait` in `v0.3.0`).

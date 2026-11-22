@@ -104,64 +104,69 @@ When deploying an on-device agentic system (e.g., an edge device running local R
 In the native Rust implementation (`glypr-core`), modularity is extended into the runtime execution graph itself, allowing zero-cost swaps of weight formats and attention execution backends.
 
 ```
-                                  ┌─────────────────────────────┐
-                                  │      GlyprEmbedder API      │
-                                  └──────────────┬──────────────┘
-                                                 │
-                   ┌─────────────────────────────┴─────────────────────────────┐
-                   ▼                                                           ▼
-      ┌─────────────────────────┐                                 ┌─────────────────────────┐
-      │   Weights & Formats     │                                 │   Attention Subsystem   │
-      ├─────────────────────────┤                                 ├─────────────────────────┤
-      │ • Safetensors (BF16)    │                                 │ Trait: AttentionBackend │
-      │ • GGUF BF16 (Zero-diff) │                                 │ • Standard Dense        │
-      │ • GGUF Q8_0 (295 MB)    │                                 │ • Chunked Sliding (3W)  │
-      │ • Embedded Tokenizer    │                                 │ • [Hook] MetalFlash     │
-      └─────────────────────────┘                                 │ • [Hook] CudaFlash      │
-                                                                  └─────────────────────────┘
+                                  ┌───────────────────────────────┐
+                                  │     GlyprEmbedder / Builder   │
+                                  └───────────────┬───────────────┘
+                                                  │
+            ┌─────────────────────────────────────┼─────────────────────────────────────┐
+            ▼                                     ▼                                     ▼
+┌─────────────────────────┐         ┌─────────────────────────┐         ┌─────────────────────────┐
+│   Weights & Formats     │         │   Attention Subsystem   │         │   ANE / CoreML Towers   │
+├─────────────────────────┤         ├─────────────────────────┤         ├─────────────────────────┤
+│ • Safetensors (mmap)    │         │ Trait: AttentionBackend │         │ • CoreMLVisionTower     │
+│ • GGUF BF16 (Zero-diff) │         │ • Standard Dense        │         │   (patch_h, patch_w)    │
+│ • GGUF Q8_0 (295.5 MB)  │         │ • Chunked Sliding (3W)  │         │ • CoreMLTextBackbone    │
+│ • Embedded Tokenizer    │         │ • MetalSdpa             │         │   (multi-bucket s{N})   │
+└─────────────────────────┘         │ • MetalFlash (Default)  │         │ • Vision/Text Policies  │
+                                    └─────────────────────────┘         └─────────────────────────┘
 ```
 
-### A. Pluggable Attention Backend Trait
-Attention computation is decoupled from model layers through the `AttentionBackend` trait:
+### A. Pluggable Attention Backend Trait & Builder API
+Attention computation is decoupled from model layers through the `AttentionBackend` trait (`crates/glypr-core/src/attention/traits.rs`):
 
 ```rust
-pub trait AttentionBackend: Send + Sync {
+pub trait AttentionBackend: std::fmt::Debug + Send + Sync {
     fn compute_attention(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
+        q: &Tensor, // [batch, num_heads, seq_len, head_dim]
+        k: &Tensor, // [batch, num_heads, seq_len, head_dim]
+        v: &Tensor, // [batch, num_heads, seq_len, head_dim]
         attention_mask: Option<&Tensor>,
         sliding_window: Option<usize>,
-    ) -> Result<Tensor>;
+    ) -> candle_core::Result<Tensor>;
 }
 ```
 
-Deployers can switch attention backends dynamically at runtime without reloading weights:
+Deployers can configure the embedder via `GlyprEmbedder::builder()` (which returns `GlyprResult<GlyprEmbedder>` with structured `GlyprError`) and switch attention backends dynamically at runtime without reloading weights:
 
 ```rust
-use glypr_core::{GlyprEmbedder, AttentionMode};
+use glypr_core::{AttentionMode, GlyprEmbedder, GlyprResult};
 
-let mut embedder = GlyprEmbedder::load_gguf_q8("embeddinggemma-2-Q8_0.gguf", &device)?;
+fn init_embedder() -> GlyprResult<GlyprEmbedder> {
+    let mut embedder = GlyprEmbedder::builder()
+        .gguf_canonical(true)
+        .build()?;
 
-// Select attention backend:
-// - AttentionMode::Standard       (Dense baseline)
-// - AttentionMode::ChunkedSliding  (Universal CPU/GPU 3W banded attention)
-// - AttentionMode::MetalSdpa       (Apple Silicon fused SDPA with broadcasted mask)
-// - AttentionMode::MetalFlash      (Dedicated tile-skipping MSL FlashAttention, 0 MB mask)
-embedder.set_attention_mode(AttentionMode::MetalFlash);
+    // Select attention backend:
+    // - AttentionMode::Standard       (Dense baseline)
+    // - AttentionMode::ChunkedSliding (Universal CPU/GPU 3W banded attention)
+    // - AttentionMode::MetalSdpa      (Apple Silicon fused SDPA with broadcasted mask)
+    // - AttentionMode::MetalFlash     (Dedicated tile-skipping MSL FlashAttention, 0 MB mask)
+    embedder.set_attention_mode(AttentionMode::MetalFlash);
+    Ok(embedder)
+}
 ```
 
 ### B. Single-Artifact Deployment (GGUF Containerization)
 Rather than managing multi-file directories containing separate `config.json`, `tokenizer.json`, `tokenizer_config.json`, and `model.safetensors` files, `glypr-core` supports single-file self-contained GGUF deployments:
 * **Embedded Vocab & Merges:** All 262,144 token IDs, scores, and merge rules are embedded directly inside the GGUF header and reconstructed into an in-memory BPE tokenizer in milliseconds.
-* **Quantized PLE Projections:** Both standard attention matrices and the $512 \to 12,288$ per-layer embedding projections are loaded directly from quantized GGUF tensors, preserving 100% numerical parity ($\text{Avg Parity} = 0.999865$ on Q8_0).
+* **Quantized PLE Projections:** Both standard attention matrices and the $512 \to 12,288$ per-layer embedding projections are loaded directly from quantized GGUF tensors, preserving four-9s numerical parity (`Avg = 0.999896` on Q8_0 in `v0.4.0`).
 
-### C. Dynamic Multimodal Projector (`mmproj`) Decoupling
-To keep text-only deployments minimal (only 295 MB for Q8_0), vision and audio projector towers are decoupled into optional `mmproj-*.gguf` files:
+### C. Dynamic Multimodal (`mmproj`) & CoreML ANE Decoupling
+To keep text-only deployments minimal (only 295.5 MB for Q8_0), vision and audio projector towers are decoupled into optional `mmproj-*.gguf` files, and Apple Neural Engine (ANE) execution is decoupled into optional `CoreMLVisionTower` (keyed by `(patch_height, patch_width)` grid) and `CoreMLTextBackbone` (multi-bucket static sequence lengths) modules gated by `VisionBackendPolicy` and `TextBackendPolicy`:
 
 ```rust
-// 1. Text embedding runs standalone from a 295 MB Q8_0 container
+// 1. Text embedding runs standalone from a 295.5 MB Q8_0 container
 let mut embedder = GlyprEmbedder::load_gguf_q8("embeddinggemma-2-Q8_0.gguf", &device)?;
 
 // Pure text/code queries run with zero multimodal memory overhead
@@ -169,6 +174,9 @@ let text_vec = embedder.embed_text("fn main() {}", Task::CodeRetrieval)?;
 
 // 2. Attach vision/audio projector on demand when multimodal search is needed
 embedder.attach_multimodal_projector("mmproj-embeddinggemma-2-Q8_0.gguf")?;
+
+// Or attach compiled CoreML ANE vision + text bundles from a directory
+// embedder.attach_coreml_dir("models/coreml", CoreMLComputeUnits::CpuAndNeuralEngine)?;
 
 // Encode images with discrete budget (or default 280 tokens)
 let img_vec = embedder.embed_image(&img, Some("Diagram description"))?;
