@@ -57,6 +57,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GLYPR_ALLOW_MISSING_WEIGHTS: "1"
+      HF_HUB_OFFLINE: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -78,6 +79,7 @@ jobs:
     runs-on: macos-15
     env:
       GLYPR_ALLOW_MISSING_WEIGHTS: "1"
+      HF_HUB_OFFLINE: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

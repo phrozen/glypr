@@ -122,11 +122,14 @@ pub fn golden_dir() -> PathBuf {
 }
 
 fn load_gguf_fixture(device: Device, use_q8: bool, label: &str) -> Result<Option<SharedEmbedder>> {
-    let base_gguf =
-        match try_or_skip_missing(glypr_core::hub::resolve_canonical_model(use_q8), label)? {
-            Some(path) => path,
-            None => return Ok(None),
-        };
+    let offline = allow_missing_weights();
+    let base_gguf = match try_or_skip_missing(
+        glypr_core::hub::resolve_canonical_model_with_options(use_q8, offline),
+        label,
+    )? {
+        Some(path) => path,
+        None => return Ok(None),
+    };
 
     let mut embedder = if use_q8 {
         GlyprEmbedder::load_gguf_q8(&base_gguf, &device)?
@@ -134,7 +137,7 @@ fn load_gguf_fixture(device: Device, use_q8: bool, label: &str) -> Result<Option
         GlyprEmbedder::load_gguf_bf16(&base_gguf, &device)?
     };
 
-    match glypr_core::hub::resolve_canonical_mmproj(use_q8) {
+    match glypr_core::hub::resolve_canonical_mmproj_with_options(use_q8, offline) {
         Ok(mmproj) if mmproj.exists() => {
             embedder.attach_multimodal_projector(&mmproj)?;
         }
@@ -153,11 +156,34 @@ fn load_gguf_fixture(device: Device, use_q8: bool, label: &str) -> Result<Option
 }
 
 fn load_safetensors_fixture(device: Device, label: &str) -> Result<Option<SharedEmbedder>> {
-    let weights_path = match try_or_skip_missing(glypr_core::hub::resolve_google_weights(), label)?
-    {
+    let offline = allow_missing_weights();
+    let weights_path = match try_or_skip_missing(
+        glypr_core::hub::resolve_google_weights_with_options(offline),
+        label,
+    )? {
         Some(path) => path,
         None => return Ok(None),
     };
+    if try_or_skip_missing(
+        glypr_core::hub::resolve_file_with_options(
+            glypr_core::hub::GOOGLE_OFFICIAL_REPO,
+            "config.json",
+            offline,
+        ),
+        label,
+    )?
+    .is_none()
+    {
+        return Ok(None);
+    }
+    if try_or_skip_missing(
+        glypr_core::hub::resolve_google_tokenizer_with_options(offline),
+        label,
+    )?
+    .is_none()
+    {
+        return Ok(None);
+    }
     let snapshot_dir = weights_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Invalid Safetensors path: {}", weights_path.display()))?;

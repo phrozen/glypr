@@ -64,11 +64,12 @@ fn spawn_persistent_test_server(with_mmproj: bool) -> Result<Option<String>> {
         DType::F32
     };
 
-    let model_path = match glypr_core::hub::resolve_default_gguf() {
+    let offline = allow_missing_weights();
+    let model_path = match glypr_core::hub::resolve_canonical_model_with_options(false, offline) {
         Ok(p) => p,
         Err(e) => {
             let err: anyhow::Error = e.into();
-            if allow_missing_weights() && is_missing_weight_error(&err) {
+            if offline && is_missing_weight_error(&err) {
                 return Ok(None);
             }
             return Err(err);
@@ -79,16 +80,17 @@ fn spawn_persistent_test_server(with_mmproj: bool) -> Result<Option<String>> {
     embedder.set_attention_mode(glypr_core::AttentionMode::ChunkedSliding);
 
     if with_mmproj {
-        let mmproj_path = match glypr_core::hub::resolve_default_mmproj() {
-            Ok(p) => p,
-            Err(e) => {
-                let err: anyhow::Error = e.into();
-                if allow_missing_weights() && is_missing_weight_error(&err) {
-                    return Ok(None);
+        let mmproj_path =
+            match glypr_core::hub::resolve_canonical_mmproj_with_options(false, offline) {
+                Ok(p) => p,
+                Err(e) => {
+                    let err: anyhow::Error = e.into();
+                    if offline && is_missing_weight_error(&err) {
+                        return Ok(None);
+                    }
+                    return Err(err);
                 }
-                return Err(err);
-            }
-        };
+            };
         if !mmproj_path.exists() {
             if allow_missing_weights() {
                 return Ok(None);
