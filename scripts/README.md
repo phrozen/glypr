@@ -1,6 +1,6 @@
 # Apple Neural Engine (ANE) Core ML Exporter
 
-This directory contains the tooling for **Glypr's Apple Neural Engine (ANE) integration**, enabling offline export of Google's EmbeddingGemma 2 subsystems into compiled Core ML bundles (`.mlmodelc`) with **W8A16 linear symmetric INT8 quantization**.
+This directory contains the tooling for **Glypr's Apple Neural Engine (ANE) integration**, enabling offline export of Google's EmbeddingGemma 2 subsystems into compiled Core ML bundles (`.mlmodelc`) with **W8A16 linear symmetric INT8 quantization**. See also the [ANE Runtime Deployment Guide](../docs/deployment/quantization-and-runtimes.md#10-apple-neural-engine-ane--core-ml-runtime-deployment) and [Project README](../README.md).
 
 ---
 

@@ -166,26 +166,38 @@ Rather than managing multi-file directories containing separate `config.json`, `
 To keep text-only deployments minimal (only 295.5 MB for Q8_0), vision and audio projector towers are decoupled into optional `mmproj-*.gguf` files, and Apple Neural Engine (ANE) execution is decoupled into optional `CoreMLVisionTower` (keyed by `(patch_height, patch_width)` grid) and `CoreMLTextBackbone` (multi-bucket static sequence lengths) modules gated by `VisionBackendPolicy` and `TextBackendPolicy`:
 
 ```rust
-// 1. Text embedding runs standalone from a 295.5 MB Q8_0 container
-let mut embedder = GlyprEmbedder::load_gguf_q8("embeddinggemma-2-Q8_0.gguf", &device)?;
+use glypr_core::{
+    CoreMLComputeUnits, GlyprEmbedder, GlyprResult, ModalityPart, Task, VISION_BUDGET_DEFAULT,
+};
 
-// Pure text/code queries run with zero multimodal memory overhead
-let text_vec = embedder.embed_text("fn main() {}", Task::CodeRetrieval)?;
+fn embed_multimodal_examples(
+    device: &candle_core::Device,
+    img: &image::DynamicImage,
+    audio_samples: &[f32],
+) -> GlyprResult<()> {
+    // 1. Text embedding runs standalone from a 295.5 MB Q8_0 container
+    let mut embedder = GlyprEmbedder::load_gguf_q8("embeddinggemma-2-Q8_0.gguf", device)?;
 
-// 2. Attach vision/audio projector on demand when multimodal search is needed
-embedder.attach_multimodal_projector("mmproj-embeddinggemma-2-Q8_0.gguf")?;
+    // Pure text/code queries run with zero multimodal memory overhead
+    let _text_vec = embedder.embed_text("fn main() {}", Task::CodeRetrieval)?;
 
-// Or attach compiled CoreML ANE vision + text bundles from a directory
-// embedder.attach_coreml_dir("models/coreml", CoreMLComputeUnits::CpuAndNeuralEngine)?;
+    // 2. Attach vision/audio projector on demand when multimodal search is needed
+    embedder.attach_multimodal_projector("mmproj-embeddinggemma-2-Q8_0.gguf")?;
 
-// Encode images with discrete budget (or default 280 tokens)
-let img_vec = embedder.embed_image(&img, Some("Diagram description"))?;
+    // Or attach compiled CoreML ANE vision + text bundles from a directory
+    embedder.attach_coreml_dir("models/coreml", CoreMLComputeUnits::CpuAndNeuralEngine)?;
 
-// Encode interleaved mixed sequences (Text + Image + Audio)
-let interleaved_vec = embedder.embed_interleaved(&[
-    ModalityPart::Text("Diagram: "),
-    ModalityPart::Image { image: &img, budget: Some(VISION_BUDGET_DEFAULT) },
-    ModalityPart::Audio { samples: &audio_samples },
-], Task::SearchQuery)?;
+    // Encode images with default 280-token budget
+    let _img_vec = embedder.embed_image(img, Some("Diagram description"))?;
+
+    // Encode interleaved mixed sequences (Text + Image + Audio)
+    let _interleaved_vec = embedder.embed_interleaved(&[
+        ModalityPart::Text("Diagram: "),
+        ModalityPart::Image { image: img, budget: Some(VISION_BUDGET_DEFAULT) },
+        ModalityPart::Audio { samples: audio_samples },
+    ], Task::SearchQuery)?;
+
+    Ok(())
+}
 ```
 This guarantees zero memory overhead when processing text/code, while enabling seamless runtime upgrading to full multimodal search.

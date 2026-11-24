@@ -59,10 +59,10 @@ When indexing large visual image catalogs such as standard portrait documents, b
 ## 3. Audio & Video Sampling Protocols
 
 ### Audio Specifications
-* **Sample Rate:** **16 kHz**
-* **Channel Count:** **Mono** (1 channel)
-* **Token Rate:** Exactly **25 tokens per second** (1 token represents 40ms of audio)
-* **Maximum Duration:** ~327 seconds (~5.45 minutes)
+* **Supported Formats:** 8/16/24/32-bit integer PCM and 32-bit IEEE float `.wav` files (mono or stereo, any sample rate).
+* **Normalization:** Automatically downmixed to mono and resampled via an anti-aliased windowed-sinc FIR low-pass filter to **16 kHz mono**.
+* **Token Rate:** Exactly **25 tokens per second** (1 token represents 40ms of audio).
+* **Maximum Duration:** ~327 seconds (~5.45 minutes).
 
 ```python
 # Pass audio files as local paths or WAV bytes
@@ -156,7 +156,7 @@ let doc_vec = embedder.embed_image_with_budget(&chart_img, None, VISION_BUDGET_H
 
 Before executing compute-intensive ViT or Conformer forward passes, `glypr-core` calculates exact token counts using $O(1)$ closed-form formulas:
 * **Image Soft Tokens:** $\lfloor (\text{target\_w} / 16) \times (\text{target\_h} / 16) / 9 \rfloor$
-* **Audio Soft Tokens:** $\lfloor (\lfloor (\text{samples} / 160) / 2 \rfloor - 1) / 2 \rfloor$
+* **Audio Soft Tokens:** $\text{frames} = \lfloor (\max(\text{samples} + 160, 321) - 321) / 160 \rfloor + 1$, then $\text{soft\_tokens} = \lceil \lceil \text{frames} / 2 \rceil / 2 \rceil$
 
 If the combined sequence exceeds `max_seq_len` (default $8,320$ tokens = $8,192$ content $+ 128$ template headroom), execution fails fast in **$< 50\,\mu\text{s}$**, saving seconds of wasted GPU/CPU tensor compute.
 
