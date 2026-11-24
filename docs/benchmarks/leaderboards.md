@@ -171,22 +171,22 @@ Evaluated on multi-core CPU using auto-dispatched SIMD (ARM NEON / x86 AVX2/AVX-
 | **RMSNorm** ($512 \times 2,304$) | $0.312\text{ ms}$ | **$0.237\text{ ms}$** | **$1.32\times$** | **0** (vs 5 in baseline) |
 | **GeGLU** ($512 \times 9,216$) | $5.583\text{ ms}$ | **$0.676\text{ ms}$** | **$8.26\times$ 🚀** | **0** (vs 10 in baseline) |
 
-*(End-to-end CPU context scaling below reflects prior `v0.2.x` reference capture.)*
+*(End-to-end CPU context scaling below measured in `v0.4.0` via `bench_memory --features metal,accelerate`.)*
 
-| Context Length | Model Precision | CPU SIMD Latency | CPU SIMD Throughput | Peak Process RSS (RAM) |
+| Context Length | Model Precision | Cold / Warm Latency | Throughput | Peak Process RSS (RAM) |
 | :---: | :---: | :---: | :---: | :---: |
-| **64 tokens** | GGUF Q8_0 | **$135.0\text{ ms}$** | $474\text{ tok/s}$ | **$1,040.9\text{ MB}$** |
-| **64 tokens** | GGUF BF16 | $159.1\text{ ms}$ | $402\text{ tok/s}$ | $1,738.7\text{ MB}$ |
-| **256 tokens** | GGUF Q8_0 | **$319.7\text{ ms}$** | $801\text{ tok/s}$ | **$1,134.7\text{ MB}$** |
-| **256 tokens** | GGUF BF16 | $317.4\text{ ms}$ | $807\text{ tok/s}$ | $1,738.6\text{ MB}$ |
-| **512 tokens** | GGUF Q8_0 | $656.4\text{ ms}$ | $780\text{ tok/s}$ | **$1,134.6\text{ MB}$** |
-| **512 tokens** | GGUF BF16 | **$607.7\text{ ms}$** | **$843\text{ tok/s}$** | $1,738.7\text{ MB}$ |
-| **1,024 tokens** | GGUF Q8_0 | $1,509.2\text{ ms}$ | $679\text{ tok/s}$ | **$1,251.0\text{ MB}$** |
-| **1,024 tokens** | GGUF BF16 | **$1,256.7\text{ ms}$** | **$815\text{ tok/s}$** | $1,738.7\text{ MB}$ |
-| **2,048 tokens** | GGUF Q8_0 | $3,140.2\text{ ms}$ | $652\text{ tok/s}$ | **$1,406.2\text{ MB}$** |
-| **2,048 tokens** | GGUF BF16 | **$2,815.3\text{ ms}$** | **$727\text{ tok/s}$** | $1,763.6\text{ MB}$ |
-| **4,096 tokens** | GGUF Q8_0 | $7,086.9\text{ ms}$ | $578\text{ tok/s}$ | **$2,054.6\text{ MB}$** |
-| **4,096 tokens** | GGUF BF16 | **$6,222.3\text{ ms}$** | **$658\text{ tok/s}$** | $2,273.1\text{ MB}$ |
+| **64 tokens** | GGUF Q8_0 | $105.4\text{ / }103.1\text{ ms}$ | $621\text{ tok/s}$ | **$1,084.8\text{ MB}$** |
+| **64 tokens** | GGUF BF16 | $80.1\text{ / }\mathbf{69.7\text{ ms}}$ | **$919\text{ tok/s}$** | $1,800.6\text{ MB}$ |
+| **256 tokens** | GGUF Q8_0 | $257.7\text{ / }256.4\text{ ms}$ | $998\text{ tok/s}$ | **$1,136.0\text{ MB}$** |
+| **256 tokens** | GGUF BF16 | $154.7\text{ / }\mathbf{144.8\text{ ms}}$ | **$1,768\text{ tok/s}$** | $1,800.6\text{ MB}$ |
+| **512 tokens** | GGUF Q8_0 | $572.2\text{ / }539.4\text{ ms}$ | $949\text{ tok/s}$ | **$1,084.8\text{ MB}$** |
+| **512 tokens** | GGUF BF16 | $301.2\text{ / }\mathbf{284.1\text{ ms}}$ | **$1,802\text{ tok/s}$** | $1,800.6\text{ MB}$ |
+| **1,024 tokens** | GGUF Q8_0 | $1,111.2\text{ / }1,060.8\text{ ms}$ | $965\text{ tok/s}$ | **$1,084.8\text{ MB}$** |
+| **1,024 tokens** | GGUF BF16 | $616.3\text{ / }\mathbf{601.4\text{ ms}}$ | **$1,703\text{ tok/s}$** | $1,800.6\text{ MB}$ |
+| **2,048 tokens** | GGUF Q8_0 | $2,226.8\text{ / }2,205.2\text{ ms}$ | $929\text{ tok/s}$ | **$1,136.1\text{ MB}$** |
+| **2,048 tokens** | GGUF BF16 | $1,298.4\text{ / }\mathbf{1,279.0\text{ ms}}$ | **$1,601\text{ tok/s}$** | $1,800.6\text{ MB}$ |
+| **4,096 tokens** | GGUF Q8_0 | $4,835.1\text{ / }4,808.4\text{ ms}$ | $852\text{ tok/s}$ | **$1,397.4\text{ MB}$** |
+| **4,096 tokens** | GGUF BF16 | $2,888.5\text{ / }\mathbf{2,838.7\text{ ms}}$ | **$1,443\text{ tok/s}$** | $1,813.3\text{ MB}$ |
 
 ---
 

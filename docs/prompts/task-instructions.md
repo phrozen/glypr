@@ -79,8 +79,10 @@ pub async fn read_with_timeout(path: &Path, timeout_ms: u64) -> Result<Vec<u8>, 
 doc_vec = model.encode(code_snippet)
 
 print("Code Match Score:", model.similarity(query_vec, doc_vec).item())
+```
 
-# Native Rust (glypr-core):
+```rust
+// Native Rust (glypr-core):
 let query_vec = embedder.embed_text(code_query, Task::CodeRetrieval)?;
 let doc_vec = embedder.embed_text(code_body, Task::Document { title: Some("src/io/reader.rs") })?;
 ```

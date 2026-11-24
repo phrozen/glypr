@@ -6,7 +6,7 @@ This document specifies the quantization architecture, distance metrics, and ret
 
 ## 1. Supported Production Formats
 
-`glypr` provides zero-cost functional quantization utilities over primitive types (`&[f32]`, `&[u64]`, `&[i8]`) in `glypr::util` / `glypr_core::util`.
+`glypr` provides zero-cost functional quantization utilities over primitive types (`&[f32]`, `&[u64]`, `&[i8]`) in `glypr_core::util` (re-exported at `glypr_core`).
 
 ```
                   ┌──────────────────────────────────────────────────────────┐
@@ -19,7 +19,7 @@ This document specifies the quantization architecture, distance metrics, and ret
          ┌───────────────────────────┐                   ┌───────────────────────────┐
          │     Static INT8 (768d)    │                   │       Binary (768d)       │
          │  768 bytes/vec (4x comp)  │                   │  96 bytes/vec (32x comp)  │
-         │   16.1x faster (52.6 ns)  │                   │    470x faster (1.8 ns)   │
+         │   16.5x faster (52.9 ns)  │                   │  440.5x faster (1.99 ns)  │
          │   0 metadata (mmap ready) │                   │    12x u64 words (POPCNT) │
          └───────────────────────────┘                   └───────────────────────────┘
 ```
@@ -39,46 +39,46 @@ This document specifies the quantization architecture, distance metrics, and ret
 * **Formula:** Bit $i = 1$ if $v_i > 0.0$, else $0$.
 * **Word Alignment:** Strictly enforces `dim.is_multiple_of(64)`. Packed into $D / 64$ `u64` words.
 * **Storage Footprint:** $32\times$ compression ($96$ bytes for 768d, $16$ bytes for 128d).
-* **Hamming Distance:** Hardware `POPCNT` via 4-way unrolled XOR. Computes in **$1.80\,\text{ns}$** ($555\,\text{Mop/s}$).
-* **Angular Cosine Estimator:** Charikar's formula: $\cos(\pi \cdot d_H / D)$ in **$2.85\,\text{ns}$**.
+* **Hamming Distance:** Hardware `POPCNT` via 4-way unrolled XOR. Computes in **$1.99\,\text{ns}$** ($503.5\,\text{Mop/s}$).
+* **Angular Cosine Estimator:** Charikar's formula: $\cos(\pi \cdot d_H / D)$ in **$2.87\,\text{ns}$**.
 
 ---
 
 ## 2. Multi-Dimensional Parity & Performance Benchmarks
 
-Measured on Apple Silicon using `cargo test -p glypr-core --release --test bench_quantization`:
+Measured on Apple Silicon (`v0.4.0`) using `cargo bench -p glypr-core --bench bench_quantization`:
 
 ### A. Quantization Encoding Throughput (`f32 -> Quantized`)
 
 | Dimension | Scheme | Latency | Throughput | Storage / 1M Vectors |
 |:---:|:---|:---:|:---:|:---:|
-| **768** | **Static INT8** | **199.4 ns** | **5.01 Mvec/s** | **768 MB** |
-| 768 | Binary (1-bit) | 996.8 ns | 1.00 Mvec/s | 96 MB |
-| **512** | **Static INT8** | **83.1 ns** | **12.04 Mvec/s** | **512 MB** |
-| 512 | Binary (1-bit) | 540.1 ns | 1.85 Mvec/s | 64 MB |
-| **256** | **Static INT8** | **40.7 ns** | **24.56 Mvec/s** | **256 MB** |
-| 256 | Binary (1-bit) | 248.4 ns | 4.03 Mvec/s | 32 MB |
-| **128** | **Static INT8** | **21.4 ns** | **46.68 Mvec/s** | **128 MB** |
-| 128 | Binary (1-bit) | 104.9 ns | 9.53 Mvec/s | 16 MB |
+| **768** | **Static INT8** | **191.6 ns** | **5.22 Mvec/s** | **768 MB** |
+| 768 | Binary (1-bit) | 970.4 ns | 1.03 Mvec/s | 96 MB |
+| **512** | **Static INT8** | **84.7 ns** | **11.80 Mvec/s** | **512 MB** |
+| 512 | Binary (1-bit) | 524.7 ns | 1.91 Mvec/s | 64 MB |
+| **256** | **Static INT8** | **42.7 ns** | **23.44 Mvec/s** | **256 MB** |
+| 256 | Binary (1-bit) | 240.6 ns | 4.16 Mvec/s | 32 MB |
+| **128** | **Static INT8** | **22.2 ns** | **44.98 Mvec/s** | **128 MB** |
+| 128 | Binary (1-bit) | 104.3 ns | 9.58 Mvec/s | 16 MB |
 
 ### B. Distance & Similarity Compute Throughput
 
 | Dimension | Metric | Latency (ns) | Throughput (Mop/s) | Speedup vs Float32 |
 |:---:|:---|:---:|:---:|:---:|
-| **768** | Float32 Cosine | 847.76 ns | 1.2 Mop/s | 1.00x |
-| **768** | **INT8 Dot (SIMD)** | **52.65 ns** | **19.0 Mop/s** | **16.10x** |
-| **768** | INT8 Cosine (3x dots) | 158.30 ns | 6.3 Mop/s | 5.36x |
-| **768** | **Binary POPCNT Hamming** | **1.80 ns** | **555.4 Mop/s** | **470.87x** |
-| **768** | **Binary Angular Cosine** | **2.85 ns** | **350.9 Mop/s** | **297.49x** |
-| **512** | Float32 Cosine | 478.95 ns | 2.1 Mop/s | 1.00x |
-| **512** | **INT8 Dot (SIMD)** | **35.01 ns** | **28.6 Mop/s** | **13.68x** |
-| **512** | Binary POPCNT Hamming | 1.33 ns | 750.1 Mop/s | 359.26x |
-| **256** | Float32 Cosine | 188.10 ns | 5.3 Mop/s | 1.00x |
-| **256** | **INT8 Dot (SIMD)** | **17.52 ns** | **57.1 Mop/s** | **10.74x** |
-| **256** | Binary POPCNT Hamming | 0.94 ns | 1,064.6 Mop/s | 200.25x |
-| **128** | Float32 Cosine | 67.30 ns | 14.9 Mop/s | 1.00x |
-| **128** | **INT8 Dot (SIMD)** | **8.80 ns** | **113.7 Mop/s** | **7.65x** |
-| **128** | Binary POPCNT Hamming | 0.87 ns | 1,151.6 Mop/s | 77.50x |
+| **768** | Float32 Cosine | 875.02 ns | 1.1 Mop/s | 1.00x |
+| **768** | **INT8 Dot (SIMD)** | **52.90 ns** | **18.9 Mop/s** | **16.54x** |
+| **768** | INT8 Cosine (3x dots) | 159.51 ns | 6.3 Mop/s | 5.49x |
+| **768** | **Binary POPCNT Hamming** | **1.99 ns** | **503.5 Mop/s** | **440.54x** |
+| **768** | **Binary Angular Cosine** | **2.87 ns** | **347.9 Mop/s** | **304.43x** |
+| **512** | Float32 Cosine | 484.27 ns | 2.1 Mop/s | 1.00x |
+| **512** | **INT8 Dot (SIMD)** | **35.36 ns** | **28.3 Mop/s** | **13.70x** |
+| **512** | Binary POPCNT Hamming | 1.30 ns | 767.9 Mop/s | 371.85x |
+| **256** | Float32 Cosine | 188.11 ns | 5.3 Mop/s | 1.00x |
+| **256** | **INT8 Dot (SIMD)** | **17.69 ns** | **56.5 Mop/s** | **10.64x** |
+| **256** | Binary POPCNT Hamming | 0.91 ns | 1,096.0 Mop/s | 206.16x |
+| **128** | Float32 Cosine | 67.69 ns | 14.8 Mop/s | 1.00x |
+| **128** | **INT8 Dot (SIMD)** | **8.88 ns** | **112.6 Mop/s** | **7.62x** |
+| **128** | Binary POPCNT Hamming | 0.89 ns | 1,123.8 Mop/s | 76.07x |
 
 ---
 
@@ -89,12 +89,12 @@ Because Static INT8 and Binary require zero metadata, an index of 1,000,000 vect
 
 1. **Pass 1: Coarse Filtering (1,000,000 candidates):**
    * Scan 1M vectors using **128d Binary** ($16\,\text{MB}$ memory).
-   * At $0.87\,\text{ns}$ per vector, the entire million-vector corpus is scanned in **$< 0.9\,\text{ms}$**.
+   * At $0.89\,\text{ns}$ per vector, the entire million-vector corpus is scanned in **$< 0.9\,\text{ms}$**.
    * Retrieve top $K = 500$ candidates.
 2. **Pass 2: Fine Re-ranking (500 candidates):**
    * Re-rank the top 500 candidates using full **768d Static INT8** ($768\,\text{MB}$ memory).
-   * $500 \times 52.6\,\text{ns} = \mathbf{26.3\,\mu\text{s}}$!
-3. **Total Latency:** **$\approx 0.93\,\text{ms}$** with near-100% recall.
+   * $500 \times 52.9\,\text{ns} = \mathbf{26.5\,\mu\text{s}}$!
+3. **Total Latency:** **$\approx 0.92\,\text{ms}$** with near-100% recall.
 
 ### Flat Binary Files & `mmap`
 Because a Static INT8 vector is strictly $D$ bytes, vector storage requires no container serialization format:
@@ -165,8 +165,8 @@ $$s_k = \frac{\max_{j \in B_k} |v_j|}{127.0}, \quad q_j = \text{clamp}\left(\tex
 | **Bytes / Vector (768d)** | **768 B** | **96 B** | 869 B | 864 B |
 | **Metadata Overhead** | **0 bytes** | **0 bytes** | 101 bytes | 96 bytes (24x f32 scales) |
 | **mmap Flat Array** | **Native `&[i8]`** | **Native `&[u64]`** | Needs parser/offset | Needs parser/offset |
-| **Cosine Dot Latency** | **52.6 ns** | **1.8 ns** | ~140 ns | ~72 ns |
-| **Throughput** | **19.0 Mop/s** | **555.4 Mop/s** | ~7.1 Mop/s | ~13.8 Mop/s |
+| **Cosine Dot Latency** | **52.90 ns** | **1.99 ns** | ~140 ns | ~72 ns |
+| **Throughput** | **18.9 Mop/s** | **503.5 Mop/s** | ~7.1 Mop/s | ~13.8 Mop/s |
 | **Accuracy ($\Delta$ vs F32)**| **$\le 0.0043$** | **$\le 0.15$** | $\le 0.0008$ | $\le 0.0010$ |
 | **Status in `glypr`** | **Shipped (Production)** | **Shipped (Production)** | Blueprint | Blueprint |
 
@@ -175,6 +175,6 @@ $$s_k = \frac{\max_{j \in B_k} |v_j|}{127.0}, \quad q_j = \text{clamp}\left(\tex
 ## 5. Summary & Recommendation
 
 For `EmbeddingGemma-2` embeddings:
-1. **Static INT8** is strictly preferred for persistent storage and dense similarity: zero metadata overhead, native `mmap` compatibility, and $16.1\times$ faster than Float32 with negligible quantization loss ($\Delta \le 0.0043$).
-2. **Binary 1-bit** is strictly preferred for high-throughput candidate filtering: $470\times$ faster ($1.80\,\text{ns}$) with $32\times$ compression.
+1. **Static INT8** is strictly preferred for persistent storage and dense similarity: zero metadata overhead, native `mmap` compatibility, and $16.5\times$ faster than Float32 with negligible quantization loss ($\Delta \le 0.0043$).
+2. **Binary 1-bit** is strictly preferred for high-throughput candidate filtering: $440.5\times$ faster ($1.99\,\text{ns}$) with $32\times$ compression.
 3. **Turso BSQ8 Blueprint** remains documented here as an upgrade path if arbitrary unnormalized or heavy-tailed embeddings are added in future model revisions.

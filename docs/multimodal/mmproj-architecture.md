@@ -75,11 +75,11 @@ The Vision Tower extracts high-level semantic representations from raw image pix
 
 The Audio Tower processes raw 16 kHz mono waveforms into dense auditory representations:
 
-1. **Log-Mel Spectrogram Extraction:**
+1. **Log-Mel Spectrogram Extraction & WAV Decoding:**
+   - Accepts 8/16/24/32-bit PCM and 32-bit IEEE float `.wav` inputs (mono or stereo, arbitrary sample rates), downmixing to mono and applying zero-dependency windowed-sinc FIR low-pass resampling (e.g., `48 kHz -> 16 kHz`) before spectrogram extraction.
    - Sample rate: 16,000 Hz, STFT frame length: 320 (20 ms), hop length: 160 (10 ms), FFT size: 512.
-   - Periodic Hann analysis window with 160-sample semicausal left padding.
-   - 128-channel HTK triangular Mel filterbank spanning 0 Hz to 8,000 Hz.
-   - Log compression: $\log(\text{mel} + 0.001)$. 1 second of audio produces 99 time frames.
+   - Periodic Hann analysis window and Cooley-Tukey 512-point FFT twiddle arithmetic computed in `f64` (160-sample semicausal left padding) for exact numerical parity against PyTorch FP32.
+   - 128-channel HTK triangular Mel filterbank spanning 0 Hz to 8,000 Hz; log compression $\log(\text{mel} + 0.001)$ (99 time frames per second).
    - **Hardware Acceleration:** Multi-core parallel frame streaming using Rayon (`par_chunks_exact_mut`), statically cached 512-point FFT twiddle factors, 9-bit bit-reversal lookup tables, and filterbank matrices via `OnceLock`.
 2. **2-Stage Subsampling Convolution:**
    Two successive Conv2D layers (stride 2, padding 1) with channel dimensions $1 \to 128 \to 32$, downsampling the time axis $4\times$ to yield **25 frames per second** (512 dimensions).
@@ -123,7 +123,7 @@ Validated against official Python `SentenceTransformer("google/embeddinggemma-2"
 ### Latency & Throughput Benchmark (`v0.4.0`, Apple Silicon Metal GPU BF16, Release Profile):
 
 ```bash
-cargo test -p glypr-core --release --test bench_multimodal --features metal -- --nocapture
+cargo bench -p glypr-core --bench bench_multimodal --features metal
 ```
 
 #### Vision Tower & Card Embedding (480×680)
@@ -143,19 +143,15 @@ cargo test -p glypr-core --release --test bench_multimodal --features metal -- -
 | **5.0s Music (125 tokens)** | **0.49 ms** (was 11.16 ms) | **6.01 ms** (was 3,170.47 ms, **527x**) | **23.45 ms** | **29.46 ms** | **169.7x real-time** |
 | **12.3s Speech (307 tokens)** | **0.77 ms** (was 27.12 ms) | **8.33 ms** (was 3,184.88 ms, **382x**) | **43.41 ms** | **51.74 ms** | **237.2x real-time** |
 
-#### Unified Multimodal Image Batching (Budget 140, *prior `v0.2.x` reference capture*)
+#### Unified Multimodal Batching (`v0.4.0`, `bench_batch`)
 
-Glypr supports unified multimodal batching across arbitrary modalities (pure text, images, audio, interleaved sequences) through `GlyprEmbedder::embed_batch` (`B = 8` in `v0.4.0` `bench_batch` clocks `vision_140_b8` at `315.96 ms` / `39.50 ms/item` / `25.3 items/s`). Batching leverages multi-core Rayon image preprocessing, batched rank-3/4 ViT encoders, and Objective-C autorelease pool scoping (`AutoreleaseScope`) to completely eliminate transient VRAM leaks:
+`GlyprEmbedder::embed_batch` unifies text, image, audio, and interleaved inputs using multi-core Rayon preprocessing, batched ViT encoding (enforcing matching aspect grids per sub-batch), and Objective-C autorelease pool scoping (`AutoreleaseScope`):
 
-| Execution Mode | Batch Size | Total Latency | Latency / Image | Throughput | Parity vs Sequential | Peak RSS |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Sequential Baseline** | 1 | 2,413.57 ms (32 items) | 75.40 ms / item | 13.26 images/sec | 1.000000 | 2,037.9 MB |
-| **Batched (ChunkedSliding)** | 4 | 259.80 ms | **64.95 ms / item** | **15.40 images/sec** | **1.000000** | 2,037.9 MB |
-| **Batched (ChunkedSliding)** | 8 | 523.38 ms | **65.42 ms / item** | **15.29 images/sec** | **1.000000** | 2,037.9 MB |
-| **Batched (ChunkedSliding)** | 16 | 1,068.99 ms | **66.81 ms / item** | **14.97 images/sec** | **1.000000** | 2,037.9 MB |
-| **Batched (ChunkedSliding)** | 32 | 2,215.20 ms | **69.23 ms / item** | **14.45 images/sec** | **1.000000** | 2,037.9 MB |
-| **Batched (MetalFlash)** | 8 | 509.55 ms | **63.69 ms / item** | **15.70 images/sec** | **0.999931** | 2,037.9 MB |
-| **Batched (MetalFlash)** | 32 | 2,147.53 ms | **67.11 ms / item** | **14.90 images/sec** | **0.999931** | 2,037.9 MB |
+- **Vision Budget 140 (`B=8`):** `315.96 ms` (`39.50 ms/item`, **`25.3 items/s`** — `1.60×` faster than PyTorch MPS).
+- **Hybrid Text + Vision (`B=8`):** `315.76 ms` (`39.47 ms/item`, **`25.3 items/s`** — `1.61×` faster than PyTorch MPS).
+- **Hybrid Text + Vision + Audio (`B=8`):** `423.20 ms` (`52.90 ms/item`, **`18.9 items/s`** — `1.28×` faster than PyTorch MPS).
+
+See [Leaderboards & Scaling](../benchmarks/leaderboards.md#b-high-throughput-batch-inference-highlights-v040-metal-bf16-batch-size--8) and [Memory & VRAM](../benchmarks/memory-and-vram.md#6-multimodal-memory-footprint--elimination-of-30-gb-spikes) for the full batch scaling and memory profiles.
 
 ---
 

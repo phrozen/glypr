@@ -24,6 +24,8 @@ This documentation repository is organized into targeted, fact-checked modules:
 ```
 docs/
 ├── README.md                              # Master index, executive summary & quickstart
+├── api/
+│   └── embeddings-schema.md               # OpenAI-compatible HTTP endpoints, schemas & errors
 ├── architecture/
 │   ├── specifications.md                  # Layer dimensions, heads, GQA, pooling, projection
 │   ├── modularity.md                      # Selective encoder loading (270M, 440M, 570M, 740M)
@@ -42,6 +44,9 @@ docs/
     ├── inputs-and-budgeting.md            # Vision token budget (70-1120), audio (16kHz), interleaving
     ├── mmproj-architecture.md             # SigLIP ViT, CoreML Vision Tower, and Conformer Audio dynamic projector towers
     └── gguf-nuances-and-conversions.md    # GGUF tensor naming, weight conversions, and alignment
+
+scripts/
+└── README.md                              # Apple Neural Engine (ANE) Core ML export tooling
 ```
 
 ---
@@ -197,11 +202,11 @@ glypr serve --port 8080 --max-batch-size 32
 1. **Precision Rule:** Never run in FP16 (`torch.float16`). EmbeddingGemma 2's activation magnitude triggers FP16 underflow/overflow, causing silent embedding corruption or NaNs. Always use `bfloat16`, `float32`, or official QAT INT4/INT8 / GGUF Q8_0.
 2. **Unified Memory Profiling Rule:** On Apple Silicon, do **not** rely on standard CPU resident memory (`ps`, `getrusage`, or `MACH_TASK_BASIC_INFO`). Metal unified memory allocations are managed by the IOGPU driver and can quietly allocate $14+\text{ GB}$ while CPU RSS reports $1\text{ GB}$. Always query `[MTLDevice currentAllocatedSize]`.
 3. **PLE Normalization Rule:** Never normalize Per-Layer Embeddings (PLE) across the entire 4D $[B, N, 24, 512]$ tensor in float32 all at once. Because RMSNorm operates along the last dimension (512), normalize each layer slice on-demand inside the layer loop to save over $2\text{ GB}$ of transient GPU memory with exact $0.0$ numerical difference.
-4. **Attention Chunking Rule:** Naive full attention across 8,192 tokens materializes an $8192 \times 8192$ matrix, consuming $>5.3\text{ GB}$ during float32 softmax. In sliding layers, use a $3W$ window scratchpad; in global layers, chunk queries into blocks of 512 tokens to keep peak Metal VRAM under $3.1\text{ GB}$ with $100\%$ bit-for-bit mathematical identity.
-5. **Hardware Tile-Skipping & Zero Mask Rule:** Naive attention masks allocate an $8192 \times 8192$ tensor ($134.2\text{ MB}$). By computing sliding window boundaries in-register in custom Metal Shading Language (`steel_attention_sliding.metal`) with tile-skipping ($|row - col| > 512$), memory overhead drops to 0 MB, and 8K token layers accelerate by $18.5\times$ ($249.5\text{ ms} \to 13.45\text{ ms}$).
-6. **Zero-Copy GQA Head Indexing Rule:** Avoid calling `repeat_kv` prior to attention. Indexing key and value heads dynamically in GPU registers ($gqa\_factor = 2$) cuts sliding attention layer latency in half ($13.45\text{ ms} \to 6.76\text{ ms}$) with zero temporary tensor materialization.
-7. **Activation Clamping Rule:** In deep Gemma-2 MLP layers, pre-activation logits can reach $g < -14.0$, causing cubic polynomial overflow in the PyTorch tanh approximation and yielding `NaN`s on Apple Silicon Metal. Clamping pre-activations to $[-10.0, 10.0]$ completely eliminates `NaN`s while preserving bit-for-bit golden parity.
-8. **CPU SIMD Vectorization & Heap Elimination Rule:** On CPU, default framework operations allocate dozens of intermediate tensors for RMSNorm and GeGLU (~30 GB of allocation churn at 8K). By deploying `pulp` vectorized SIMD kernels (`simd_rmsnorm` and `simd_geglu`), GeGLU accelerates by $10.49\times$, RMSNorm by $1.55\times$, and heap allocation churn is reduced to zero.
+4. **Attention Chunking Rule:** Naive full attention across 8,192 tokens materializes an $8192 \times 8192$ matrix, consuming $>5.3\text{ GB}$ during float32 softmax. In `ChunkedSliding`, using a $3W$ window scratchpad and 512-token query chunks bounds peak Metal VRAM to $2,241.6\text{ MB}$ with $100\%$ bit-for-bit mathematical identity (while `MetalFlash` brings peak VRAM further down to $1,102.8\text{–}1,177.5\text{ MB}$).
+5. **Hardware Tile-Skipping & Zero Mask Rule:** Naive attention masks allocate an $8192 \times 8192$ tensor ($134.2\text{ MB}$). By computing sliding window boundaries in-register in custom Metal Shading Language (`steel_attention_sliding.metal` and M5 NAX `steel_attention_m5.metal`) with tile-skipping ($|row - col| > 512$), mask memory overhead drops to $0\text{ MB}$.
+6. **Zero-Copy GQA Head Indexing Rule:** Avoid calling `repeat_kv` prior to attention. Indexing key and value heads dynamically in GPU registers ($gqa\_factor = 2$ on sliding layers, $4$ on global layers) avoids duplicating KV tensors in memory.
+7. **Activation Clamping Rule:** In deep Gemma-4 MLP layers, pre-activation logits can reach $g < -14.0$, causing cubic polynomial overflow in the PyTorch tanh approximation and yielding `NaN`s on Apple Silicon Metal. Clamping pre-activations to $[-10.0, 10.0]$ completely eliminates `NaN`s while preserving bit-for-bit golden parity.
+8. **CPU SIMD Vectorization & Heap Elimination Rule:** On CPU, default framework operations allocate dozens of intermediate tensors for RMSNorm and GeGLU (~30 GB of allocation churn at 8K). With `pulp` + Rayon SIMD kernels (`simd_rmsnorm` and `simd_geglu`, plus optional Apple Accelerate `vvtanhf`), GeGLU accelerates by **$8.26\times$** ($0.676\text{ ms}$ vs $5.583\text{ ms}$) and RMSNorm by **$1.32\times$** ($0.237\text{ ms}$ vs $0.312\text{ ms}$) with zero intermediate tensor allocations.
 9. **Task Instruction Rule:** Task prefixes (`task: ... | query: ...`) are **text-only**. Passing media (images, video, audio) with task instruction strings will corrupt multimodal representations.
-10. **MRL Normalization Rule:** If slicing vectors manually (`vec[:512]`), you **must** apply L2 normalization afterwards. Slicing breaks unit length and silently degrades cosine similarity rankings.
-11. **Document Title Rule:** `prompt_name="Document"` automatically prepends `title: none | text: {content}`. If your document has an actual title or filename, format it manually: `title: {title} | text: {content}`.
+10. **MRL Normalization Rule:** If slicing vectors manually (`vec[:512]`), you **must** apply L2 normalization afterwards. Slicing breaks unit length and silently degrades cosine similarity rankings (`glypr_core::truncate_mrl` handles both together).
+11. **Document Title Rule:** In Python `sentence-transformers`, `prompt_name="Document"` automatically prepends `title: none | text: {content}` (so titled docs must be formatted manually as `title: {title} | text: {content}`). In `glypr-core` / CLI / HTTP API, `Task::Document { title: Some(...) }` handles titled formatting automatically.

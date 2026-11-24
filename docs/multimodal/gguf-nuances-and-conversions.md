@@ -241,3 +241,11 @@ When splicing soft tokens into the language model input sequence:
 3. Scale all other vocabulary tokens (including $\langle\text{bos}\rangle$, $\langle\text{boi}\rangle$, $\langle\text{eoi}\rangle$, text prompt, and $\langle\text{eos}\rangle$) by:
    $$\text{embed\_scale} = \sqrt{d_{\text{hidden}}} = \sqrt{512} \approx 22.6274$$
 4. Forward the spliced sequence through the language model using `forward_embeds()`.
+
+---
+
+## 10. Base GGUF Metadata Quirk: `sliding_window` Full Span vs. Half-Radius
+
+In the base text GGUF container (`embeddinggemma-2-*.gguf`), `llama.cpp` exports `gemma-embedding2.attention.sliding_window` as the **total full window span (`1024`)**, whereas Hugging Face `config.json` and `glypr`'s attention kernels (`SteelAttention`, `ChunkedSlidingAttention`) parameterize `sliding_window` as the symmetric **half-radius (`512`, attending to $|i - j| \le 512$)**.
+
+In [`crates/glypr-core/src/config.rs`](../../crates/glypr-core/src/config.rs), `TextConfig::from_gguf_metadata` halves the metadata value (`raw / 2`, yielding `512`) so GGUF long-context masking (`seq_len > 512`) stays identical to Safetensors and PyTorch FP32.

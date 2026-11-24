@@ -37,7 +37,7 @@ The Metal GPU engine executes natively on Apple Silicon GPUs through custom **Me
 
 ### A. Zero-Copy Grouped Query Attention (GQA) & Full-Context Support (`BD=512`)
 
-In Gemma-2-2B, the transformer backbone uses an asymmetric head topology:
+In EmbeddingGemma 2, the transformer backbone uses an asymmetric head topology:
 - **Query Heads ($H_Q$):** 4 heads ($d_{\text{head}} = 256$ in sliding layers, $512$ in global layers)
 - **Key/Value Heads ($H_{KV}$):** 2 heads in sliding layers ($G = H_Q / H_{KV} = 2$) and 1 head in global layers ($G = 4$)
 
@@ -162,22 +162,22 @@ Apple's M5 architecture equips every GPU shader core with dedicated Neural Accel
 
 #### 1. Zero-Cost Runtime Capability Detection (`MetalCapabilities`)
 On startup, `glypr-core` queries the default `MTLDevice` for `MTLGPUFamily(1004)` and `MTLGPUFamily(1010)`, combined with a one-time runtime MSL compiler probe for `#include <metal_tensor>` and `metal::mpp::tensor_ops::matmul2d`.
-- **Seamless Portability:** If run on M1–M4 hardware or older macOS versions, the system defaults to the Phase 1–3 `simdgroup_matrix` pipeline with zero runtime overhead.
+- **Seamless Portability:** If run on M1–M4 hardware or older macOS versions, the system falls back automatically to the `simdgroup_matrix` pipeline (`steel_attention_sliding.metal`) with zero runtime overhead.
 - **Profiling Toggle:** Accepts `GLYPR_METAL_TIER=auto|m5|legacy` to directly benchmark M5 tensor ops against legacy paths.
 
 #### 2. Native Hardware `bfloat` ALU in Fused MSL Kernels
-By gating MSL definitions behind `#if defined(__HAVE_BFLOAT__) typedef bfloat MLX_BF16;`, all 11 fused kernels (norms, RoPE, GeGLU, Conformer convs) leverage M3/M4/M5 native hardware brain-float execution units, eliminating software float-conversion emulation.
+By gating MSL definitions behind `#if defined(__HAVE_BFLOAT__) typedef bfloat MLX_BF16;`, all fused kernels (norms, RoPE, GeGLU, Conformer convs, pooling/L2-norm) leverage M3/M4/M5 native hardware brain-float execution units, eliminating software float-conversion emulation and guarding BF16 intermediates against NaNs.
 
-#### 3. M5 Block-Quantized INT8 (`Q8_0`) GEMM (`q8_0_mm_m5_bf16`)
-For batch tokens ($M > 1$), `crates/glypr-core/src/metal_kernels/m5_ops.metal` executes register-streamed block-quantized INT8 matrix multiplications directly into `bfloat` registers.
+#### 3. M5 & Q8_0 Block-Quantized GEMM/GEMV (`fused_ops.metal` & `m5_ops.metal`)
+On Metal, `Q8_0` linear projections widen `q8_0_mm_bf16` tiles to `BK = 64` with vectorized `packed_char4` loads, route small batch rows (`M <= 8`) to low-latency `q8_0_mv_bf16`, optionally pre-dequantize hot weights at load time, and leverage `m5_ops.metal` register-streamed block-quantized contractions directly into `bfloat` registers.
 
 #### 4. Hardware Cooperative FlashAttention (`steel_attention_m5.metal`)
 - **Single SIMD-Group Scoped Reductions:** Metal 4's `mpp::tensor_ops::reduce_rows` requires `execution_simdgroup`. Launching `WM=4` SIMD groups per threadgroup and partitioning query rows into `BQ_SG = 16` gives each SIMD group an isolated row slice, executing online softmax max/sum reductions directly in hardware without threadgroup memory barriers.
-- **Left-Input Cooperative Tensors:** Chaining $S = Q \times K^T$ into $O += P \times V$ utilizes `pv_op.template get_left_input_cooperative_tensor<bfloat, bfloat, float>(sT_bf16)` directly in registers.
-- **Dual-Tile Column Slicing for $d_{\text{head}}=512$:** To satisfy Metal 4's $N \le 256$ cooperative tensor limit, the kernel splits $P \times V$ into dual 256-column tiles (`oT0` and `oT1`), preserving four-9s cosine parity ($> 0.99986$) without clamping.
-- **Hardware Tile Alignment & NaN Fast-Math Hardening (v0.2.1):** M5 NAX operations require static $16 \times 32$ cooperative tensor tiles. Inputs with unaligned sequence lengths ($s \pmod{64} \neq 0$) are cleanly routed to `steel_attention_sliding` while power-of-two lengths (64, 128, ..., 8192) execute on NAX, preventing out-of-bounds cooperative tensor loads. Fast-math evaluation in online softmax subtraction is protected with `isinf` guards against `-inf - (-inf) = NaN`.
+- **Left-Input Cooperative Tensors & Direct `[B, S, H, D]` Output:** Chaining $S = Q \times K^T$ into $O += P \times V$ utilizes `pv_op.template get_left_input_cooperative_tensor<bfloat, bfloat, float>(sT_bf16)` directly in registers and writes `[B, S, H, D]` output directly, avoiding post-attention transpose copies.
+- **Dual-Tile Column Slicing for $d_{\text{head}}=512$:** To satisfy Metal 4's $N \le 256$ cooperative tensor limit, the kernel splits $P \times V$ into dual 256-column tiles (`oT0` and `oT1`), preserving four-9s cosine parity without clamping.
+- **Unaligned Sequence Support & NaN Fast-Math Hardening (`v0.4.0`):** Boundary-checked cooperative tensor loads unlock `steel_attention_m5.metal` for arbitrary unaligned sequence lengths (`s` not divisible by 64 — covering ~98.4% of real-world inputs, rather than only multiples of 64). Fast-math evaluation in online softmax subtraction is protected with `isinf` guards against `-inf - (-inf) = NaN`.
 
-**M5 Empirical Impact:** 8,192-token Q8_0 latency dropped from **$814.97\text{ ms} \to 627.20\text{ ms}$** (**$1.30\times$ speedup**), while full 292-vector suite time dropped to **$3.50\text{ s}$** (**$1.64\times$ faster than Python PyTorch MPS**).
+**M5 Empirical Impact (`v0.4.0`):** 8,192-token `Q8_0` median latency drops to **$564.91\text{ ms}$** (`14,502 tok/s`) and `BF16` drops to **$620.81\text{ ms}$** (`13,196 tok/s`), while the full 292-vector parity suite completes in **$3.22\text{ s}$** (`Q8_0`, **$1.78\times$ faster** than PyTorch MPS reference) / **$3.61\text{ s}$** (`BF16`, `1.59\times` faster).
 
 ---
 
@@ -246,19 +246,19 @@ Benchmarked on full Gemma-2 layer dimensions ($512$ tokens, $D_{\text{model}} = 
 
 ---
 
-## 4. End-to-End Latency & Throughput Scaling (`v0.4.0` Metal + CPU SIMD Reference)
+## 4. End-to-End Latency & Throughput Scaling (`v0.4.0` Metal & CPU SIMD)
 
-Empirically measured on Apple Silicon M-series unified hardware across sequence lengths (`compare_models --models gguf-bf16,gguf-q8 --device metal --attn flash` for `v0.4.0` Metal columns; CPU SIMD columns from prior reference capture):
+Empirically measured in `v0.4.0` on Apple Silicon M5 unified hardware across sequence lengths (`compare_models --models gguf-bf16,gguf-q8 --device metal --attn flash` for Metal median latency; `bench_memory --features metal,accelerate` for warm CPU SIMD latency):
 
-| Context Length | Standard Dense (Metal, `v0.4.0`) | Chunked Sliding (BF16, `v0.4.0`) | Chunked Sliding (Q8_0, `v0.4.0`) | Metal Flash (BF16, `v0.4.0`) | Metal Flash (Q8_0, `v0.4.0`) | CPU SIMD (BF16, *prior ref*) | CPU SIMD (Q8_0, *prior ref*) |
+| Context Length | Standard Dense (Metal) | Chunked Sliding (BF16) | Chunked Sliding (Q8_0) | Metal Flash (BF16) | Metal Flash (Q8_0) | CPU SIMD (BF16) | CPU SIMD (Q8_0) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **64 tokens** | $10.54\text{ ms}$ | $10.56\text{ ms}$ | $9.42\text{ ms}$ | **$9.94\text{ ms}$** | **$9.25\text{ ms}$** | $165.9\text{ ms}$ | **$152.9\text{ ms}$** |
-| **256 tokens** | $19.64\text{ ms}$ | $19.35\text{ ms}$ | $16.43\text{ ms}$ | **$17.81\text{ ms}$** | **$14.59\text{ ms}$** | $316.1\text{ ms}$ | **$326.0\text{ ms}$** |
-| **512 tokens** | $38.79\text{ ms}$ | $41.08\text{ ms}$ | $35.86\text{ ms}$ | **$27.03\text{ ms}$** | **$22.41\text{ ms}$** | **$591.2\text{ ms}$** | $642.1\text{ ms}$ |
-| **1,024 tokens** | $90.23\text{ ms}$ | $94.16\text{ ms}$ | $84.32\text{ ms}$ | **$47.37\text{ ms}$** | **$39.05\text{ ms}$** | **$1,231.0\text{ ms}$** | $1,383.0\text{ ms}$ |
-| **2,048 tokens** | $258.71\text{ ms}$ | $202.98\text{ ms}$ | $183.51\text{ ms}$ | **$95.29\text{ ms}$** | **$76.91\text{ ms}$** | **$2,604.4\text{ ms}$** | $2,977.9\text{ ms}$ |
-| **4,096 tokens** | $831.79\text{ ms}$ | $459.22\text{ ms}$ | $426.93\text{ ms}$ | **$228.92\text{ ms}$** | **$199.54\text{ ms}$** | **$5,878.8\text{ ms}$** | $6,797.6\text{ ms}$ |
-| **8,192 tokens** | $2,940.54\text{ ms}$ | $1,113.36\text{ ms}$ | $1,055.63\text{ ms}$ | **$620.81\text{ ms}$** | **$564.91\text{ ms}$** 🏆 | N/A | N/A |
+| **64 tokens** | $10.54\text{ ms}$ | $10.56\text{ ms}$ | $9.42\text{ ms}$ | **$9.94\text{ ms}$** | **$9.25\text{ ms}$** | **$69.7\text{ ms}$** | $103.1\text{ ms}$ |
+| **256 tokens** | $19.64\text{ ms}$ | $19.35\text{ ms}$ | $16.43\text{ ms}$ | **$17.81\text{ ms}$** | **$14.59\text{ ms}$** | **$144.8\text{ ms}$** | $256.4\text{ ms}$ |
+| **512 tokens** | $38.79\text{ ms}$ | $41.08\text{ ms}$ | $35.86\text{ ms}$ | **$27.03\text{ ms}$** | **$22.41\text{ ms}$** | **$284.1\text{ ms}$** | $539.4\text{ ms}$ |
+| **1,024 tokens** | $90.23\text{ ms}$ | $94.16\text{ ms}$ | $84.32\text{ ms}$ | **$47.37\text{ ms}$** | **$39.05\text{ ms}$** | **$601.4\text{ ms}$** | $1,060.8\text{ ms}$ |
+| **2,048 tokens** | $258.71\text{ ms}$ | $202.98\text{ ms}$ | $183.51\text{ ms}$ | **$95.29\text{ ms}$** | **$76.91\text{ ms}$** | **$1,279.0\text{ ms}$** | $2,205.2\text{ ms}$ |
+| **4,096 tokens** | $831.79\text{ ms}$ | $459.22\text{ ms}$ | $426.93\text{ ms}$ | **$228.92\text{ ms}$** | **$199.54\text{ ms}$** | **$2,838.7\text{ ms}$** | $4,808.4\text{ ms}$ |
+| **8,192 tokens** | $2,940.54\text{ ms}$ | $1,113.36\text{ ms}$ | $1,055.63\text{ ms}$ | **$620.81\text{ ms}$** | **$564.91\text{ ms}$** 🏆 | — | — |
 
 > [!NOTE]
 > **PyTorch MPS Reference Comparison at 8,192 Tokens (`v0.4.0` vs prior MPS capture):**
@@ -442,18 +442,12 @@ Across end-to-end embedding generation (768-dimensional normalized unit vectors)
 - Cosine similarity between M1/M2 execution and M3/M4/M5 execution remains strictly above **`0.99995`** (four-9s bitwise mathematical equivalence).
 - However, raw element-wise strict equality (`assert_eq!` or static tolerances $< 0.035$) fails on M1/M2 hardware due to the absence of native bfloat hardware units.
 
-### D. Reproduction & Debugging Roadmap (M2 Max Session)
-To isolate compiler-level instruction emission differences:
-1. **Target Hardware:** Apple MacBook Pro M2 Max (`MTLGPUFamilyApple8`).
-2. **Key Test Cases:**
-   - `crates/glypr-core/src/metal_kernels/mod.rs::test_phase2_fused_kernels_bit_exact_parity`
-   - `crates/glypr-core/src/metal_kernels/mod.rs::test_phase3_fused_kernels_bit_exact_parity`
-3. **Disassembly Inspection:**
-   - Inspect GPU shader machine code using `xcrun metal-objdump` on compiled Metal libraries:
-     ```bash
-     xcrun metal -c crates/glypr-core/src/metal_kernels/fused_ops.metal -o /tmp/fused_ops.air
-     xcrun metallib /tmp/fused_ops.air -o /tmp/fused_ops.metallib
-     xcrun metal-objdump -d /tmp/fused_ops.metallib
-     ```
-   - Investigate compiler flags (`-fno-fast-math` vs precise FMA) and explicit float32 accumulation in `fused_ops.metal` to ensure identical rounding behavior across all Apple Silicon generations.
+### D. Inspecting Shader Emission Across Apple Silicon Generations
+When diagnosing cross-generation FP/BF16 differences across Apple Silicon families (e.g., M2 `MTLGPUFamilyApple8` vs M3–M5 hardware `bfloat`), the compiled Metal library can be disassembled directly with Apple's Metal toolchain:
+```bash
+xcrun metal -c crates/glypr-core/src/metal_kernels/fused_ops.metal -o /tmp/fused_ops.air
+xcrun metallib /tmp/fused_ops.air -o /tmp/fused_ops.metallib
+xcrun metal-objdump -d /tmp/fused_ops.metallib
+```
+Unit parity assertions for fused kernels live in [`crates/glypr-core/src/metal_kernels/mod.rs`](../../crates/glypr-core/src/metal_kernels/mod.rs) (`test_phase2_fused_kernels_bit_exact_parity` and `test_phase3_fused_kernels_bit_exact_parity`), allowing 1-ULP `bfloat16` tolerance on software-emulated M1/M2 GPUs while preserving four-9s (`> 0.99995`) end-to-end cosine parity.
 

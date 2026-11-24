@@ -113,9 +113,9 @@ The `image` field accepts:
 * **PNG** (`.png`)
 * **JPEG / JPG** (`.jpeg`, `.jpg`)
 * **WebP** (`.webp`)
-* **GIF** (`.gif`)
-* **BMP** (`.bmp`)
-* **TIFF** (`.tiff`, `.tif`)
+
+### Supported Audio Inputs
+* **WAV** (`.wav`) via Base64 data URI, raw Base64, or opt-in local path (`8/16/24/32-bit` PCM or `32-bit` IEEE float, mono or stereo; automatically downmixed and FIR low-pass resampled to 16 kHz mono).
 
 ### Vision Soft Token Budget (`budget`)
 Controls the spatial patch downsampling resolution. Supported range: `16` to `2048` tokens (defaults to `280`).
@@ -253,3 +253,19 @@ Returns `200 OK` when the inference worker channel is active, or `503 Service Un
   "model": "embeddinggemma-2"
 }
 ```
+
+### D. Error Response Envelope (`400` / `500` / `504`)
+Invalid parameters, malformed JSON (`OpenAiJson`), disallowed local file paths, binary non-multiples of 64, empty/oversized batches, and missing projectors return `400 Bad Request` in standard OpenAI error JSON format:
+
+```json
+{
+  "error": {
+    "message": "Invalid dimensions: 1024. Must be between 1 and 768.",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": null
+  }
+}
+```
+
+Server execution failures return `500` (`internal_server_error`), and requests exceeding `--request-timeout-secs` (default `120s`) return `504` (`timeout_error`).

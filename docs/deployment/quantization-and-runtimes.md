@@ -132,33 +132,19 @@ By eliminating intermediate tensor allocations, unifying FlashAttention across a
    * *Problem:* The 4 global attention layers materialized $[1, 4, 8192, 8192]$ matrices. In float32 softmax, element-wise `sub`, `exp`, and `div` operations allocated over **$5.3\text{ GB}$** of transient buffers.
    * *Solution:* Query-chunked block attention. Chunking $Q$ into blocks of $512$ tokens attending to all $8,192$ keys reduced the active matrix from $8192 \times 8192$ ($1.07\text{ GB}$) to $512 \times 8192$ ($67\text{ MB}$). Because row-wise softmax normalizes across keys independently for each query token, this yields **$100\%$ bit-for-bit mathematical identity**.
 
-### Empirical Hardware Metal VRAM Scorecard (Apple Silicon)
+### Empirical Hardware Metal VRAM Summary (8,192 Tokens, Apple Silicon)
 
-> [!NOTE]
-> `8,192t` Metal Flash rows show **`v0.4.0`** `bench_memory` telemetry (`1,177.5 MB` BF16 / `1,102.8 MB` Q8_0) alongside `v0.4.0` `compare_models` median latencies (`620.81 ms` BF16 / `564.91 ms` Q8_0; cold/warm single-run in `bench_memory` is `628.55/621.14 ms` BF16 and `572.26/560.64 ms` Q8_0). `1,024t`–`4,096t` VRAM rows and the PyTorch MPS row reflect prior `v0.3.0` / `v0.2.x` reference captures (`v0.4.0` `compare_models` latencies are `47.37/39.05 ms` at 1K, `95.29/76.91 ms` at 2K, and `228.92/199.54 ms` at 4K).
+Captured in `v0.4.0` using `bench_memory --features metal,accelerate` (peak IOGPU via `[MTLDevice currentAllocatedSize]`, warm latency) alongside 20-iteration median latency from `compare_models`:
 
-| Context Length | Framework / Variant | Attention Engine | Base Model RAM | Peak Metal VRAM | Transient VRAM | Max Process RSS | Latency |
-| :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **1,024t** *(v0.3 ref)* | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $1,045.7\text{ MB}$ | $264.6\text{ MB}$ | $2,037.3\text{ MB}$ | $90.59\text{ ms}$ |
-| **1,024t** *(v0.3 ref)* | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | $1,180.3\text{ MB}$ | $395.3\text{ MB}$ | $2,038.5\text{ MB}$ | $94.74\text{ ms}$ |
-| **1,024t** *(v0.3 ref)* | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$986.2\text{ MB}$** | **$201.2\text{ MB}$** | $2,038.5\text{ MB}$ | **$52.28\text{ ms}$** *(v0.4: 47.37 ms)* |
-| **1,024t** *(v0.3 ref)* | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$754.1\text{ MB}$** | **$147.8\text{ MB}$** | **$1,678.5\text{ MB}$** | **$43.93\text{ ms}$** *(v0.4: 39.05 ms)* 🚀 |
-| | | | | | | | |
-| **2,048t** *(v0.3 ref)* | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $1,370.0\text{ MB}$ | $589.0\text{ MB}$ | $2,037.2\text{ MB}$ | $257.64\text{ ms}$ |
-| **2,048t** *(v0.3 ref)* | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | $1,430.3\text{ MB}$ | $645.3\text{ MB}$ | $2,038.5\text{ MB}$ | $203.50\text{ ms}$ |
-| **2,048t** *(v0.3 ref)* | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$1,120.4\text{ MB}$** | **$335.4\text{ MB}$** | $2,038.5\text{ MB}$ | **$107.19\text{ ms}$** *(v0.4: 95.29 ms)* |
-| **2,048t** *(v0.3 ref)* | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$935.2\text{ MB}$** | **$328.9\text{ MB}$** | **$1,678.5\text{ MB}$** | **$87.68\text{ ms}$** *(v0.4: 76.91 ms)* 🚀 |
-| | | | | | | | |
-| **4,096t** *(v0.3 ref)* | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $2,118.8\text{ MB}$ | $1,337.7\text{ MB}$ | $2,037.3\text{ MB}$ | $830.42\text{ ms}$ |
-| **4,096t** *(v0.3 ref)* | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | $2,006.5\text{ MB}$ | $1,221.5\text{ MB}$ | $2,038.6\text{ MB}$ | $461.29\text{ ms}$ |
-| **4,096t** *(v0.3 ref)* | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$1,177.4\text{ MB}$** | **$392.4\text{ MB}$** | $2,038.6\text{ MB}$ | **$255.29\text{ ms}$** *(v0.4: 228.92 ms)* |
-| **4,096t** *(v0.3 ref)* | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$1,086.7\text{ MB}$** | **$480.4\text{ MB}$** | **$1,678.6\text{ MB}$** | **$225.10\text{ ms}$** *(v0.4: 199.54 ms)* |
-| | | | | | | | |
-| **8,192t** *(prior ref)* | **PyTorch MPS (Golden)**| **MPSGraph SDPA** | **$1,472.5\text{ MB}$** | **$6,592.8\text{ MB}$** | $5,120.3\text{ MB}$ | **$1,211.1\text{ MB}$** | **$875.00\text{ ms}$** |
-| **8,192t** *(v0.3 ref)* | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $4,608.2\text{ MB}$ | $3,827.2\text{ MB}$ | $2,037.2\text{ MB}$ | $2,946.44\text{ ms}$ *(v0.4: 2,940.54 ms)* |
-| **8,192t** *(v0.3 ref)* | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | **$2,880.0\text{ MB}$** | **$2,095.0\text{ MB}$** | $2,038.5\text{ MB}$ | $1,121.50\text{ ms}$ *(v0.4: 1,113.36 ms)* |
-| **8,192t (`v0.4.0`)** | **`glypr-core` BF16 (Flash)** | **Metal Flash (Fused)** | **$665.4\text{ MB}$** | **$1,177.5\text{ MB}$** | **$512.0\text{ MB}$** | $2,046.4\text{ MB}$ | **$621.14\text{ ms}$** *(warm; 620.81 ms med)* |
-| **8,192t (`v0.4.0`)** | **`glypr-core` Q8_0 (Flash)** | **Metal Flash (Fused)** | **$606.7\text{ MB}$** | **$1,102.8\text{ MB}$** | **$496.0\text{ MB}$** | **$662.9\text{ MB}$** | **$560.64\text{ ms}$** *(warm; 564.91 ms med)* 🏆 |
+| Precision / Backend | Model VRAM | Peak Metal VRAM | Transient VRAM | Max Process RSS | 8K Warm / Med Latency | Throughput |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **PyTorch MPS *(prior ref)*** | $1,472.5\text{ MB}$ | $6,592.8\text{ MB}$ | $5,120.3\text{ MB}$ | $1,211.1\text{ MB}$ | $875.00\text{ ms}$ *(ref)* | $9,360\text{ tok/s}$ |
+| **`glypr-core` BF16 (Standard)** | $665.4\text{ MB}$ | $3,858.1\text{ MB}$ | $3,192.6\text{ MB}$ | $2,046.2\text{ MB}$ | $2,970.26 / 2,940.54\text{ ms}$ | $2,786\text{ tok/s}$ |
+| **`glypr-core` BF16 (Chunked)** | $665.4\text{ MB}$ | $2,241.6\text{ MB}$ | $1,576.2\text{ MB}$ | $2,046.4\text{ MB}$ | $1,127.60 / 1,113.36\text{ ms}$ | $7,358\text{ tok/s}$ |
+| **`glypr-core` BF16 (`MetalFlash`)** | $665.4\text{ MB}$ | **$1,177.5\text{ MB}$** | **$512.0\text{ MB}$** | $2,046.5\text{ MB}$ | **$635.60 / 620.81\text{ ms}$** | **$13,196\text{ tok/s}$** |
+| **`glypr-core` Q8_0 (`MetalFlash`)** | **$606.7\text{ MB}$** | **$1,102.8\text{ MB}$** | **$496.0\text{ MB}$** | **$662.8\text{ MB}$** | **$578.34 / 564.91\text{ ms}$** | **$14,502\text{ tok/s}$** 🏆 |
+
+> See [Empirical Memory, VRAM & Transient Allocation Architecture](../benchmarks/memory-and-vram.md#3-empirical-hardware-memory-scorecard-apple-silicon) for the complete `1,024t–8,192t` Metal GPU sweep and `64t–4,096t` CPU SIMD scaling matrix.
 
 ---
 
@@ -304,7 +290,8 @@ Vision bundles are tagged `_h{H}_w{W}` and keyed by `(patch_height, patch_width)
 ### C. CLI & Server Deployment
 ```bash
 # Install binary with Metal + ANE acceleration
-cargo install --path crates/glypr --features metal,ane --force
+cargo install glypr --features metal,ane
+# Or from source: cargo install --path crates/glypr --features metal,ane --force
 
 # Inspect a compiled CoreML bundle or GGUF header
 glypr inspect models/coreml/gemma2_text_backbone_s1024_w8a16.mlmodelc

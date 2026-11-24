@@ -59,7 +59,9 @@ vec = model.encode(
     truncate_dim=512,
     normalize_embeddings=True,  # Handles L2 normalization automatically
 )
+```
 
+```rust
 // In glypr-core (Rust): Engine returns native 768d unit vectors.
 // Slice and re-normalize in O(K) using the dedicated glypr_core::util module:
 use glypr_core::{truncate_mrl, Task};
@@ -122,14 +124,13 @@ final_top_10 = top_100_idx[np.argsort(fine_scores)[-10:]]
 ### Rust Implementation (`glypr-core`):
 
 ```rust
-use anyhow::Result;
-use glypr_core::{cosine_similarity, truncate_mrl, GlyprEmbedder, Task};
+use glypr_core::{GlyprResult, cosine_similarity, truncate_mrl};
 
 fn two_stage_search(
     query_768: &[f32],
     corpus_768: &[Vec<f32>],
     top_k: usize,
-) -> Result<Vec<(usize, f32)>> {
+) -> GlyprResult<Vec<(usize, f32)>> {
     // 1. Slice query to coarse 128d
     let q_128 = truncate_mrl(query_768, 128)?;
 
@@ -138,13 +139,13 @@ fn two_stage_search(
         .iter()
         .enumerate()
         .map(|(idx, doc)| {
-            let doc_128 = truncate_mrl(doc, 128).unwrap();
+            let doc_128 = truncate_mrl(doc, 128)?;
             let score = cosine_similarity(&q_128, &doc_128);
-            (idx, score)
+            Ok((idx, score))
         })
-        .collect();
+        .collect::<GlyprResult<Vec<_>>>()?;
 
-    coarse_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    coarse_scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     let candidates = &coarse_scored[..coarse_scored.len().min(100)];
 
     // 3. Fine Stage: Re-rank top 100 with full 768d (or 512d) precision
@@ -156,7 +157,7 @@ fn two_stage_search(
         })
         .collect();
 
-    fine_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    fine_scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     fine_scored.truncate(top_k);
     Ok(fine_scored)
 }

@@ -54,8 +54,6 @@ The core backbone is adapted from the **Gemma 4** architecture:
 
 ---
 
----
-
 ## 3. Attention Mechanism & Efficiency: 5:1 Hybrid GQA/MQA
 
 To achieve ultra-low latency and minimal memory allocation on edge hardware (e.g., Apple Silicon, Google Tensor, laptops), EmbeddingGemma 2 employs an asymmetric **5:1 Local:Global attention pattern**:
@@ -102,8 +100,8 @@ To satisfy diverse deployment environments (from edge CPU to Apple Silicon Metal
    - **Fallback:** Seamlessly delegates to `ChunkedSlidingAttention` when invoked on CPU.
 
 4. **Dedicated Sliding-Window & Full-Context Metal FlashAttention (`AttentionMode::MetalFlash`):**
-   - Custom Metal Shading Language (`steel_attention_sliding.metal` & `fused_ops.metal`) kernels compiling directly to Apple Silicon GPU machine code.
-   - **Default Execution on Metal:** As of Phase 1, `AttentionMode::default()` automatically selects `AttentionMode::MetalFlash` when running on Apple Silicon GPU with the `metal` / `metal-flash-attn` feature, while seamlessly falling back to `ChunkedSlidingAttention` on CPU or non-BF16 activations.
+   - Custom Metal Shading Language (`steel_attention_sliding.metal`, `steel_attention_m5.metal`, & `fused_ops.metal`) kernels compiling directly to Apple Silicon GPU machine code.
+   - **Default Execution on Metal:** `AttentionMode::default()` automatically selects `AttentionMode::MetalFlash` when running on Apple Silicon GPU with the `metal` / `metal-flash-attn` feature, while seamlessly falling back to `ChunkedSlidingAttention` on CPU or non-BF16 activations.
    - **Unified Coverage Across All 24 Layers (`BD=256` & `BD=512`):**
      - Sliding Window Layers (20 layers, $d_{\text{head}} = 256$): Dispatches `steel_attention_bfloat16_bq32_bk16_bd256_wm4_wn1_maskbfloat16` with $B_Q = 32, B_K = 16, W_M = 4, W_N = 1$.
      - Global Full-Attention Layers (Layers 5, 11, 17, 23, $d_{\text{head}} = 512$): Dispatches `steel_attention_bfloat16_bq16_bk16_bd512_wm2_wn1_maskbfloat16` ($B_Q = 16, B_K = 16, W_M = 2, W_N = 1$), eliminating `repeat_kv` memory duplication and $O(S^2)$ dense attention fallback on global layers.
@@ -165,10 +163,11 @@ EmbeddingGemma 2 employs **projection-only Per-Layer Embeddings (PLE)** to injec
    $$\mathbf{P}_{\text{raw}} = \left( \mathbf{E} \mathbf{W}_{\text{ple}} \right) \cdot d_{\text{model}}^{-0.5}, \quad \mathbf{W}_{\text{ple}} \in \mathbb{R}^{512 \times (24 \cdot 512)}$$
    $$\mathbf{P} = \text{reshape}(\mathbf{P}_{\text{raw}}, [B, N, 24, 512])$$
 
-2. **On-Demand Layer Normalization:**
-   To avoid allocating gigabytes of intermediate float32 tensors, the slice for layer $l$ is normalized on demand:
+2. **Hybrid Per-Layer Normalization (`B * S >= 1024`):**
+   To avoid allocating gigabytes of intermediate float32 tensors on long sequences, `TextPLE` selects between two mathematically identical paths (`PER_LAYER_PLE_THRESHOLD = 1024` in `model.rs`):
+   - **Short inputs (`B * S < 1024`):** Single-pass 4D PLE projection and fused RMSNorm + transpose kernel (`ple_scale_rms_norm_transpose_bf16`).
+   - **Long inputs (`B * S >= 1024`):** Zero-copy `layer_views` compute and normalize each layer's slice $[B, N, 512]$ on-demand inside the forward loop, capping 8K PLE transient memory at **$16.8\text{ MB}$** instead of $402.6\text{ MB}$ with **$0.0$ numerical difference**:
    $$\mathbf{p}_l = \text{RMSNorm}\left( \mathbf{P}_{[:, :, l, :]} \right) \in \mathbb{R}^{B \times N \times 512}$$
-   Because RMSNorm operates along the last dimension ($512$), normalizing per layer is **bit-for-bit identical** to normalizing the full 4D tensor ($0.0$ difference).
 
 3. **TextPLEBlock Gating:**
    $$\mathbf{g} = \text{gelu\_tanh}\left( \mathbf{h} \mathbf{W}_{\text{gate}} \right)$$
@@ -213,7 +212,7 @@ Unlike generative LLMs that extract embeddings from the final causal token ($<eo
   * `image_token_id`: Image soft-token placeholder (`token_id: 258880`)
   * `audio_token_id`: Audio soft-token placeholder (`token_id: 258881`)
   * `eoi_token_id`: End of Image sequence (`token_id: 258882`)
-  * `eoa_token_index`: End of Audio sequence (`token_id: 258883`)
+  * `eoa_token_id`: End of Audio sequence (`token_id: 258883`)
   * `video_token_id`: Video soft-token placeholder (`token_id: 258884`)
 
 ---
@@ -274,13 +273,13 @@ For CPU execution on macOS and Linux x86_64/ARM64 servers, `glypr-core` replaces
 │     CustomOp1: simd_rmsnorm     │   │      CustomOp2: simd_geglu      │
 ├─────────────────────────────────┤   ├─────────────────────────────────┤
 │ • #[pulp::with_simd] dynamic    │   │ • In-place streaming activation │
-│ • Fused mul_add_f32s accumulator│   │ • Bounded tanh polynomial       │
+│ • Fused mul_add_f32s accumulator│   │ • Bounded tanh / Accelerate     │
 │ • Rayon parallel chunking       │   │ • Zero intermediate allocations │
-│ • Zero intermediate allocations │   │ • 10.49x isolated kernel speedup│
+│ • 1.32x RMSNorm speedup         │   │ • 8.26x GeGLU kernel speedup    │
 └─────────────────────────────────┘   └─────────────────────────────────┘
 ```
 
-1. **`simd_rmsnorm` (CustomOp1):** Accumulates sum of squares across vector lanes (`mul_add_f32s`) and scales directly into the output buffer, eliminating 5 intermediate allocations per call.
-2. **`simd_geglu` (CustomOp2):** Streams gate and up vectors concurrently, applying clamped tanh-approximated GELU directly into registers, eliminating 10 intermediate tensor allocations per call and delivering a **$10.49\times$ kernel speedup** ($21.5\text{ ms} \to 2.05\text{ ms}$).
-3. **Parity Preservation:** Validated to within machine epsilon ($\le 7.15 \times 10^{-7}$ max absolute diff on RMSNorm, $0.0$ bit-for-bit match on GeGLU).
+1. **`simd_rmsnorm` (CustomOp1):** Accumulates sum of squares across vector lanes (`mul_add_f32s`) and scales directly into the output buffer, eliminating 5 intermediate allocations per call (`0.237 ms` vs Candle `0.312 ms`, **$1.32\times$** speedup).
+2. **`simd_geglu` (CustomOp2):** Streams `f32` or Rayon-parallel `bf16` gate and up vectors concurrently, evaluating clamped tanh-approximated GELU (or Apple Accelerate `vvtanhf` under `--features accelerate`) directly into the output buffer, eliminating 10 intermediate tensor allocations per call and delivering an **$8.26\times$ kernel speedup** ($5.583\text{ ms} \to 0.676\text{ ms}$).
+3. **Parity Preservation:** Validated to within machine epsilon ($\le 7.15 \times 10^{-7}$ max absolute diff on RMSNorm, exact parity on GeGLU).
 
