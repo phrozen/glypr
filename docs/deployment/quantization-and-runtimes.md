@@ -118,9 +118,9 @@ pub fn get_metal_allocated_bytes() -> u64 {
 
 ## 5. Inference Memory Optimization Blueprint & Empirical Benchmarks
 
-In deep-dive profiling on Apple Silicon Metal GPU, unoptimized transformer inference on 8,192 tokens consumed **$14.59\text{ GB}$**. PyTorch MPS consumed **$6.59\text{ GB}$**. 
+In deep-dive profiling on Apple Silicon Metal GPU, unoptimized transformer inference on 8,192 tokens consumed **$14.59\text{ GB}$**. PyTorch MPS consumed **$6.59\text{ GB}$**.
 
-By eliminating intermediate tensor allocations, unifying FlashAttention across all 24 layers, and deploying custom MSL shaders with M5 Neural Accelerators, `glypr-core` cut peak Metal VRAM down to **$1.47\text{ GB}$ (BF16)** and **$1.58\text{ GB}$ (Q8_0)**—delivering both the lowest memory footprint and lowest latency (**$615.30\text{ ms}$**, beating PyTorch MPS by over 250 ms).
+By eliminating intermediate tensor allocations, unifying FlashAttention across all 24 layers, and deploying custom MSL shaders with M5 Neural Accelerators, `glypr-core` (`v0.4.0`) cuts peak Metal VRAM at 8,192 tokens down to **$1,177.5\text{ MB}$ (BF16)** and **$1,102.8\text{ MB}$ (Q8_0)** (**$662.9\text{ MB}$ Max RSS**)—delivering both the lowest memory footprint and lowest latency (**$564.91\text{ ms}$** Q8_0 / **$620.81\text{ ms}$** BF16).
 
 ### The Two Root-Cause Bottlenecks:
 
@@ -134,28 +134,31 @@ By eliminating intermediate tensor allocations, unifying FlashAttention across a
 
 ### Empirical Hardware Metal VRAM Scorecard (Apple Silicon)
 
+> [!NOTE]
+> `8,192t` Metal Flash rows show **`v0.4.0`** `bench_memory` telemetry (`1,177.5 MB` BF16 / `1,102.8 MB` Q8_0) alongside `v0.4.0` `compare_models` median latencies (`620.81 ms` BF16 / `564.91 ms` Q8_0; cold/warm single-run in `bench_memory` is `628.55/621.14 ms` BF16 and `572.26/560.64 ms` Q8_0). `1,024t`–`4,096t` VRAM rows and the PyTorch MPS row reflect prior `v0.3.0` / `v0.2.x` reference captures (`v0.4.0` `compare_models` latencies are `47.37/39.05 ms` at 1K, `95.29/76.91 ms` at 2K, and `228.92/199.54 ms` at 4K).
+
 | Context Length | Framework / Variant | Attention Engine | Base Model RAM | Peak Metal VRAM | Transient VRAM | Max Process RSS | Latency |
 | :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **1,024t** | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $1,045.7\text{ MB}$ | $264.6\text{ MB}$ | $2,037.3\text{ MB}$ | $90.59\text{ ms}$ |
-| **1,024t** | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | $1,180.3\text{ MB}$ | $395.3\text{ MB}$ | $2,038.5\text{ MB}$ | $94.74\text{ ms}$ |
-| **1,024t** | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$986.2\text{ MB}$** | **$201.2\text{ MB}$** | $2,038.5\text{ MB}$ | **$52.28\text{ ms}$** |
-| **1,024t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$754.1\text{ MB}$** | **$147.8\text{ MB}$** | **$1,678.5\text{ MB}$** | **$43.93\text{ ms}$** 🚀 |
+| **1,024t** *(v0.3 ref)* | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $1,045.7\text{ MB}$ | $264.6\text{ MB}$ | $2,037.3\text{ MB}$ | $90.59\text{ ms}$ |
+| **1,024t** *(v0.3 ref)* | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | $1,180.3\text{ MB}$ | $395.3\text{ MB}$ | $2,038.5\text{ MB}$ | $94.74\text{ ms}$ |
+| **1,024t** *(v0.3 ref)* | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$986.2\text{ MB}$** | **$201.2\text{ MB}$** | $2,038.5\text{ MB}$ | **$52.28\text{ ms}$** *(v0.4: 47.37 ms)* |
+| **1,024t** *(v0.3 ref)* | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$754.1\text{ MB}$** | **$147.8\text{ MB}$** | **$1,678.5\text{ MB}$** | **$43.93\text{ ms}$** *(v0.4: 39.05 ms)* 🚀 |
 | | | | | | | | |
-| **2,048t** | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $1,370.0\text{ MB}$ | $589.0\text{ MB}$ | $2,037.2\text{ MB}$ | $257.64\text{ ms}$ |
-| **2,048t** | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | $1,430.3\text{ MB}$ | $645.3\text{ MB}$ | $2,038.5\text{ MB}$ | $203.50\text{ ms}$ |
-| **2,048t** | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$1,120.4\text{ MB}$** | **$335.4\text{ MB}$** | $2,038.5\text{ MB}$ | **$107.19\text{ ms}$** |
-| **2,048t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$935.2\text{ MB}$** | **$328.9\text{ MB}$** | **$1,678.5\text{ MB}$** | **$87.68\text{ ms}$** 🚀 |
+| **2,048t** *(v0.3 ref)* | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $1,370.0\text{ MB}$ | $589.0\text{ MB}$ | $2,037.2\text{ MB}$ | $257.64\text{ ms}$ |
+| **2,048t** *(v0.3 ref)* | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | $1,430.3\text{ MB}$ | $645.3\text{ MB}$ | $2,038.5\text{ MB}$ | $203.50\text{ ms}$ |
+| **2,048t** *(v0.3 ref)* | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$1,120.4\text{ MB}$** | **$335.4\text{ MB}$** | $2,038.5\text{ MB}$ | **$107.19\text{ ms}$** *(v0.4: 95.29 ms)* |
+| **2,048t** *(v0.3 ref)* | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$935.2\text{ MB}$** | **$328.9\text{ MB}$** | **$1,678.5\text{ MB}$** | **$87.68\text{ ms}$** *(v0.4: 76.91 ms)* 🚀 |
 | | | | | | | | |
-| **4,096t** | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $2,118.8\text{ MB}$ | $1,337.7\text{ MB}$ | $2,037.3\text{ MB}$ | $830.42\text{ ms}$ |
-| **4,096t** | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | $2,006.5\text{ MB}$ | $1,221.5\text{ MB}$ | $2,038.6\text{ MB}$ | $461.29\text{ ms}$ |
-| **4,096t** | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$1,177.4\text{ MB}$** | **$392.4\text{ MB}$** | $2,038.6\text{ MB}$ | **$255.29\text{ ms}$** |
-| **4,096t** | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$1,086.7\text{ MB}$** | **$480.4\text{ MB}$** | **$1,678.6\text{ MB}$** | **$225.10\text{ ms}$** |
+| **4,096t** *(v0.3 ref)* | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $2,118.8\text{ MB}$ | $1,337.7\text{ MB}$ | $2,037.3\text{ MB}$ | $830.42\text{ ms}$ |
+| **4,096t** *(v0.3 ref)* | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | $2,006.5\text{ MB}$ | $1,221.5\text{ MB}$ | $2,038.6\text{ MB}$ | $461.29\text{ ms}$ |
+| **4,096t** *(v0.3 ref)* | `glypr-core` BF16 | Metal Flash (Fused) | $785.0\text{ MB}$ | **$1,177.4\text{ MB}$** | **$392.4\text{ MB}$** | $2,038.6\text{ MB}$ | **$255.29\text{ ms}$** *(v0.4: 228.92 ms)* |
+| **4,096t** *(v0.3 ref)* | `glypr-core` Q8_0 | Metal Flash (Fused) | **$606.3\text{ MB}$** | **$1,086.7\text{ MB}$** | **$480.4\text{ MB}$** | **$1,678.6\text{ MB}$** | **$225.10\text{ ms}$** *(v0.4: 199.54 ms)* |
 | | | | | | | | |
-| **8,192t** | **PyTorch MPS (Golden)**| **MPSGraph SDPA** | **$1,472.5\text{ MB}$** | **$6,592.8\text{ MB}$** | $5,120.3\text{ MB}$ | **$1,211.1\text{ MB}$** | **$875.00\text{ ms}$** |
-| **8,192t** | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $4,608.2\text{ MB}$ | $3,827.2\text{ MB}$ | $2,037.2\text{ MB}$ | $2,946.44\text{ ms}$ |
-| **8,192t** | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | **$2,880.0\text{ MB}$** | **$2,095.0\text{ MB}$** | $2,038.5\text{ MB}$ | $1,121.50\text{ ms}$ |
-| **8,192t** | **`glypr-core` BF16 (Flash)** | **Metal Flash (Fused)** | **$785.0\text{ MB}$** | **$1,473.5\text{ MB}$** | **$688.4\text{ MB}$** | $2,038.5\text{ MB}$ | **$670.79\text{ ms}$** |
-| **8,192t** | **`glypr-core` Q8_0 (Flash)** | **Metal Flash (Fused)** | **$606.3\text{ MB}$** | **$1,582.7\text{ MB}$** | **$976.4\text{ MB}$** | **$1,678.5\text{ MB}$** | **$615.30\text{ ms}$** 🏆 |
+| **8,192t** *(prior ref)* | **PyTorch MPS (Golden)**| **MPSGraph SDPA** | **$1,472.5\text{ MB}$** | **$6,592.8\text{ MB}$** | $5,120.3\text{ MB}$ | **$1,211.1\text{ MB}$** | **$875.00\text{ ms}$** |
+| **8,192t** *(v0.3 ref)* | `glypr-core` BF16 | Standard Dense | $781.0\text{ MB}$ | $4,608.2\text{ MB}$ | $3,827.2\text{ MB}$ | $2,037.2\text{ MB}$ | $2,946.44\text{ ms}$ *(v0.4: 2,940.54 ms)* |
+| **8,192t** *(v0.3 ref)* | `glypr-core` BF16 | Chunked Sliding | $785.0\text{ MB}$ | **$2,880.0\text{ MB}$** | **$2,095.0\text{ MB}$** | $2,038.5\text{ MB}$ | $1,121.50\text{ ms}$ *(v0.4: 1,113.36 ms)* |
+| **8,192t (`v0.4.0`)** | **`glypr-core` BF16 (Flash)** | **Metal Flash (Fused)** | **$665.4\text{ MB}$** | **$1,177.5\text{ MB}$** | **$512.0\text{ MB}$** | $2,046.4\text{ MB}$ | **$621.14\text{ ms}$** *(warm; 620.81 ms med)* |
+| **8,192t (`v0.4.0`)** | **`glypr-core` Q8_0 (Flash)** | **Metal Flash (Fused)** | **$606.7\text{ MB}$** | **$1,102.8\text{ MB}$** | **$496.0\text{ MB}$** | **$662.9\text{ MB}$** | **$560.64\text{ ms}$** *(warm; 564.91 ms med)* 🏆 |
 
 ---
 
@@ -195,9 +198,9 @@ To eliminate the $134.2\text{ MB}$ attention mask tensor and surpass the latency
 
 ## 7. GGUF Quantization in Production (`BF16` vs `Q8_0`)
 
-* **Bit-for-Bit Weight Verification (`BF16.gguf`):** Every single weight tensor in `embeddinggemma-2-BF16.gguf` matches `model.safetensors` bit-for-bit ($\text{max\_diff} = 0.0\text{e}0$).
-* **Storage Footprint (`Q8_0.gguf`):** Reduces model disk storage by **$-44.5\%$** ($532.1\text{ MB} \longrightarrow \mathbf{295.5\text{ MB}}$), loading in just $1.05\text{ s}$.
-* **Numerical Parity:** Across the 292-vector golden corpus, GGUF Q8_0 achieves **$0.999864$ average cosine parity** and **$0.999602$ minimum parity**, maintaining identical retrieval margins ($+0.2952$ multilingual, $+0.1498$ length scaling).
+* **Bit-for-Bit Weight Verification (`BF16.gguf`):** Every single weight tensor in `embeddinggemma-2-BF16.gguf` matches `model.safetensors` bit-for-bit ($\text{max\_diff} = 0.0\text{e}0$), achieving **`0.999967` avg / `0.999897` min** 292-vector parity under `MetalFlash` in `v0.4.0`.
+* **Storage Footprint (`Q8_0.gguf`):** Reduces model disk storage by **$-44.5\%$** ($532.1\text{ MB} \longrightarrow \mathbf{295.5\text{ MB}}$), loading in **$0.543\text{ s}$** cold (`v0.4.0` `8 MiB` `BufReader`).
+* **Numerical Parity:** Across the 292-vector golden corpus (`v0.4.0`), GGUF Q8_0 (`MetalFlash`) achieves **`0.999896` average cosine parity** and **`0.999741` minimum parity**.
 
 ---
 
@@ -228,7 +231,7 @@ In traditional transformer deployments, inference engines require an entire dire
    When multimodal capabilities (Vision & Audio) are needed, an optional projector GGUF (`mmproj-embeddinggemma-2-BF16.gguf` or `mmproj-embeddinggemma-2-Q8_0.gguf`) can be dynamically attached at runtime without affecting text-only memory overhead:
 
 ```rust
-// 1. Single-file self-contained text embedding load (no config.json or tokenizer.json needed!)
+// 1. Single-file self-contained text embedding load (or GlyprEmbedder::builder().gguf_canonical(true).build()?)
 let mut embedder = GlyprEmbedder::load_gguf_q8("embeddinggemma-2-Q8_0.gguf", &device)?;
 
 // 2. Optionally attach multimodal projector when image/audio inputs are detected
@@ -248,10 +251,10 @@ glypr --bf16-mmproj embed "Multimodal query:" ./image.png
 # 4. Explicit local file overrides:
 glypr --model-file ./custom.gguf --mmproj-file ./custom-mmproj.gguf embed "Local model query"
 
-# 5. Launch high-throughput OpenAI-compatible HTTP embedding server (text-only by default):
+# 5. Launch high-throughput OpenAI-compatible HTTP embedding server (local file paths off by default):
 glypr serve --port 8080 --max-batch-size 32
 
-# 6. Launch server with multimodal projector attached:
+# 6. Launch server with multimodal projector attached (add --allow-local-files only if trusted local paths are needed):
 glypr --bf16-mmproj serve --port 8080
 ```
 
@@ -259,48 +262,57 @@ glypr --bf16-mmproj serve --port 8080
 
 ## 9. Universal Cross-Platform CPU SIMD Deployment
 
-For server deployments without discrete GPUs or edge machines running Linux/macOS, `glypr-core` ships with compile-time and runtime auto-dispatched SIMD via `pulp`:
+For server deployments without discrete GPUs or edge machines running Linux/macOS, `glypr-core` ships with compile-time and runtime auto-dispatched SIMD via `pulp` (plus optional `--features accelerate` Apple Accelerate support):
 
-* **ARM64 NEON:** Automatically enabled on Apple Silicon (M1–M4) and AWS Graviton 3/4 processors.
+* **ARM64 NEON:** Automatically enabled on Apple Silicon (M1–M5) and AWS Graviton 3/4 processors.
 * **x86_64 AVX2 / AVX-512:** Dynamically detected at process launch on Intel Xeon and AMD EPYC servers.
-* **Rayon Multi-Threading:** Batches sequence chunks across available CPU hardware cores.
-* **Memory Flatness:** Slashes intermediate CPU heap allocations from ~30 GB per forward pass down to zero, maintaining process RSS at **1.0–1.2 GB** across sequence lengths.
+* **Rayon Multi-Threading:** Batches sequence chunks across available CPU hardware cores (`0.676 ms` GeGLU / `0.237 ms` RMSNorm in `v0.4.0` with `--features accelerate`).
+* **Memory Flatness:** Slashes intermediate CPU heap allocations down to zero, maintaining deterministic process RSS across sequence lengths.
 
 ---
 
 ## 10. Apple Neural Engine (ANE) & Core ML Runtime Deployment
 
-Starting in **v0.3.0**, Glypr provides native Apple Neural Engine (ANE) acceleration via `coreml-native` (features: `coreml`, `ane`).
+Introduced in **v0.3.0** and expanded in **v0.4.0**, Glypr provides native Apple Neural Engine (ANE) acceleration via `coreml-native` (features: `coreml`, `ane`).
 
 ### A. Core ML Model Compilation Pipeline
-The offline export tool [`scripts/export_coreml.py`](../../scripts/export_coreml.py) converts raw Hugging Face safetensors into compiled `.mlmodelc` bundles with **W8A16 linear symmetric INT8 quantization**:
+The offline export tool [`scripts/export_coreml.py`](../../scripts/export_coreml.py) converts raw Hugging Face safetensors into compiled `.mlmodelc` bundles with **W8A16 linear symmetric INT8 quantization**, writing `manifest.json` and removing intermediate `.mlpackage` bundles by default (`--keep-mlpackage` retains them):
 
 ```bash
-# 1. Export both Vision Tower and Text Backbone
-uv run python scripts/export_coreml.py --target all --output-dir models/coreml
+# 1. Export multi-aspect vision presets + 512-token text backbone
+uv run python scripts/export_coreml.py --target all --vision-preset default --output-dir models/coreml
 
-# 2. Export Vision Tower only (Budget 140 portrait preset)
-uv run python scripts/export_coreml.py --target vision --vision-preset 140-portrait --output-dir models/coreml
+# 2. Export specific vision presets (e.g., portrait, square, landscape)
+uv run python scripts/export_coreml.py --target vision --vision-preset 140-portrait,140-square,140-landscape --output-dir models/coreml
 
-# 3. Export Text Backbone only (512-token static RAG sequence)
-uv run python scripts/export_coreml.py --target text --text-seq-len 512 --output-dir models/coreml
+# 3. Export multi-bucket Text Backbones (s1024 uses exact |i - j| <= 512 sliding-window masking)
+uv run python scripts/export_coreml.py --target text --text-seq-lens 128,512,1024 --output-dir models/coreml
 ```
 
-### B. Supported Compiled Models
-| Compiled Bundle | Size | Compute Target | Input Dimensions | Performance |
-| :--- | :---: | :---: | :---: | :---: |
-| `gemma2_vision_tower_p1134_t126_w8a16.mlmodelc` | **147 MB** | ANE (W8A16) | `pixel_values: [1, 1134, 768]` | **11.17 ms (89.5 img/s)** (2.2× vs Metal ViT) |
-| `gemma2_vision_tower_p2394_t266_w8a16.mlmodelc` | **148 MB** | ANE (W8A16) | `pixel_values: [1, 2394, 768]` | **23.19 ms (43.1 img/s)** (2.4× vs Metal ViT) |
-| `gemma2_text_backbone_s512_w8a16.mlmodelc` | **261 MB** | ANE (W8A16) | `input_ids: [1, 512]` | **8.24 ms (121.3 q/s)** (2.6× vs Metal GPU) |
+### B. Compiled Models, Grid Keying & `v0.4.0` Parity
+Vision bundles are tagged `_h{H}_w{W}` and keyed by `(patch_height, patch_width)` so portrait and landscape orientations never collide; text bundles support multi-bucket discovery (`s128`, `s512`, `s1024`) routed via `TextBackendPolicy::Auto` (`[64..=seq_len]`, `batch_size <= 4`) and discovered via `resolve_coreml_dir` (`--coreml-dir` $\to$ `$GLYPR_COREML_DIR` $\to$ `./models/coreml` $\to$ user data/cache dir):
+
+| Compiled Bundle | Compute Target | Input Dimensions | `v0.4.0` Parity / Prior Ref Latency |
+| :--- | :---: | :---: | :--- |
+| `gemma2_vision_tower_p1134_t126_h42_w27_w8a16.mlmodelc` (`140-portrait`) | ANE (W8A16) | `pixel_values: [1, 1134, 768]` | **11.17 ms (89.5 img/s)** *(v0.3.0 ref; `0.999928` hybrid parity)* |
+| `gemma2_vision_tower_p1134_t126_h27_w42_w8a16.mlmodelc` (`140-landscape`) | ANE (W8A16) | `pixel_values: [1, 1134, 768]` | **`0.999955`** ANE vs Metal `mmproj` (`v0.4.0`) |
+| `gemma2_vision_tower_p1089_t121_h33_w33_w8a16.mlmodelc` (`140-square`) | ANE (W8A16) | `pixel_values: [1, 1089, 768]` | **`0.999267`** vs PyTorch FP32 / **`0.999836`** ANE vs Metal (`v0.4.0`) |
+| `gemma2_vision_tower_p2394_t266_h57_w42_w8a16.mlmodelc` (`280-portrait`) | ANE (W8A16) | `pixel_values: [1, 2394, 768]` | **23.19 ms (43.1 img/s)** *(v0.3.0 ref)* |
+| `gemma2_text_backbone_s512_w8a16.mlmodelc` (`512t`) | ANE (W8A16) | `input_ids: [1, 512]` | **8.24 ms (121.3 q/s)** *(v0.3.0 ref)* |
+| `gemma2_text_backbone_s1024_w8a16.mlmodelc` (`1024t`, sliding window) | ANE (W8A16) | `input_ids: [1, 1024]` | **`0.999684`** vs PyTorch FP32 / **`0.999601`** (`doc_science_512t`) / **`0.999700`** (`~770t` vs Metal, `v0.4.0`) |
 
 ### C. CLI & Server Deployment
 ```bash
 # Install binary with Metal + ANE acceleration
 cargo install --path crates/glypr --features metal,ane --force
 
-# Run hybrid embedding (Vision on ANE, Text on Metal GPU)
-glypr --ane embed ./portrait.png
+# Inspect a compiled CoreML bundle or GGUF header
+glypr inspect models/coreml/gemma2_text_backbone_s1024_w8a16.mlmodelc
 
-# Run HTTP server with ANE acceleration
+# Run hybrid embedding (Vision on ANE, Text on Metal GPU / ANE sweet spot)
+glypr --ane embed ./portrait.png
+glypr --ane --text-backend auto embed "Query within 1024 tokens"
+
+# Run HTTP server with ANE acceleration (local filesystem paths disabled by default)
 glypr --ane serve --port 8080
 ```

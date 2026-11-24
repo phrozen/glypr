@@ -111,12 +111,12 @@ To satisfy diverse deployment environments (from edge CPU to Apple Silicon Metal
    - **Native Hardware Tile-Skipping & $O(B \cdot S)$ Stride-Broadcasted Masks:**
      - For unpadded sequences: $0.0\text{ MB}$ mask tensor overhead up to 8,192 tokens.
      - For heterogeneous batches: Replaces $O(B \cdot S^2)$ CPU mask generation with GPU-constructed $O(B \cdot S)$ additive masks (`has_mask = true`) using 0-stride broadcasting (`M_strides = [S, 0, 0]`), preserving $1.000000$ batch equivalence across multimodal batches.
-   - **Transient VRAM Elimination:** Drops 8,192-token transient VRAM from $3,298.4\text{ MB} \to 688.4\text{ MB}$ (**$-79.1\%$**) and peak Metal VRAM to **$1,473.5\text{ MB}$** (BF16) / **$1,582.7\text{ MB}$** (Q8_0).
+   - **Transient VRAM Elimination:** Drops 8,192-token transient VRAM from $3,298.4\text{ MB} \to 688.4\text{ MB}$ (`v0.3.0`) and down to **$512.0\text{ MB}$** (BF16) / **$496.0\text{ MB}$** (Q8_0) in `v0.4.0`, with peak Metal VRAM at **$1,177.5\text{ MB}$** (BF16) / **$1,102.8\text{ MB}$** (Q8_0).
 
 5. **Apple Silicon M5 Neural Accelerators (`steel_attention_m5.metal`):**
    - Automatically engaged when running on Apple M5 hardware (`MTLGPUFamily::Metal4` / `MTLGPUFamily::Apple10` or forced via `GLYPR_METAL_TIER=m5`).
    - Dispatches cooperative `metal::mpp::tensor_ops::matmul2d` contractions with single-SIMDgroup scoped hardware `reduce_rows` (eliminating threadgroup barrier stalls) and dual 256-column tile slicing on global layers ($d_{\text{head}}=512$).
-   - Reduces 8,192-token latency to **$615.30\text{ ms}$** (Q8_0) / **$670.79\text{ ms}$** (BF16) with peak throughput reaching **$23,359\text{ tok/s}$** at 2K tokens.
+   - Reduces 8,192-token latency in `v0.4.0` to **$564.91\text{ ms}$** (`14,502 tok/s`, Q8_0) / **$620.81\text{ ms}$** (`13,196 tok/s`, BF16), with peak throughput reaching **$26,627\text{ tok/s}$** at 2K tokens (Q8_0).
 
 ---
 

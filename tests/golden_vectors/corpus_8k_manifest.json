@@ -1,6 +1,15 @@
 {
+  "schema_version": 2,
   "model_id": "google/embeddinggemma-2",
   "description": "Expanded golden reference oracle embeddings (8k scaling, 10 languages, task prompts)",
+  "provenance": {
+    "model_id": "google/embeddinggemma-2",
+    "dtype": "float32",
+    "device": "cpu",
+    "transformers_version": "5.19.0",
+    "sentence_transformers_version": "6.1.0",
+    "generated_at": "2026-11-20T19:55:27.874173+00:00"
+  },
   "dimensions": [
     768,
     512,
@@ -17,10 +26,10 @@
       "actual_tokens": 72,
       "domain": "physics",
       "l2_norms": {
-        "768d": 0.999020516872406,
-        "512d": 0.9999999403953552,
-        "256d": 1.0,
-        "128d": 1.0
+        "768d": 1.0,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 1.0000001192092896
       },
       "target_doc_id": null,
       "relevant_query_id": "query_physics_64t"
@@ -34,10 +43,10 @@
       "actual_tokens": 74,
       "domain": "biology",
       "l2_norms": {
-        "768d": 1.0021809339523315,
-        "512d": 0.9999999403953552,
-        "256d": 1.0,
-        "128d": 0.9999999403953552
+        "768d": 1.0,
+        "512d": 1.0,
+        "256d": 1.0000001192092896,
+        "128d": 1.0
       },
       "target_doc_id": null,
       "relevant_query_id": null
@@ -51,8 +60,8 @@
       "actual_tokens": 71,
       "domain": "computing",
       "l2_norms": {
-        "768d": 0.9998353719711304,
-        "512d": 1.0,
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
         "128d": 1.0
       },
@@ -68,9 +77,9 @@
       "actual_tokens": 30,
       "domain": "physics",
       "l2_norms": {
-        "768d": 0.9985912442207336,
+        "768d": 1.0,
         "512d": 1.0,
-        "256d": 0.9999999403953552,
+        "256d": 1.0,
         "128d": 1.0
       },
       "target_doc_id": "doc_physics_64t",
@@ -85,9 +94,9 @@
       "actual_tokens": 30,
       "domain": "computing",
       "l2_norms": {
-        "768d": 0.9995130300521851,
-        "512d": 1.0,
-        "256d": 0.9999999403953552,
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
         "128d": 1.0
       },
       "target_doc_id": "doc_code_64t",
@@ -102,10 +111,10 @@
       "actual_tokens": 264,
       "domain": "physics",
       "l2_norms": {
-        "768d": 0.9984390139579773,
+        "768d": 0.9999998807907104,
         "512d": 1.0,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": "query_physics_256t"
@@ -119,9 +128,9 @@
       "actual_tokens": 266,
       "domain": "biology",
       "l2_norms": {
-        "768d": 1.0031521320343018,
-        "512d": 1.0,
-        "256d": 1.0,
+        "768d": 0.9999999403953552,
+        "512d": 0.9999999403953552,
+        "256d": 0.9999999403953552,
         "128d": 1.0
       },
       "target_doc_id": null,
@@ -136,9 +145,9 @@
       "actual_tokens": 263,
       "domain": "computing",
       "l2_norms": {
-        "768d": 1.0020948648452759,
+        "768d": 1.0000001192092896,
         "512d": 1.0,
-        "256d": 1.0,
+        "256d": 0.9999999403953552,
         "128d": 1.0
       },
       "target_doc_id": null,
@@ -153,7 +162,7 @@
       "actual_tokens": 31,
       "domain": "physics",
       "l2_norms": {
-        "768d": 0.9992506504058838,
+        "768d": 1.0000001192092896,
         "512d": 1.0,
         "256d": 1.0,
         "128d": 1.0
@@ -170,9 +179,9 @@
       "actual_tokens": 31,
       "domain": "computing",
       "l2_norms": {
-        "768d": 0.9997177124023438,
-        "512d": 0.9999999403953552,
-        "256d": 1.0,
+        "768d": 0.9999999403953552,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
         "128d": 1.0
       },
       "target_doc_id": "doc_code_256t",
@@ -187,10 +196,10 @@
       "actual_tokens": 520,
       "domain": "physics",
       "l2_norms": {
-        "768d": 0.9998135566711426,
+        "768d": 1.0,
         "512d": 1.0,
         "256d": 0.9999999403953552,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": "query_physics_512t"
@@ -204,9 +213,9 @@
       "actual_tokens": 522,
       "domain": "biology",
       "l2_norms": {
-        "768d": 0.9989040493965149,
-        "512d": 1.0,
-        "256d": 0.9999999403953552,
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
         "128d": 1.0
       },
       "target_doc_id": null,
@@ -221,10 +230,10 @@
       "actual_tokens": 519,
       "domain": "computing",
       "l2_norms": {
-        "768d": 0.9989343881607056,
+        "768d": 1.0000001192092896,
         "512d": 1.0,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": "query_code_512t"
@@ -238,10 +247,10 @@
       "actual_tokens": 31,
       "domain": "physics",
       "l2_norms": {
-        "768d": 1.003418207168579,
-        "512d": 0.9999999403953552,
-        "256d": 0.9999998807907104,
-        "128d": 1.0
+        "768d": 1.0000001192092896,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 0.9999999403953552
       },
       "target_doc_id": "doc_physics_512t",
       "relevant_query_id": null
@@ -255,7 +264,7 @@
       "actual_tokens": 31,
       "domain": "computing",
       "l2_norms": {
-        "768d": 0.9985403418540955,
+        "768d": 1.0000001192092896,
         "512d": 1.0,
         "256d": 1.0,
         "128d": 1.0
@@ -272,10 +281,10 @@
       "actual_tokens": 1032,
       "domain": "physics",
       "l2_norms": {
-        "768d": 0.9990188479423523,
+        "768d": 1.0000001192092896,
         "512d": 0.9999999403953552,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": "query_physics_1024t"
@@ -289,8 +298,8 @@
       "actual_tokens": 1034,
       "domain": "biology",
       "l2_norms": {
-        "768d": 0.9995549917221069,
-        "512d": 1.0,
+        "768d": 0.9999999403953552,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
         "128d": 1.0
       },
@@ -306,10 +315,10 @@
       "actual_tokens": 1031,
       "domain": "computing",
       "l2_norms": {
-        "768d": 0.9983919262886047,
-        "512d": 1.0,
-        "256d": 1.0,
-        "128d": 0.9999999403953552
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
       },
       "target_doc_id": null,
       "relevant_query_id": "query_code_1024t"
@@ -323,10 +332,10 @@
       "actual_tokens": 32,
       "domain": "physics",
       "l2_norms": {
-        "768d": 1.002919316291809,
-        "512d": 1.0,
+        "768d": 1.0000001192092896,
+        "512d": 0.9999999403953552,
         "256d": 0.9999999403953552,
-        "128d": 0.9999999403953552
+        "128d": 1.0
       },
       "target_doc_id": "doc_physics_1024t",
       "relevant_query_id": null
@@ -340,10 +349,10 @@
       "actual_tokens": 32,
       "domain": "computing",
       "l2_norms": {
-        "768d": 0.998568594455719,
-        "512d": 1.0,
-        "256d": 1.0,
-        "128d": 0.9999999403953552
+        "768d": 0.9999999403953552,
+        "512d": 0.9999999403953552,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
       },
       "target_doc_id": "doc_code_1024t",
       "relevant_query_id": null
@@ -357,10 +366,10 @@
       "actual_tokens": 2056,
       "domain": "physics",
       "l2_norms": {
-        "768d": 1.0010141134262085,
+        "768d": 1.0,
         "512d": 1.0,
         "256d": 1.0,
-        "128d": 0.9999999403953552
+        "128d": 1.0
       },
       "target_doc_id": null,
       "relevant_query_id": "query_physics_2048t"
@@ -374,7 +383,7 @@
       "actual_tokens": 2058,
       "domain": "biology",
       "l2_norms": {
-        "768d": 1.0022263526916504,
+        "768d": 0.9999999403953552,
         "512d": 1.0,
         "256d": 1.0,
         "128d": 1.0
@@ -391,9 +400,9 @@
       "actual_tokens": 2055,
       "domain": "computing",
       "l2_norms": {
-        "768d": 1.0023176670074463,
+        "768d": 1.0,
         "512d": 1.0,
-        "256d": 0.9999999403953552,
+        "256d": 1.0,
         "128d": 0.9999999403953552
       },
       "target_doc_id": null,
@@ -408,7 +417,7 @@
       "actual_tokens": 32,
       "domain": "physics",
       "l2_norms": {
-        "768d": 1.0023061037063599,
+        "768d": 1.0,
         "512d": 1.0,
         "256d": 1.0,
         "128d": 1.0
@@ -425,7 +434,7 @@
       "actual_tokens": 32,
       "domain": "computing",
       "l2_norms": {
-        "768d": 0.9999783635139465,
+        "768d": 1.0,
         "512d": 1.0,
         "256d": 1.0,
         "128d": 1.0
@@ -442,10 +451,10 @@
       "actual_tokens": 4104,
       "domain": "physics",
       "l2_norms": {
-        "768d": 1.0016099214553833,
+        "768d": 1.0000001192092896,
         "512d": 1.0,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": "query_physics_4096t"
@@ -459,9 +468,9 @@
       "actual_tokens": 4106,
       "domain": "biology",
       "l2_norms": {
-        "768d": 0.9984766840934753,
+        "768d": 1.0,
         "512d": 1.0,
-        "256d": 1.0,
+        "256d": 0.9999999403953552,
         "128d": 1.0
       },
       "target_doc_id": null,
@@ -476,8 +485,8 @@
       "actual_tokens": 4103,
       "domain": "computing",
       "l2_norms": {
-        "768d": 0.9990447759628296,
-        "512d": 1.0,
+        "768d": 0.9999999403953552,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
         "128d": 1.0
       },
@@ -493,10 +502,10 @@
       "actual_tokens": 32,
       "domain": "physics",
       "l2_norms": {
-        "768d": 0.9986335635185242,
-        "512d": 1.0,
+        "768d": 0.9999999403953552,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": "doc_physics_4096t",
       "relevant_query_id": null
@@ -510,8 +519,8 @@
       "actual_tokens": 32,
       "domain": "computing",
       "l2_norms": {
-        "768d": 1.0005199909210205,
-        "512d": 1.0,
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
         "128d": 1.0
       },
@@ -527,9 +536,9 @@
       "actual_tokens": 8200,
       "domain": "physics",
       "l2_norms": {
-        "768d": 1.0004774332046509,
-        "512d": 0.9999999403953552,
-        "256d": 1.0,
+        "768d": 1.0,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
         "128d": 1.0
       },
       "target_doc_id": null,
@@ -544,10 +553,10 @@
       "actual_tokens": 8202,
       "domain": "biology",
       "l2_norms": {
-        "768d": 0.9998397827148438,
+        "768d": 0.9999999403953552,
         "512d": 1.0,
-        "256d": 0.9999999403953552,
-        "128d": 1.0000001192092896
+        "256d": 1.0,
+        "128d": 1.0
       },
       "target_doc_id": null,
       "relevant_query_id": null
@@ -561,10 +570,10 @@
       "actual_tokens": 8199,
       "domain": "computing",
       "l2_norms": {
-        "768d": 1.0022425651550293,
-        "512d": 1.0,
+        "768d": 0.9999999403953552,
+        "512d": 1.0000001192092896,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": "query_code_8192t"
@@ -578,9 +587,9 @@
       "actual_tokens": 32,
       "domain": "physics",
       "l2_norms": {
-        "768d": 1.0023748874664307,
-        "512d": 1.0000001192092896,
-        "256d": 0.9999999403953552,
+        "768d": 1.0,
+        "512d": 1.0,
+        "256d": 1.0,
         "128d": 1.0
       },
       "target_doc_id": "doc_physics_8192t",
@@ -595,10 +604,10 @@
       "actual_tokens": 32,
       "domain": "computing",
       "l2_norms": {
-        "768d": 0.9989640712738037,
-        "512d": 1.0,
-        "256d": 1.0,
-        "128d": 0.9999998807907104
+        "768d": 1.0000001192092896,
+        "512d": 0.9999999403953552,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
       },
       "target_doc_id": "doc_code_8192t",
       "relevant_query_id": null
@@ -612,10 +621,10 @@
       "actual_tokens": 41,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.001276969909668,
-        "512d": 1.0,
-        "256d": 1.0,
-        "128d": 1.0
+        "768d": 0.9999999403953552,
+        "512d": 0.9999999403953552,
+        "256d": 0.9999999403953552,
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": "query_lang_en"
@@ -629,10 +638,10 @@
       "actual_tokens": 32,
       "domain": "humanities",
       "l2_norms": {
-        "768d": 1.0007798671722412,
-        "512d": 0.9999998807907104,
-        "256d": 1.0,
-        "128d": 1.0
+        "768d": 1.0000001192092896,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": null
@@ -646,10 +655,10 @@
       "actual_tokens": 22,
       "domain": "technical",
       "l2_norms": {
-        "768d": 0.9997239708900452,
+        "768d": 1.0,
         "512d": 1.0,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": "doc_lang_en",
       "relevant_query_id": null
@@ -663,10 +672,10 @@
       "actual_tokens": 61,
       "domain": "technical",
       "l2_norms": {
-        "768d": 0.998292088508606,
-        "512d": 1.0,
+        "768d": 1.0000001192092896,
+        "512d": 0.9999998807907104,
         "256d": 1.0,
-        "128d": 0.9999999403953552
+        "128d": 1.0
       },
       "target_doc_id": null,
       "relevant_query_id": "query_lang_es"
@@ -680,8 +689,8 @@
       "actual_tokens": 50,
       "domain": "humanities",
       "l2_norms": {
-        "768d": 0.998768150806427,
-        "512d": 1.0,
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
         "128d": 1.0
       },
@@ -697,9 +706,9 @@
       "actual_tokens": 28,
       "domain": "technical",
       "l2_norms": {
-        "768d": 0.999253511428833,
+        "768d": 1.0000001192092896,
         "512d": 1.0,
-        "256d": 1.0,
+        "256d": 0.9999999403953552,
         "128d": 1.0
       },
       "target_doc_id": "doc_lang_es",
@@ -714,10 +723,10 @@
       "actual_tokens": 65,
       "domain": "technical",
       "l2_norms": {
-        "768d": 0.9993165135383606,
-        "512d": 1.0,
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": "query_lang_de"
@@ -731,10 +740,10 @@
       "actual_tokens": 65,
       "domain": "humanities",
       "l2_norms": {
-        "768d": 0.9990240931510925,
+        "768d": 1.0000001192092896,
         "512d": 1.0,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": null
@@ -748,10 +757,10 @@
       "actual_tokens": 29,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.000064730644226,
+        "768d": 1.0,
         "512d": 1.0,
         "256d": 1.0,
-        "128d": 0.9999999403953552
+        "128d": 1.0
       },
       "target_doc_id": "doc_lang_de",
       "relevant_query_id": null
@@ -765,9 +774,9 @@
       "actual_tokens": 63,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.002886414527893,
+        "768d": 1.0,
         "512d": 1.0,
-        "256d": 1.0,
+        "256d": 0.9999999403953552,
         "128d": 1.0
       },
       "target_doc_id": null,
@@ -782,9 +791,9 @@
       "actual_tokens": 48,
       "domain": "humanities",
       "l2_norms": {
-        "768d": 0.9991445541381836,
+        "768d": 0.9999998211860657,
         "512d": 1.0,
-        "256d": 0.9999999403953552,
+        "256d": 1.0,
         "128d": 1.0
       },
       "target_doc_id": null,
@@ -799,7 +808,7 @@
       "actual_tokens": 32,
       "domain": "technical",
       "l2_norms": {
-        "768d": 0.9989489912986755,
+        "768d": 0.9999998807907104,
         "512d": 1.0,
         "256d": 1.0,
         "128d": 1.0
@@ -816,9 +825,9 @@
       "actual_tokens": 61,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.0012564659118652,
+        "768d": 1.0000001192092896,
         "512d": 1.0,
-        "256d": 0.9999999403953552,
+        "256d": 1.0,
         "128d": 1.0
       },
       "target_doc_id": null,
@@ -833,10 +842,10 @@
       "actual_tokens": 47,
       "domain": "humanities",
       "l2_norms": {
-        "768d": 0.9993988871574402,
-        "512d": 1.0,
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
-        "128d": 1.0000001192092896
+        "128d": 1.0
       },
       "target_doc_id": null,
       "relevant_query_id": null
@@ -850,10 +859,10 @@
       "actual_tokens": 28,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.0026733875274658,
-        "512d": 1.0000001192092896,
+        "768d": 1.0000001192092896,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": "doc_lang_ja",
       "relevant_query_id": null
@@ -867,8 +876,8 @@
       "actual_tokens": 68,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.0027141571044922,
-        "512d": 1.0,
+        "768d": 1.0000001192092896,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
         "128d": 1.0
       },
@@ -884,7 +893,7 @@
       "actual_tokens": 57,
       "domain": "humanities",
       "l2_norms": {
-        "768d": 1.001824140548706,
+        "768d": 1.0,
         "512d": 1.0,
         "256d": 1.0,
         "128d": 0.9999999403953552
@@ -901,10 +910,10 @@
       "actual_tokens": 30,
       "domain": "technical",
       "l2_norms": {
-        "768d": 0.9994191527366638,
+        "768d": 1.0,
         "512d": 0.9999999403953552,
         "256d": 1.0,
-        "128d": 0.9999999403953552
+        "128d": 1.0
       },
       "target_doc_id": "doc_lang_zh",
       "relevant_query_id": null
@@ -918,10 +927,10 @@
       "actual_tokens": 82,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.0003011226654053,
-        "512d": 1.0,
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": "query_lang_ko"
@@ -935,10 +944,10 @@
       "actual_tokens": 63,
       "domain": "humanities",
       "l2_norms": {
-        "768d": 0.9982559680938721,
-        "512d": 1.0,
+        "768d": 1.0000001192092896,
+        "512d": 0.9999999403953552,
         "256d": 1.0,
-        "128d": 0.9999999403953552
+        "128d": 1.0
       },
       "target_doc_id": null,
       "relevant_query_id": null
@@ -952,10 +961,10 @@
       "actual_tokens": 37,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.0023610591888428,
+        "768d": 1.000000238418579,
         "512d": 1.0,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": "doc_lang_ko",
       "relevant_query_id": null
@@ -969,10 +978,10 @@
       "actual_tokens": 62,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.001099705696106,
-        "512d": 1.0,
-        "256d": 0.9999999403953552,
-        "128d": 0.9999998807907104
+        "768d": 0.9999999403953552,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
+        "128d": 1.0
       },
       "target_doc_id": null,
       "relevant_query_id": "query_lang_ru"
@@ -986,8 +995,8 @@
       "actual_tokens": 49,
       "domain": "humanities",
       "l2_norms": {
-        "768d": 0.9996365308761597,
-        "512d": 1.0000001192092896,
+        "768d": 1.0,
+        "512d": 1.0,
         "256d": 0.9999999403953552,
         "128d": 0.9999999403953552
       },
@@ -1003,9 +1012,9 @@
       "actual_tokens": 30,
       "domain": "technical",
       "l2_norms": {
-        "768d": 0.9997555613517761,
-        "512d": 1.0000001192092896,
-        "256d": 1.0,
+        "768d": 0.9999999403953552,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
         "128d": 1.0
       },
       "target_doc_id": "doc_lang_ru",
@@ -1020,9 +1029,9 @@
       "actual_tokens": 79,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.000527024269104,
+        "768d": 1.0000001192092896,
         "512d": 1.0,
-        "256d": 0.9999999403953552,
+        "256d": 1.0,
         "128d": 1.0
       },
       "target_doc_id": null,
@@ -1037,7 +1046,7 @@
       "actual_tokens": 81,
       "domain": "humanities",
       "l2_norms": {
-        "768d": 1.0025337934494019,
+        "768d": 1.0000001192092896,
         "512d": 1.0,
         "256d": 0.9999999403953552,
         "128d": 0.9999999403953552
@@ -1054,10 +1063,10 @@
       "actual_tokens": 39,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.0010128021240234,
+        "768d": 1.0,
         "512d": 1.0,
-        "256d": 1.0,
-        "128d": 1.0
+        "256d": 0.9999999403953552,
+        "128d": 0.9999999403953552
       },
       "target_doc_id": "doc_lang_el",
       "relevant_query_id": null
@@ -1071,10 +1080,10 @@
       "actual_tokens": 70,
       "domain": "technical",
       "l2_norms": {
-        "768d": 1.0011314153671265,
+        "768d": 1.0,
         "512d": 1.0,
         "256d": 1.0,
-        "128d": 1.0
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": "query_lang_ar"
@@ -1088,7 +1097,7 @@
       "actual_tokens": 58,
       "domain": "humanities",
       "l2_norms": {
-        "768d": 0.998274564743042,
+        "768d": 1.0,
         "512d": 1.0,
         "256d": 1.0,
         "128d": 1.0
@@ -1105,7 +1114,7 @@
       "actual_tokens": 29,
       "domain": "technical",
       "l2_norms": {
-        "768d": 0.9996175169944763,
+        "768d": 1.0,
         "512d": 1.0,
         "256d": 1.0,
         "128d": 1.0
@@ -1122,10 +1131,10 @@
       "actual_tokens": 26,
       "domain": "general",
       "l2_norms": {
-        "768d": 1.000185251235962,
-        "512d": 0.9999999403953552,
-        "256d": 1.0,
-        "128d": 1.0
+        "768d": 1.0,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": null
@@ -1139,9 +1148,9 @@
       "actual_tokens": 21,
       "domain": "general",
       "l2_norms": {
-        "768d": 1.0035275220870972,
-        "512d": 1.0,
-        "256d": 1.0,
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
+        "256d": 0.9999998807907104,
         "128d": 1.0
       },
       "target_doc_id": null,
@@ -1156,8 +1165,8 @@
       "actual_tokens": 22,
       "domain": "general",
       "l2_norms": {
-        "768d": 1.0018799304962158,
-        "512d": 1.0000001192092896,
+        "768d": 1.0,
+        "512d": 1.0,
         "256d": 1.0,
         "128d": 1.0
       },
@@ -1173,9 +1182,9 @@
       "actual_tokens": 42,
       "domain": "general",
       "l2_norms": {
-        "768d": 1.001468300819397,
+        "768d": 1.0000001192092896,
         "512d": 1.0,
-        "256d": 1.0,
+        "256d": 0.9999999403953552,
         "128d": 0.9999999403953552
       },
       "target_doc_id": null,
@@ -1190,10 +1199,10 @@
       "actual_tokens": 24,
       "domain": "general",
       "l2_norms": {
-        "768d": 1.0005699396133423,
+        "768d": 1.0,
         "512d": 1.0,
-        "256d": 0.9999999403953552,
-        "128d": 0.9999999403953552
+        "256d": 1.0,
+        "128d": 1.0
       },
       "target_doc_id": null,
       "relevant_query_id": null
@@ -1207,9 +1216,9 @@
       "actual_tokens": 23,
       "domain": "general",
       "l2_norms": {
-        "768d": 0.9997308254241943,
+        "768d": 1.0,
         "512d": 1.0,
-        "256d": 0.9999999403953552,
+        "256d": 1.0,
         "128d": 1.0
       },
       "target_doc_id": null,
@@ -1224,10 +1233,10 @@
       "actual_tokens": 33,
       "domain": "general",
       "l2_norms": {
-        "768d": 1.0039494037628174,
+        "768d": 1.0000001192092896,
         "512d": 0.9999999403953552,
-        "256d": 1.0,
-        "128d": 1.0
+        "256d": 0.9999999403953552,
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": null
@@ -1241,10 +1250,10 @@
       "actual_tokens": 28,
       "domain": "general",
       "l2_norms": {
-        "768d": 0.9988518953323364,
+        "768d": 0.9999999403953552,
         "512d": 1.0,
-        "256d": 1.0,
-        "128d": 1.0
+        "256d": 1.0000001192092896,
+        "128d": 0.9999999403953552
       },
       "target_doc_id": null,
       "relevant_query_id": null
@@ -1255,203 +1264,203 @@
       "query": "query_physics_64t",
       "positive_doc": "doc_physics_64t",
       "negative_doc": "doc_science_64t",
-      "positive_sim": 0.7147924900054932,
-      "negative_sim": 0.5302730798721313,
-      "margin": 0.18451941013336182
+      "positive_sim": 0.7150403261184692,
+      "negative_sim": 0.530658483505249,
+      "margin": 0.18438184261322021
     },
     "physics_64t_512d": {
       "query": "query_physics_64t",
       "positive_doc": "doc_physics_64t",
       "negative_doc": "doc_science_64t",
-      "positive_sim": 0.7191124558448792,
-      "negative_sim": 0.5446448922157288,
-      "margin": 0.1744675636291504
+      "positive_sim": 0.7192163467407227,
+      "negative_sim": 0.5448977947235107,
+      "margin": 0.17431855201721191
     },
     "physics_256t_768d": {
       "query": "query_physics_256t",
       "positive_doc": "doc_physics_256t",
       "negative_doc": "doc_science_256t",
-      "positive_sim": 0.7000899314880371,
-      "negative_sim": 0.5399945974349976,
-      "margin": 0.16009533405303955
+      "positive_sim": 0.6995804905891418,
+      "negative_sim": 0.5403226613998413,
+      "margin": 0.15925782918930054
     },
     "physics_256t_512d": {
       "query": "query_physics_256t",
       "positive_doc": "doc_physics_256t",
       "negative_doc": "doc_science_256t",
-      "positive_sim": 0.7059242129325867,
-      "negative_sim": 0.5552194118499756,
-      "margin": 0.15070480108261108
+      "positive_sim": 0.7051323652267456,
+      "negative_sim": 0.555613100528717,
+      "margin": 0.14951926469802856
     },
     "physics_512t_768d": {
       "query": "query_physics_512t",
       "positive_doc": "doc_physics_512t",
       "negative_doc": "doc_science_512t",
-      "positive_sim": 0.7007269263267517,
-      "negative_sim": 0.5500653982162476,
-      "margin": 0.15066152811050415
+      "positive_sim": 0.7002533078193665,
+      "negative_sim": 0.5504090785980225,
+      "margin": 0.149844229221344
     },
     "physics_512t_512d": {
       "query": "query_physics_512t",
       "positive_doc": "doc_physics_512t",
       "negative_doc": "doc_science_512t",
-      "positive_sim": 0.7052456736564636,
-      "negative_sim": 0.5634252429008484,
-      "margin": 0.14182043075561523
+      "positive_sim": 0.7047417759895325,
+      "negative_sim": 0.5639634132385254,
+      "margin": 0.14077836275100708
     },
     "physics_1024t_768d": {
       "query": "query_physics_1024t",
       "positive_doc": "doc_physics_1024t",
       "negative_doc": "doc_science_1024t",
-      "positive_sim": 0.7039262652397156,
-      "negative_sim": 0.5573104023933411,
-      "margin": 0.1466158628463745
+      "positive_sim": 0.7025960087776184,
+      "negative_sim": 0.557544469833374,
+      "margin": 0.14505153894424438
     },
     "physics_1024t_512d": {
       "query": "query_physics_1024t",
       "positive_doc": "doc_physics_1024t",
       "negative_doc": "doc_science_1024t",
-      "positive_sim": 0.7101800441741943,
-      "negative_sim": 0.5615288615226746,
-      "margin": 0.14865118265151978
+      "positive_sim": 0.7087399959564209,
+      "negative_sim": 0.5618971586227417,
+      "margin": 0.1468428373336792
     },
     "physics_2048t_768d": {
       "query": "query_physics_2048t",
       "positive_doc": "doc_physics_2048t",
       "negative_doc": "doc_science_2048t",
-      "positive_sim": 0.7134219408035278,
-      "negative_sim": 0.5837448239326477,
-      "margin": 0.12967711687088013
+      "positive_sim": 0.714918315410614,
+      "negative_sim": 0.584575355052948,
+      "margin": 0.13034296035766602
     },
     "physics_2048t_512d": {
       "query": "query_physics_2048t",
       "positive_doc": "doc_physics_2048t",
       "negative_doc": "doc_science_2048t",
-      "positive_sim": 0.7182068228721619,
-      "negative_sim": 0.5930477380752563,
-      "margin": 0.12515908479690552
+      "positive_sim": 0.7196714878082275,
+      "negative_sim": 0.5940808057785034,
+      "margin": 0.12559068202972412
     },
     "physics_4096t_768d": {
       "query": "query_physics_4096t",
       "positive_doc": "doc_physics_4096t",
       "negative_doc": "doc_science_4096t",
-      "positive_sim": 0.7346963286399841,
-      "negative_sim": 0.5900830030441284,
-      "margin": 0.1446133255958557
+      "positive_sim": 0.7348198890686035,
+      "negative_sim": 0.5898008942604065,
+      "margin": 0.14501899480819702
     },
     "physics_4096t_512d": {
       "query": "query_physics_4096t",
       "positive_doc": "doc_physics_4096t",
       "negative_doc": "doc_science_4096t",
-      "positive_sim": 0.739321231842041,
-      "negative_sim": 0.6023133397102356,
-      "margin": 0.13700789213180542
+      "positive_sim": 0.7395730018615723,
+      "negative_sim": 0.6020725965499878,
+      "margin": 0.13750040531158447
     },
     "physics_8192t_768d": {
       "query": "query_physics_8192t",
       "positive_doc": "doc_physics_8192t",
       "negative_doc": "doc_science_8192t",
-      "positive_sim": 0.727139949798584,
-      "negative_sim": 0.592574954032898,
-      "margin": 0.13456499576568604
+      "positive_sim": 0.7275856733322144,
+      "negative_sim": 0.5924895405769348,
+      "margin": 0.13509613275527954
     },
     "physics_8192t_512d": {
       "query": "query_physics_8192t",
       "positive_doc": "doc_physics_8192t",
       "negative_doc": "doc_science_8192t",
-      "positive_sim": 0.7336362600326538,
-      "negative_sim": 0.6048945188522339,
-      "margin": 0.12874174118041992
+      "positive_sim": 0.7340453863143921,
+      "negative_sim": 0.6046897172927856,
+      "margin": 0.12935566902160645
     },
     "multilingual_en_768d": {
       "language": "en",
       "query": "query_lang_en",
       "positive_doc": "doc_lang_en",
       "negative_doc": "distractor_lang_en",
-      "positive_sim": 0.841606080532074,
-      "negative_sim": 0.5138465166091919,
-      "margin": 0.3277595639228821
+      "positive_sim": 0.8420859575271606,
+      "negative_sim": 0.5140758156776428,
+      "margin": 0.3280101418495178
     },
     "multilingual_es_768d": {
       "language": "es",
       "query": "query_lang_es",
       "positive_doc": "doc_lang_es",
       "negative_doc": "distractor_lang_es",
-      "positive_sim": 0.7999307513237,
-      "negative_sim": 0.5321589112281799,
-      "margin": 0.26777184009552
+      "positive_sim": 0.8001958727836609,
+      "negative_sim": 0.5320088267326355,
+      "margin": 0.2681870460510254
     },
     "multilingual_de_768d": {
       "language": "de",
       "query": "query_lang_de",
       "positive_doc": "doc_lang_de",
       "negative_doc": "distractor_lang_de",
-      "positive_sim": 0.7950249910354614,
-      "negative_sim": 0.553600013256073,
-      "margin": 0.24142497777938843
+      "positive_sim": 0.7951090931892395,
+      "negative_sim": 0.5535678863525391,
+      "margin": 0.24154120683670044
     },
     "multilingual_fr_768d": {
       "language": "fr",
       "query": "query_lang_fr",
       "positive_doc": "doc_lang_fr",
       "negative_doc": "distractor_lang_fr",
-      "positive_sim": 0.8251555562019348,
-      "negative_sim": 0.5039287805557251,
-      "margin": 0.3212267756462097
+      "positive_sim": 0.8248600959777832,
+      "negative_sim": 0.5045965313911438,
+      "margin": 0.3202635645866394
     },
     "multilingual_ja_768d": {
       "language": "ja",
       "query": "query_lang_ja",
       "positive_doc": "doc_lang_ja",
       "negative_doc": "distractor_lang_ja",
-      "positive_sim": 0.8514198660850525,
-      "negative_sim": 0.4819973409175873,
-      "margin": 0.3694225251674652
+      "positive_sim": 0.8512179255485535,
+      "negative_sim": 0.4831421971321106,
+      "margin": 0.36807572841644287
     },
     "multilingual_zh_768d": {
       "language": "zh",
       "query": "query_lang_zh",
       "positive_doc": "doc_lang_zh",
       "negative_doc": "distractor_lang_zh",
-      "positive_sim": 0.7954872250556946,
-      "negative_sim": 0.5082312822341919,
-      "margin": 0.2872559428215027
+      "positive_sim": 0.796819806098938,
+      "negative_sim": 0.508247971534729,
+      "margin": 0.288571834564209
     },
     "multilingual_ko_768d": {
       "language": "ko",
       "query": "query_lang_ko",
       "positive_doc": "doc_lang_ko",
       "negative_doc": "distractor_lang_ko",
-      "positive_sim": 0.8319879770278931,
-      "negative_sim": 0.5261753797531128,
-      "margin": 0.3058125972747803
+      "positive_sim": 0.8319030404090881,
+      "negative_sim": 0.5271635055541992,
+      "margin": 0.3047395348548889
     },
     "multilingual_ru_768d": {
       "language": "ru",
       "query": "query_lang_ru",
       "positive_doc": "doc_lang_ru",
       "negative_doc": "distractor_lang_ru",
-      "positive_sim": 0.8158867359161377,
-      "negative_sim": 0.5468698740005493,
-      "margin": 0.2690168619155884
+      "positive_sim": 0.8155630230903625,
+      "negative_sim": 0.5473260283470154,
+      "margin": 0.26823699474334717
     },
     "multilingual_el_768d": {
       "language": "el",
       "query": "query_lang_el",
       "positive_doc": "doc_lang_el",
       "negative_doc": "distractor_lang_el",
-      "positive_sim": 0.8454414010047913,
-      "negative_sim": 0.5739737153053284,
-      "margin": 0.2714676856994629
+      "positive_sim": 0.8460192084312439,
+      "negative_sim": 0.5743452906608582,
+      "margin": 0.27167391777038574
     },
     "multilingual_ar_768d": {
       "language": "ar",
       "query": "query_lang_ar",
       "positive_doc": "doc_lang_ar",
       "negative_doc": "distractor_lang_ar",
-      "positive_sim": 0.8001884818077087,
-      "negative_sim": 0.509943962097168,
-      "margin": 0.29024451971054077
+      "positive_sim": 0.8010988831520081,
+      "negative_sim": 0.5100547671318054,
+      "margin": 0.29104411602020264
     }
   }
 }

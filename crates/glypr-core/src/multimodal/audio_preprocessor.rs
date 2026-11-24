@@ -86,8 +86,9 @@ pub fn get_hann_window() -> &'static [f32; AUDIO_FRAME_LEN] {
     HANN_WINDOW.get_or_init(|| {
         let mut window = [0.0f32; AUDIO_FRAME_LEN];
         for (n, w) in window.iter_mut().enumerate() {
-            *w = 0.5
-                - 0.5 * (2.0 * std::f32::consts::PI * (n as f32) / (AUDIO_FRAME_LEN as f32)).cos();
+            *w = (0.5
+                - 0.5 * (2.0 * std::f64::consts::PI * (n as f64) / (AUDIO_FRAME_LEN as f64)).cos())
+                as f32;
         }
         window
     })
@@ -110,8 +111,10 @@ fn get_bit_reversal_pairs() -> &'static [(usize, usize); 240] {
     })
 }
 
+#[allow(dead_code)]
 static FFT_512_TWIDDLES: OnceLock<[(f32, f32); 511]> = OnceLock::new();
 
+#[allow(dead_code)]
 fn get_fft_512_twiddles() -> &'static [(f32, f32); 511] {
     FFT_512_TWIDDLES.get_or_init(|| {
         let mut table = [(0.0f32, 0.0f32); 511];
@@ -123,6 +126,27 @@ fn get_fft_512_twiddles() -> &'static [(f32, f32); 511] {
             for k in 0..half {
                 let angle = step_angle * (k as f64);
                 table[offset + k] = (angle.cos() as f32, angle.sin() as f32);
+            }
+            offset += half;
+            len <<= 1;
+        }
+        table
+    })
+}
+
+static FFT_512_TWIDDLES_F64: OnceLock<[(f64, f64); 511]> = OnceLock::new();
+
+fn get_fft_512_twiddles_f64() -> &'static [(f64, f64); 511] {
+    FFT_512_TWIDDLES_F64.get_or_init(|| {
+        let mut table = [(0.0f64, 0.0f64); 511];
+        let mut len = 2;
+        let mut offset = 0;
+        while len <= 512 {
+            let half = len / 2;
+            let step_angle = -std::f64::consts::PI / (half as f64);
+            for k in 0..half {
+                let angle = step_angle * (k as f64);
+                table[offset + k] = (angle.cos(), angle.sin());
             }
             offset += half;
             len <<= 1;
@@ -188,14 +212,21 @@ pub fn create_htk_mel_filterbank(
 
 /// In-place Radix-2 Cooley-Tukey FFT for 512 points using precomputed bit-reversals and twiddles
 pub fn fft_512_in_place(real: &mut [f32; 512], imag: &mut [f32; 512]) {
+    let mut real_f64 = [0.0f64; 512];
+    let mut imag_f64 = [0.0f64; 512];
+    for idx in 0..512 {
+        real_f64[idx] = real[idx] as f64;
+        imag_f64[idx] = imag[idx] as f64;
+    }
+
     // 1. Bit-reversal permutation
     for &(i, j) in get_bit_reversal_pairs() {
-        real.swap(i, j);
-        imag.swap(i, j);
+        real_f64.swap(i, j);
+        imag_f64.swap(i, j);
     }
 
     // 2. Cooley-Tukey butterflies with precomputed twiddles
-    let twiddles = get_fft_512_twiddles();
+    let twiddles = get_fft_512_twiddles_f64();
     let mut len = 2;
     let mut offset = 0;
     while len <= 512 {
@@ -206,22 +237,27 @@ pub fn fft_512_in_place(real: &mut [f32; 512], imag: &mut [f32; 512]) {
         while i < 512 {
             for k in 0..half {
                 let (w_re, w_im) = stage_twiddles[k];
-                let u_re = real[i + k];
-                let u_im = imag[i + k];
+                let u_re = real_f64[i + k];
+                let u_im = imag_f64[i + k];
 
-                let v_re = real[i + k + half] * w_re - imag[i + k + half] * w_im;
-                let v_im = real[i + k + half] * w_im + imag[i + k + half] * w_re;
+                let v_re = real_f64[i + k + half] * w_re - imag_f64[i + k + half] * w_im;
+                let v_im = real_f64[i + k + half] * w_im + imag_f64[i + k + half] * w_re;
 
-                real[i + k] = u_re + v_re;
-                imag[i + k] = u_im + v_im;
+                real_f64[i + k] = u_re + v_re;
+                imag_f64[i + k] = u_im + v_im;
 
-                real[i + k + half] = u_re - v_re;
-                imag[i + k + half] = u_im - v_im;
+                real_f64[i + k + half] = u_re - v_re;
+                imag_f64[i + k + half] = u_im - v_im;
             }
             i += len;
         }
         offset += half;
         len <<= 1;
+    }
+
+    for idx in 0..512 {
+        real[idx] = real_f64[idx] as f32;
+        imag[idx] = imag_f64[idx] as f32;
     }
 }
 
@@ -327,15 +363,26 @@ pub fn compute_audio_total_tokens(samples_len: usize) -> usize {
 /// - Exact `32767.0` divisor for 16-bit mono 16kHz PCM to preserve bit-exact golden parity
 pub fn decode_wav_reader<R: std::io::Read>(mut reader: hound::WavReader<R>) -> Result<Vec<f32>> {
     let spec = reader.spec();
+    if spec.sample_rate == 0 {
+        bail!("Invalid WAV sample rate: 0");
+    }
     let channels = spec.channels.max(1) as usize;
 
     let raw_interleaved: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader
-            .samples::<f32>()
-            .collect::<std::result::Result<Vec<f32>, _>>()
-            .map_err(|e| anyhow::anyhow!("Failed to read float WAV samples: {e}"))?,
+        hound::SampleFormat::Float => {
+            if spec.bits_per_sample != 32 {
+                bail!("Unsupported float WAV bit depth: {}", spec.bits_per_sample);
+            }
+            reader
+                .samples::<f32>()
+                .collect::<std::result::Result<Vec<f32>, _>>()
+                .map_err(|e| anyhow::anyhow!("Failed to read float WAV samples: {e}"))?
+        }
         hound::SampleFormat::Int => {
             let bits = spec.bits_per_sample;
+            if ![8, 16, 24, 32].contains(&bits) {
+                bail!("Unsupported WAV bit depth: {}", bits);
+            }
             if bits <= 16 {
                 let scale = if bits == 8 { 127.0f32 } else { 32767.0f32 };
                 reader
@@ -373,14 +420,62 @@ pub fn decode_wav_reader<R: std::io::Read>(mut reader: hound::WavReader<R>) -> R
         let src_rate = spec.sample_rate as f64;
         let dst_rate = AUDIO_SAMPLE_RATE as f64;
         let ratio = src_rate / dst_rate;
-        let out_len = ((mono.len() as f64) / ratio).round() as usize;
+
+        // Apply zero-phase windowed-sinc FIR anti-aliasing low-pass filter before downsampling.
+        let filtered_storage: Vec<f32>;
+        let src_samples: &[f32] = if src_rate > dst_rate {
+            const HALF_TAPS: isize = 15; // 31-tap symmetric FIR
+            const NUM_TAPS: usize = (2 * HALF_TAPS + 1) as usize;
+            let fc = 0.45 * (dst_rate / src_rate);
+            let m = (2 * HALF_TAPS) as f64;
+            let mut kernel = [0.0f64; NUM_TAPS];
+            let mut sum = 0.0f64;
+            for (idx, k) in (-HALF_TAPS..=HALF_TAPS).enumerate() {
+                let n = (k + HALF_TAPS) as f64;
+                let sinc = if k == 0 {
+                    2.0 * fc
+                } else {
+                    let x = std::f64::consts::PI * (k as f64);
+                    (2.0 * fc * x).sin() / x
+                };
+                // Blackman window for strong stopband attenuation
+                let win = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * n / m).cos()
+                    + 0.08 * (4.0 * std::f64::consts::PI * n / m).cos();
+                let w = sinc * win;
+                kernel[idx] = w;
+                sum += w;
+            }
+            let inv_sum = 1.0 / sum;
+            let mut kernel_f32 = [0.0f32; NUM_TAPS];
+            for (dst, &src) in kernel_f32.iter_mut().zip(kernel.iter()) {
+                *dst = (src * inv_sum) as f32;
+            }
+
+            let max_idx = (mono.len() - 1) as isize;
+            let mut out = Vec::with_capacity(mono.len());
+            for i in 0..mono.len() {
+                let mut acc = 0.0f32;
+                let center = i as isize;
+                for (k_idx, &coef) in kernel_f32.iter().enumerate() {
+                    let s_idx = (center + (k_idx as isize) - HALF_TAPS).clamp(0, max_idx) as usize;
+                    acc += mono[s_idx] * coef;
+                }
+                out.push(acc);
+            }
+            filtered_storage = out;
+            &filtered_storage
+        } else {
+            &mono
+        };
+
+        let out_len = (((src_samples.len() as f64) / ratio).round() as usize).max(1);
         let mut resampled = Vec::with_capacity(out_len);
         for i in 0..out_len {
             let src_pos = (i as f64) * ratio;
             let idx = src_pos.floor() as usize;
             let frac = (src_pos - (idx as f64)) as f32;
-            let s0 = mono[idx.min(mono.len() - 1)];
-            let s1 = mono[(idx + 1).min(mono.len() - 1)];
+            let s0 = src_samples[idx.min(src_samples.len() - 1)];
+            let s1 = src_samples[(idx + 1).min(src_samples.len() - 1)];
             resampled.push(s0 + frac * (s1 - s0));
         }
         Ok(resampled)
@@ -490,6 +585,238 @@ mod tests {
             max_err < 1e-6,
             "Twiddle drift exceeded bound: {:e}",
             max_err
+        );
+    }
+
+    fn make_raw_pcm_wav(
+        sample_rate: u32,
+        channels: u16,
+        bits_per_sample: u16,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let bytes_per_sample = bits_per_sample.div_ceil(8).max(1);
+        let block_align = channels * bytes_per_sample;
+        let byte_rate = sample_rate * (block_align as u32);
+        let data_len = data.len() as u32;
+        let riff_size = 36u32 + data_len;
+
+        let mut buf = Vec::with_capacity(44 + data.len());
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&riff_size.to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    #[test]
+    fn test_decode_wav_reader_rejects_unsupported_bit_depths() {
+        for bad_bits in [0u16, 7, 65] {
+            let bytes = make_raw_pcm_wav(16000, 1, bad_bits, &[0u8; 8]);
+            let err = decode_wav_bytes(&bytes)
+                .expect_err(&format!("bit depth {bad_bits} should be rejected"));
+            assert!(
+                err.to_string().contains("Unsupported WAV bit depth")
+                    || err.to_string().contains("Failed to parse WAV"),
+                "unexpected error for bit depth {bad_bits}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_wav_reader_single_sample_high_rate_nonempty() {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut buf = Vec::new();
+        {
+            let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buf), spec).unwrap();
+            writer.write_sample(16384i16).unwrap();
+            writer.finalize().unwrap();
+        }
+        let decoded = decode_wav_bytes(&buf).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!((decoded[0] - (16384.0 / 32767.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_decode_wav_reader_fir_lpf_attenuates_aliasing_48k_to_16k() {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut buf = Vec::new();
+        {
+            let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buf), spec).unwrap();
+            // 12 kHz sine wave (above 16 kHz Nyquist = 8 kHz) at 48 kHz sample rate
+            let n_samples = 4800; // 0.1s
+            for i in 0..n_samples {
+                let t = (i as f32) / 48000.0;
+                let s = (2.0 * std::f32::consts::PI * 12000.0 * t).sin();
+                writer.write_sample(s).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let decoded = decode_wav_bytes(&buf).unwrap();
+        assert_eq!(decoded.len(), 1600);
+        // Skip edge transient (first/last 16 samples) and verify strong stopband attenuation
+        let steady = &decoded[16..decoded.len() - 16];
+        let rms = (steady.iter().map(|&x| x * x).sum::<f32>() / (steady.len() as f32)).sqrt();
+        // Unattenuated sine RMS is ~0.707; 31-tap Blackman FIR at fc=0.15 attenuates 12 kHz > 40 dB
+        assert!(
+            rms < 0.02,
+            "12 kHz above-Nyquist tone was not sufficiently attenuated: rms={rms}"
+        );
+    }
+
+    #[test]
+    fn test_preprocess_audio_empty_and_short_edge_cases() {
+        // Empty audio must fail
+        let err = preprocess_audio(&[]).unwrap_err();
+        assert!(err.to_string().contains("empty"), "unexpected error: {err}");
+
+        // 100 samples (< 321 after left-pad of 160 -> 260 < 321) pads to 321 and yields 1 frame
+        let short = vec![0.1f32; 100];
+        let processed = preprocess_audio(&short).unwrap();
+        assert_eq!(processed.num_frames, 1);
+        assert_eq!(processed.num_mels, AUDIO_NUM_MELS);
+        assert_eq!(processed.features.len(), AUDIO_NUM_MELS);
+        assert!(
+            processed.features.iter().all(|v| v.is_finite()),
+            "short audio features contained non-finite values"
+        );
+    }
+
+    #[test]
+    fn test_decode_wav_reader_8bit_32bit_and_corrupt_empty() {
+        // 8-bit integer mono PCM
+        let spec_i8 = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 8,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut buf8 = Vec::new();
+        {
+            let mut writer =
+                hound::WavWriter::new(std::io::Cursor::new(&mut buf8), spec_i8).unwrap();
+            writer.write_sample(127i8).unwrap();
+            writer.write_sample(-127i8).unwrap();
+            writer.write_sample(0i8).unwrap();
+            writer.finalize().unwrap();
+        }
+        let dec8 = decode_wav_bytes(&buf8).unwrap();
+        assert_eq!(dec8.len(), 3);
+        assert!((dec8[0] - 1.0).abs() < 1e-5);
+        assert!((dec8[1] + 1.0).abs() < 1e-5);
+        assert!((dec8[2] - 0.0).abs() < 1e-5);
+
+        // 32-bit integer mono PCM
+        let spec_i32 = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut buf32 = Vec::new();
+        {
+            let mut writer =
+                hound::WavWriter::new(std::io::Cursor::new(&mut buf32), spec_i32).unwrap();
+            writer.write_sample(i32::MAX).unwrap();
+            writer.write_sample(0i32).unwrap();
+            writer.finalize().unwrap();
+        }
+        let dec32 = decode_wav_bytes(&buf32).unwrap();
+        assert_eq!(dec32.len(), 2);
+        assert!((dec32[0] - 1.0).abs() < 1e-5);
+        assert!((dec32[1] - 0.0).abs() < 1e-5);
+
+        // Empty and corrupt WAV bytes must fail cleanly
+        assert!(decode_wav_bytes(&[]).is_err());
+        assert!(decode_wav_bytes(b"not a valid wav header").is_err());
+    }
+
+    #[test]
+    fn test_audio_preprocessor_matches_golden_json() {
+        #[derive(serde::Deserialize)]
+        struct PreprocessorGolden {
+            audio: AudioGolden,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct AudioGolden {
+            sample_rate: usize,
+            freq_hz: f64,
+            num_samples: usize,
+            num_frames: usize,
+            num_mels: usize,
+            features: Vec<f32>,
+        }
+
+        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/golden_vectors/preprocessor_golden.json");
+        if !golden_path.exists() {
+            let allow_missing = matches!(
+                std::env::var("GLYPR_ALLOW_MISSING_WEIGHTS")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "1" | "true"
+            );
+            if allow_missing {
+                eprintln!(
+                    "Skipping test_audio_preprocessor_matches_golden_json ({} missing and GLYPR_ALLOW_MISSING_WEIGHTS=1)",
+                    golden_path.display()
+                );
+                return;
+            }
+            panic!(
+                "Missing preprocessor golden fixture at {}",
+                golden_path.display()
+            );
+        }
+
+        let raw = std::fs::read_to_string(&golden_path).unwrap();
+        let golden: PreprocessorGolden = serde_json::from_str(&raw).unwrap();
+        let audio = golden.audio;
+        assert_eq!(audio.num_mels, 128);
+
+        let samples: Vec<f32> = (0..audio.num_samples)
+            .map(|i| {
+                (2.0 * std::f64::consts::PI * audio.freq_hz * (i as f64)
+                    / (audio.sample_rate as f64))
+                    .sin() as f32
+            })
+            .collect();
+
+        let processed = preprocess_audio(&samples).unwrap();
+        assert_eq!(processed.num_frames, audio.num_frames);
+        assert_eq!(processed.num_mels, 128);
+        assert_eq!(processed.features.len(), audio.features.len());
+
+        let mut max_abs_diff = 0.0f32;
+        for (&got, &expected) in processed.features.iter().zip(audio.features.iter()) {
+            assert!(got.is_finite(), "non-finite audio feature encountered");
+            max_abs_diff = max_abs_diff.max((got - expected).abs());
+        }
+        assert!(
+            max_abs_diff < 1e-4,
+            "audio preprocessor max_abs_diff={max_abs_diff:.6e} >= 1e-4"
         );
     }
 }

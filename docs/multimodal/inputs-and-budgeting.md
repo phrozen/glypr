@@ -11,7 +11,7 @@ When feeding inputs into the model, each modality consumes tokens from the 8,192
 | Modality | Default Token Cost | Maximum Single-Modality Capacity | Technical Specifications & Formatting |
 | :--- | :--- | :--- | :--- |
 | **Text & Code** | **1 token** per subword | **8,192 tokens** | SentencePiece 262k BPE tokenizer |
-| **Image** | **280 tokens** per image *(default)* | **~29 images** | File paths, URLs, or in-memory PIL images |
+| **Image** | **280 tokens** per image *(default)* | **~29 images** | File paths (`--image`), base64 data URIs (HTTP), or in-memory `DynamicImage` |
 | **Video** | **140 tokens** per frame *(default)* | **~58 frames** *(~58s at 1 FPS)* | MP4 files, sampled at 1 frame per second by default |
 | **Audio** | **25 tokens** per second | **~327 seconds** *(~5.45 mins)* | Raw audio files, **16 kHz mono** format |
 
@@ -45,9 +45,8 @@ A major capability in EmbeddingGemma 2 is the **configurable vision token budget
 ### Case Study: Standard Portrait Documents & Visual Artwork (480x680 @ 140 vs 280 Tokens)
 When indexing large visual image catalogs such as standard portrait documents, book covers, and structured artwork (e.g. 480x680 px in `.png`, `.jpg`, `.jpeg`, or `.webp`):
 * **Native Grid Resolution:** Standard portrait media (480x680, aspect ratio ~0.706) with budget 140 are preserved at $432 \times 672\text{ px}$, dividing cleanly into $27 \times 42 = 1,134$ raw patches ($16 \times 16\text{ px}$). With $3 \times 3$ spatial grid pooling, the resulting grid maps to $9 \times 14 = \mathbf{126\text{ soft tokens}}$ (fitting well within the 140 ceiling).
-* **Apple Neural Engine (ANE) Acceleration (`--ane`):** This exact 1,134-patch grid is natively compiled for the Apple Neural Engine (`gemma2_vision_tower_p1134_t126_w8a16.mlmodelc`), executing in just **11.17 ms (89.5 img/s)**—a **2.2× speedup over GPU Metal ViT**—with zero GPU unified memory consumption.
-* **Budget 280 High-Resolution Preset:** For higher fidelity, the 280-token portrait preset scales to $672 \times 912\text{ px}$ ($42 \times 57 = 2,394$ patches), compiling to `gemma2_vision_tower_p2394_t266_w8a16.mlmodelc` and executing in **23.19 ms (43.1 img/s)** on ANE.
-* **Supported Image Formats:** `glypr` natively decodes `.png`, `.jpg`, `.jpeg`, and `.webp` inputs from the filesystem, URLs, or stdin.
+* **Apple Neural Engine (ANE) Acceleration (`--ane`):** Exact patch grids (`140-portrait`, `280-portrait`, `280-square`, `280-landscape`, etc.) exported via `scripts/export_coreml.py` execute on ANE (`11.17 ms` for 140-portrait / `23.19 ms` for 280-portrait) with zero GPU unified memory consumption. Models are discovered automatically via `--coreml-dir`, `$GLYPR_COREML_DIR`, `./models/coreml`, or `~/Library/Application Support/glypr/coreml`.
+* **Supported Image Formats:** `glypr` natively decodes `.png`, `.jpg`, `.jpeg`, and `.webp` inputs from the filesystem (`--image`), or base64 data URIs / raw base64 payloads via the HTTP server.
 * **Hybrid Visual + Title Search Pattern:** In production document search, pairing the image with title conditioning produces maximum separation against near-duplicate documents:
   ```bash
   # CLI: Interleaved document title + image with ANE acceleration (zero-mmproj standalone mode)
@@ -66,7 +65,7 @@ When indexing large visual image catalogs such as standard portrait documents, b
 * **Maximum Duration:** ~327 seconds (~5.45 minutes)
 
 ```python
-# Pass audio files directly as paths or URLs
+# Pass audio files as local paths or WAV bytes
 audio_emb = model.encode({"audio": "meeting_recording_16k.wav"})
 ```
 

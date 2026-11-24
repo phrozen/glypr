@@ -1,40 +1,15 @@
-use candle_core::{DType, Device, Tensor};
-use glypr_core::{DEFAULT_MAX_SEQ_LEN, GlyprEmbedder, MediaItem};
+mod common;
+
+use candle_core::{DType, Tensor};
+use glypr_core::{DEFAULT_MAX_SEQ_LEN, GlyprError, MediaItem};
 use std::time::Instant;
-
-fn setup_embedder() -> anyhow::Result<GlyprEmbedder> {
-    let device = if candle_core::utils::metal_is_available() {
-        Device::new_metal(0).unwrap_or(Device::Cpu)
-    } else {
-        Device::Cpu
-    };
-    let dtype = if device.is_metal() {
-        DType::BF16
-    } else {
-        DType::F32
-    };
-
-    let base_gguf = glypr_core::hub::resolve_default_gguf()?;
-    let mut embedder = GlyprEmbedder::load_gguf(&base_gguf, &device, dtype)?;
-
-    if let Ok(mmproj_gguf) = glypr_core::hub::resolve_default_mmproj()
-        && mmproj_gguf.exists()
-    {
-        embedder.attach_multimodal_projector(&mmproj_gguf)?;
-    }
-
-    Ok(embedder)
-}
 
 #[test]
 fn test_text_exceeds_max_context() -> anyhow::Result<()> {
-    let embedder = match setup_embedder() {
-        Ok(e) => e,
-        Err(_) => {
-            eprintln!("Skipping test: model weights not resolved");
-            return Ok(());
-        }
+    let Some(shared) = common::shared_gguf_bf16_metal()? else {
+        return Ok(());
     };
+    let embedder = shared.lock().unwrap_or_else(|e| e.into_inner());
 
     // Construct a long text with > 8,192 tokens (~9,000 words)
     let long_text = "word ".repeat(9500);
@@ -44,9 +19,9 @@ fn test_text_exceeds_max_context() -> anyhow::Result<()> {
     let elapsed = start.elapsed();
 
     assert!(res.is_err(), "Expected error for oversized text query");
-    let err_str = res.unwrap_err().to_string();
-    println!("✓ Text exceeds context error: {}", err_str);
-    assert!(err_str.contains("exceeds maximum context limit"));
+    let err = res.unwrap_err();
+    assert!(matches!(err, GlyprError::ContextLimitExceeded { .. }));
+    assert!(err.to_string().contains("exceeds maximum context limit"));
     assert!(
         elapsed.as_millis() < 500,
         "Should fail fast before running transformer backbone"
@@ -57,10 +32,10 @@ fn test_text_exceeds_max_context() -> anyhow::Result<()> {
 
 #[test]
 fn test_batch_text_exceeds_max_context() -> anyhow::Result<()> {
-    let embedder = match setup_embedder() {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Some(shared) = common::shared_gguf_bf16_metal()? else {
+        return Ok(());
     };
+    let embedder = shared.lock().unwrap_or_else(|e| e.into_inner());
 
     let normal_text = "This is a standard query.";
     let oversized_text = "context ".repeat(9500);
@@ -70,22 +45,21 @@ fn test_batch_text_exceeds_max_context() -> anyhow::Result<()> {
         res.is_err(),
         "Expected batch to fail due to oversized element"
     );
-    let err_str = res.unwrap_err().to_string();
-    println!("✓ Batch item exceeds context error: {}", err_str);
-    assert!(err_str.contains("Batch item 1"));
-    assert!(err_str.contains("exceeds maximum context limit"));
+    let err = res.unwrap_err();
+    assert!(matches!(err, GlyprError::ContextLimitExceeded { .. }));
+    assert!(err.to_string().contains("exceeds maximum context limit"));
 
     Ok(())
 }
 
 #[test]
 fn test_multimodal_multiple_images_burst_exceeds_budget() -> anyhow::Result<()> {
-    let embedder = match setup_embedder() {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Some(shared) = common::shared_gguf_bf16_metal()? else {
+        return Ok(());
     };
+    let embedder = shared.lock().unwrap_or_else(|e| e.into_inner());
 
-    if embedder.multimodal.is_none() {
+    if embedder.multimodal().is_none() {
         eprintln!("Skipping multimodal test: mmproj not attached");
         return Ok(());
     }
@@ -96,35 +70,8 @@ fn test_multimodal_multiple_images_burst_exceeds_budget() -> anyhow::Result<()> 
         MediaItem::Image {
             image: &img,
             budget: Some(1120),
-        },
-        MediaItem::Image {
-            image: &img,
-            budget: Some(1120),
-        },
-        MediaItem::Image {
-            image: &img,
-            budget: Some(1120),
-        },
-        MediaItem::Image {
-            image: &img,
-            budget: Some(1120),
-        },
-        MediaItem::Image {
-            image: &img,
-            budget: Some(1120),
-        },
-        MediaItem::Image {
-            image: &img,
-            budget: Some(1120),
-        },
-        MediaItem::Image {
-            image: &img,
-            budget: Some(1120),
-        },
-        MediaItem::Image {
-            image: &img,
-            budget: Some(1120),
-        },
+        };
+        8
     ];
 
     let start = Instant::now();
@@ -135,19 +82,12 @@ fn test_multimodal_multiple_images_burst_exceeds_budget() -> anyhow::Result<()> 
         res.is_err(),
         "Expected error for multimodal burst exceeding context limit"
     );
-    let err_str = res.unwrap_err().to_string();
-    println!(
-        "✓ Multimodal multi-image error: {} (took {:?})",
-        err_str, elapsed
-    );
-    assert!(err_str.contains("Multimodal sequence length"));
-    assert!(err_str.contains("exceeds maximum context limit"));
-
-    // Critical assertion: verify preflight stopped execution BEFORE running 8 ViT forwards!
+    let err = res.unwrap_err();
+    assert!(matches!(err, GlyprError::ContextLimitExceeded { .. }));
+    assert!(err.to_string().contains("exceeds maximum context limit"));
     assert!(
         elapsed.as_millis() < 50,
-        "Preflight check MUST return in < 50ms without executing heavy Vision Tower forward passes (took {:?})",
-        elapsed
+        "Preflight check MUST return in < 50ms without executing heavy Vision Tower forward passes (took {elapsed:?})"
     );
 
     Ok(())
@@ -155,20 +95,17 @@ fn test_multimodal_multiple_images_burst_exceeds_budget() -> anyhow::Result<()> 
 
 #[test]
 fn test_multimodal_audio_plus_long_text_exceeds_budget() -> anyhow::Result<()> {
-    let embedder = match setup_embedder() {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Some(shared) = common::shared_gguf_bf16_metal()? else {
+        return Ok(());
     };
+    let embedder = shared.lock().unwrap_or_else(|e| e.into_inner());
 
-    if embedder.multimodal.is_none() {
+    if embedder.multimodal().is_none() {
         return Ok(());
     }
 
-    // 1.0 second audio (27 tokens: 25 soft + 2 framing)
     let audio_samples = vec![0.0f32; 16000];
-    // Long prompt with ~8,200 tokens
     let long_prompt = "audio description ".repeat(4500);
-
     let items = vec![MediaItem::Audio {
         samples: &audio_samples,
     }];
@@ -181,20 +118,14 @@ fn test_multimodal_audio_plus_long_text_exceeds_budget() -> anyhow::Result<()> {
         res.is_err(),
         "Expected error for audio + oversized text prompt"
     );
-    let err_str = res.unwrap_err().to_string();
-    println!(
-        "✓ Multimodal audio + text error: {} (took {:?})",
-        err_str, elapsed
-    );
-    assert!(err_str.contains("Multimodal sequence length"));
-    assert!(err_str.contains("exceeds maximum context limit"));
+    let err = res.unwrap_err();
+    assert!(matches!(err, GlyprError::ContextLimitExceeded { .. }));
+    assert!(err.to_string().contains("exceeds maximum context limit"));
 
-    // Critical assertion: verify preflight stopped execution BEFORE running Conformer!
     let max_allowed_ms = if cfg!(debug_assertions) { 500 } else { 50 };
     assert!(
         elapsed.as_millis() < max_allowed_ms,
-        "Preflight check MUST return fast without executing Conformer forward pass (took {:?})",
-        elapsed
+        "Preflight check MUST return fast without executing Conformer forward pass (took {elapsed:?})"
     );
 
     Ok(())
@@ -202,24 +133,27 @@ fn test_multimodal_audio_plus_long_text_exceeds_budget() -> anyhow::Result<()> {
 
 #[test]
 fn test_configurable_max_seq_len() -> anyhow::Result<()> {
-    let mut embedder = match setup_embedder() {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Some(shared) = common::shared_gguf_bf16_metal()? else {
+        return Ok(());
     };
+    let mut embedder = shared.lock().unwrap_or_else(|e| e.into_inner());
 
     let prompt = "This is a query testing dynamic max_seq_len adjustment.";
-    let token_count = embedder.tokenizer.encode(prompt)?.len();
+    let token_count = embedder.tokenizer().encode(prompt)?.len();
     assert!(token_count > 5, "Prompt should produce more than 5 tokens");
 
-    // Restrict max sequence length to 5 tokens
     embedder.set_max_seq_len(5);
     let res_fail = embedder.embed_query(prompt, "SearchQuery", None);
-    assert!(res_fail.is_err(), "Should fail when seq_len > 5");
-    let err_str = res_fail.unwrap_err().to_string();
-    assert!(err_str.contains("exceeds maximum context limit (5 tokens)"));
-
-    // Restore to standard 8,192 limit
+    // Restore immediately before asserting so shared fixture stays clean on panic
     embedder.set_max_seq_len(DEFAULT_MAX_SEQ_LEN);
+
+    let err = res_fail.expect_err("Should fail when seq_len > 5");
+    assert!(
+        err.to_string()
+            .contains("exceeds maximum context limit (5 tokens)"),
+        "unexpected error: {err}"
+    );
+
     let res_ok = embedder.embed_query(prompt, "SearchQuery", None);
     assert!(
         res_ok.is_ok(),
@@ -231,24 +165,25 @@ fn test_configurable_max_seq_len() -> anyhow::Result<()> {
 
 #[test]
 fn test_model_level_defense_in_depth() -> anyhow::Result<()> {
-    let embedder = match setup_embedder() {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Some(shared) = common::shared_gguf_bf16_metal()? else {
+        return Ok(());
     };
+    let embedder = shared.lock().unwrap_or_else(|e| e.into_inner());
 
-    // If max_position_embeddings is 262,144 (or 8,192 depending on config), test that passing > max_position_embeddings fails
-    let max_pos = embedder.model.config.max_position_embeddings;
+    let max_pos = embedder.model().config.max_position_embeddings;
     let oversized_len = max_pos + 1;
-    let dummy_ids = Tensor::zeros((1, oversized_len), DType::U32, &embedder.device)?;
+    let dummy_ids = Tensor::zeros((1, oversized_len), DType::U32, embedder.device())?;
 
-    let res = embedder.model.forward(&dummy_ids, None);
+    let res = embedder.model().forward(&dummy_ids, None);
     assert!(
         res.is_err(),
         "Direct model forward must reject inputs larger than max_position_embeddings"
     );
-    let err_str = res.unwrap_err().to_string();
-    println!("✓ Model defense-in-depth error: {}", err_str);
-    assert!(err_str.contains("exceeds model max_position_embeddings"));
+    assert!(
+        res.unwrap_err()
+            .to_string()
+            .contains("exceeds model max_position_embeddings")
+    );
 
     Ok(())
 }

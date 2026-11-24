@@ -1,6 +1,15 @@
 {
+  "schema_version": 2,
   "model_id": "google/embeddinggemma-2",
   "description": "Deterministic ground-truth reference vectors for Rust implementation validation",
+  "provenance": {
+    "model_id": "google/embeddinggemma-2",
+    "dtype": "float32",
+    "device": "cpu",
+    "transformers_version": "5.19.0",
+    "sentence_transformers_version": "6.1.0",
+    "generated_at": "2026-11-20T19:54:23.626622+00:00"
+  },
   "supported_dims": [
     768,
     512,
@@ -14,10 +23,10 @@
       "task": "SearchQuery",
       "text": "What causes the northern lights?",
       "l2_norms": {
-        "768d": 1.0035980939865112,
-        "512d": 0.9995606541633606,
-        "256d": 1.0014287233352661,
-        "128d": 0.9973909854888916
+        "768d": 0.9999998807907104,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
       }
     },
     "search_doc_1_titled": {
@@ -26,10 +35,10 @@
       "title": "Aurora Borealis Explained",
       "text": "The northern lights are caused by charged solar wind particles colliding with Earth atmospheric gases.",
       "l2_norms": {
-        "768d": 1.000274896621704,
-        "512d": 0.9998270273208618,
-        "256d": 1.0012378692626953,
-        "128d": 0.9988199472427368
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
+        "256d": 0.9999999403953552,
+        "128d": 0.9999999403953552
       }
     },
     "search_doc_2_untitled": {
@@ -38,10 +47,10 @@
       "title": null,
       "text": "Solar energetic particles interact with the magnetosphere near Earth magnetic poles.",
       "l2_norms": {
-        "768d": 1.0001271963119507,
-        "512d": 0.9981881976127625,
-        "256d": 1.002622127532959,
-        "128d": 0.9985287189483643
+        "768d": 1.0000001192092896,
+        "512d": 1.0000001192092896,
+        "256d": 1.0,
+        "128d": 1.0
       }
     },
     "code_query_1": {
@@ -50,10 +59,10 @@
       "task": "CodeRetrieval",
       "text": "Fast inverse square root implementation in C",
       "l2_norms": {
-        "768d": 1.0002121925354004,
-        "512d": 0.9996606111526489,
-        "256d": 1.0016847848892212,
-        "128d": 0.9990750551223755
+        "768d": 1.0000001192092896,
+        "512d": 1.0,
+        "256d": 0.9999999403953552,
+        "128d": 1.0
       }
     },
     "code_doc_1": {
@@ -62,10 +71,10 @@
       "title": "q_rsqrt.c",
       "text": "float Q_rsqrt(float number) { long i; float x2, y; const float threehalfs = 1.5F; x2 = number * 0.5F; y = number; i = * ( long * ) &y; i = 0x5f3759df - ( i >> 1 ); y = * ( float * ) &i; y = y * ( threehalfs - ( x2 * y * y ) ); return y; }",
       "l2_norms": {
-        "768d": 1.0012736320495605,
-        "512d": 1.0011922121047974,
-        "256d": 1.0029338598251343,
-        "128d": 0.99826580286026
+        "768d": 1.0,
+        "512d": 1.0,
+        "256d": 1.0,
+        "128d": 1.0
       }
     },
     "sim_sentence_1": {
@@ -74,10 +83,10 @@
       "task": "SentenceSimilarity",
       "text": "The stock market dropped significantly on Friday.",
       "l2_norms": {
-        "768d": 1.0033553838729858,
-        "512d": 0.9984185099601746,
-        "256d": 1.0002477169036865,
-        "128d": 1.0003323554992676
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
+        "128d": 1.0
       }
     },
     "sim_sentence_2": {
@@ -86,18 +95,18 @@
       "task": "SentenceSimilarity",
       "text": "Equities experienced steep declines at the end of the trading week.",
       "l2_norms": {
-        "768d": 1.0003674030303955,
-        "512d": 0.9979333877563477,
-        "256d": 0.9988413453102112,
-        "128d": 0.9995476603507996
+        "768d": 1.0,
+        "512d": 0.9999999403953552,
+        "256d": 1.0,
+        "128d": 1.0
       }
     }
   },
   "similarities": {
-    "search_query_1_vs_doc_1_titled_768d": 0.8466004729270935,
-    "search_query_1_vs_doc_1_titled_512d": 0.849097728729248,
-    "code_query_1_vs_code_doc_1_768d": 0.8152202367782593,
-    "sim_sentence_1_vs_2_768d": 0.912612795829773
+    "search_query_1_vs_doc_1_titled_768d": 0.8438735008239746,
+    "search_query_1_vs_doc_1_titled_512d": 0.850021481513977,
+    "code_query_1_vs_code_doc_1_768d": 0.8145233988761902,
+    "sim_sentence_1_vs_2_768d": 0.9097405076026917
   },
   "multimodal_files": {
     "image": "test_gradient.png",

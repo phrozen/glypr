@@ -2,19 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelConfigFile {
-    pub text_config: Option<TextConfig>,
-    // Root config fallback fields if text_config is absent
-    pub hidden_size: Option<usize>,
-    pub num_hidden_layers: Option<usize>,
-    pub num_attention_heads: Option<usize>,
-    pub num_key_value_heads: Option<usize>,
-    pub intermediate_size: Option<usize>,
-    pub vocab_size: Option<usize>,
-    pub embedding_dim: Option<usize>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerType {
@@ -69,7 +56,49 @@ impl TextConfig {
         };
 
         let config: TextConfig = serde_json::from_value(config_obj.clone())?;
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Validate structural invariants of `TextConfig`.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.num_hidden_layers == 0 {
+            anyhow::bail!("TextConfig.num_hidden_layers must be > 0");
+        }
+        if self.layer_types.len() != self.num_hidden_layers {
+            anyhow::bail!(
+                "TextConfig.layer_types length ({}) does not match num_hidden_layers ({})",
+                self.layer_types.len(),
+                self.num_hidden_layers
+            );
+        }
+        if self.num_attention_heads == 0 {
+            anyhow::bail!("TextConfig.num_attention_heads must be > 0");
+        }
+        if self.num_key_value_heads == 0 {
+            anyhow::bail!("TextConfig.num_key_value_heads must be > 0");
+        }
+        if self.head_dim == 0 {
+            anyhow::bail!("TextConfig.head_dim must be > 0");
+        }
+        if self.embedding_dim == 0 {
+            anyhow::bail!("TextConfig.embedding_dim must be > 0");
+        }
+        for (layer_key, override_cfg) in &self.per_layer_config {
+            if override_cfg.head_dim == 0 {
+                anyhow::bail!(
+                    "TextConfig.per_layer_config[{}].head_dim must be > 0",
+                    layer_key
+                );
+            }
+            if override_cfg.num_key_value_heads == 0 {
+                anyhow::bail!(
+                    "TextConfig.per_layer_config[{}].num_key_value_heads must be > 0",
+                    layer_key
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Construct TextConfig directly from GGUF metadata
@@ -188,9 +217,15 @@ impl TextConfig {
             },
         );
 
-        let sliding_window = 512;
+        // llama.cpp exports gemma-embedding2.attention.sliding_window as the full
+        // bidirectional span (2 * radius = 1024), whereas HF config.json and glypr's
+        // attention masks / FlashAttention kernels use the one-sided half-window radius (512).
+        let sliding_window = get_u32(metadata.get("gemma-embedding2.attention.sliding_window"))
+            .filter(|&w| w > 0)
+            .map(|w| (w as usize / 2).max(1))
+            .unwrap_or(512);
 
-        Ok(Self {
+        let config = Self {
             hidden_size,
             intermediate_size,
             num_hidden_layers,
@@ -209,7 +244,9 @@ impl TextConfig {
             pad_token_id,
             bos_token_id,
             eos_token_id,
-        })
+        };
+        config.validate()?;
+        Ok(config)
     }
 
     /// Get head dimension for a specific layer index
@@ -251,15 +288,16 @@ impl TextConfig {
 }
 
 pub(crate) fn get_u32(val: Option<&candle_core::quantized::gguf_file::Value>) -> Option<u32> {
-    match val {
-        Some(candle_core::quantized::gguf_file::Value::U8(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::I8(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::U16(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::I16(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::U32(v)) => Some(*v),
-        Some(candle_core::quantized::gguf_file::Value::I32(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::U64(v)) => Some(*v as u32),
-        Some(candle_core::quantized::gguf_file::Value::I64(v)) => Some(*v as u32),
+    use candle_core::quantized::gguf_file::Value;
+    match val? {
+        Value::U8(v) => Some(*v as u32),
+        Value::I8(v) => u32::try_from(*v).ok(),
+        Value::U16(v) => Some(*v as u32),
+        Value::I16(v) => u32::try_from(*v).ok(),
+        Value::U32(v) => Some(*v),
+        Value::I32(v) => u32::try_from(*v).ok(),
+        Value::U64(v) => u32::try_from(*v).ok(),
+        Value::I64(v) => u32::try_from(*v).ok(),
         _ => None,
     }
 }
@@ -336,6 +374,9 @@ impl VisionConfig {
             cfg.num_hidden_layers = v as usize;
         }
         if let Some(v) = get_u32(metadata.get("clip.vision.attention.head_count")) {
+            if v == 0 {
+                return None;
+            }
             cfg.num_attention_heads = v as usize;
             cfg.num_key_value_heads = v as usize;
             cfg.head_dim = cfg.hidden_size / cfg.num_attention_heads;
@@ -409,6 +450,9 @@ impl AudioConfig {
             cfg.num_hidden_layers = v as usize;
         }
         if let Some(v) = get_u32(metadata.get("clip.audio.attention.head_count")) {
+            if v == 0 {
+                return None;
+            }
             cfg.num_attention_heads = v as usize;
         }
         if let Some(v) = get_u32(metadata.get("clip.audio.num_mel_bins")) {
@@ -454,5 +498,321 @@ impl MultimodalConfig {
             eoa_token_id: 258883,
             audio_token_id: 258881,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::quantized::gguf_file::Value;
+
+    #[test]
+    fn test_get_u32_rejects_negative_and_overflow() {
+        assert_eq!(get_u32(Some(&Value::I8(-1))), None);
+        assert_eq!(get_u32(Some(&Value::I16(-42))), None);
+        assert_eq!(get_u32(Some(&Value::I32(-100))), None);
+        assert_eq!(get_u32(Some(&Value::I64(-1))), None);
+        assert_eq!(get_u32(Some(&Value::I64(u32::MAX as i64 + 1))), None);
+        assert_eq!(get_u32(Some(&Value::U64(u32::MAX as u64 + 1))), None);
+
+        assert_eq!(get_u32(Some(&Value::U8(7))), Some(7));
+        assert_eq!(get_u32(Some(&Value::I8(7))), Some(7));
+        assert_eq!(get_u32(Some(&Value::I32(512))), Some(512));
+        assert_eq!(get_u32(Some(&Value::U64(u32::MAX as u64))), Some(u32::MAX));
+    }
+
+    #[test]
+    fn test_text_and_vision_config_validation() {
+        let mut meta = HashMap::new();
+        meta.insert("gemma-embedding2.block_count".to_string(), Value::U32(6));
+        meta.insert(
+            "gemma-embedding2.embedding_length".to_string(),
+            Value::U32(512),
+        );
+        meta.insert(
+            "gemma-embedding2.feed_forward_length".to_string(),
+            Value::U32(2048),
+        );
+        meta.insert(
+            "gemma-embedding2.attention.head_count".to_string(),
+            Value::U32(4),
+        );
+        meta.insert(
+            "gemma-embedding2.attention.sliding_window".to_string(),
+            Value::U32(1024),
+        );
+
+        let cfg = TextConfig::from_gguf_metadata(&meta).unwrap();
+        assert_eq!(cfg.sliding_window, 512);
+        assert_eq!(cfg.layer_types.len(), 6);
+
+        // Mismatched sliding_window_pattern length must fail
+        meta.insert(
+            "gemma-embedding2.attention.sliding_window_pattern".to_string(),
+            Value::Array(vec![Value::Bool(true), Value::Bool(false)]),
+        );
+        assert!(TextConfig::from_gguf_metadata(&meta).is_err());
+        meta.remove("gemma-embedding2.attention.sliding_window_pattern");
+
+        // Zero attention heads must fail
+        meta.insert(
+            "gemma-embedding2.attention.head_count".to_string(),
+            Value::U32(0),
+        );
+        assert!(TextConfig::from_gguf_metadata(&meta).is_err());
+
+        // VisionConfig / AudioConfig must not divide by zero when head_count == 0
+        let mut vis_meta = HashMap::new();
+        vis_meta.insert("clip.has_vision_encoder".to_string(), Value::Bool(true));
+        vis_meta.insert(
+            "clip.vision.attention.head_count".to_string(),
+            Value::U32(0),
+        );
+        assert!(VisionConfig::from_gguf_metadata(&vis_meta).is_none());
+
+        let mut aud_meta = HashMap::new();
+        aud_meta.insert("clip.has_audio_encoder".to_string(), Value::Bool(true));
+        aud_meta.insert("clip.audio.attention.head_count".to_string(), Value::U32(0));
+        assert!(AudioConfig::from_gguf_metadata(&aud_meta).is_none());
+    }
+
+    #[test]
+    fn test_text_config_from_gguf_metadata() {
+        let mut meta = HashMap::new();
+        meta.insert("gemma-embedding2.block_count".to_string(), Value::U32(6));
+        meta.insert(
+            "gemma-embedding2.embedding_length".to_string(),
+            Value::U32(768),
+        );
+        meta.insert(
+            "gemma-embedding2.feed_forward_length".to_string(),
+            Value::U32(3072),
+        );
+        meta.insert(
+            "gemma-embedding2.attention.head_count".to_string(),
+            Value::U32(8),
+        );
+        meta.insert(
+            "gemma-embedding2.attention.key_length_swa".to_string(),
+            Value::U32(256),
+        );
+        meta.insert(
+            "gemma-embedding2.attention.key_length".to_string(),
+            Value::U32(512),
+        );
+        meta.insert(
+            "gemma-embedding2.attention.head_count_kv".to_string(),
+            Value::Array(vec![
+                Value::U32(2),
+                Value::U32(2),
+                Value::U32(2),
+                Value::U32(2),
+                Value::U32(2),
+                Value::U32(1),
+            ]),
+        );
+        meta.insert(
+            "gemma-embedding2.attention.sliding_window".to_string(),
+            Value::U32(1024),
+        );
+        meta.insert(
+            "gemma-embedding2.rope.freq_base_swa".to_string(),
+            Value::F32(10_000.0),
+        );
+        meta.insert(
+            "gemma-embedding2.rope.freq_base".to_string(),
+            Value::F32(1_000_000.0),
+        );
+        meta.insert(
+            "gemma-embedding2.embedding_length_out".to_string(),
+            Value::U32(768),
+        );
+        meta.insert(
+            "gemma-embedding2.embedding_length_per_layer_input".to_string(),
+            Value::U32(512),
+        );
+        meta.insert(
+            "gemma-embedding2.context_length".to_string(),
+            Value::U32(32768),
+        );
+        meta.insert("tokenizer.ggml.padding_token_id".to_string(), Value::U32(0));
+        meta.insert("tokenizer.ggml.bos_token_id".to_string(), Value::U32(2));
+        meta.insert("tokenizer.ggml.eos_token_id".to_string(), Value::U32(1));
+        meta.insert(
+            "tokenizer.ggml.tokens".to_string(),
+            Value::Array(vec![Value::String("a".to_string()); 128]),
+        );
+
+        let cfg = TextConfig::from_gguf_metadata(&meta).unwrap();
+        assert_eq!(cfg.num_hidden_layers, 6);
+        assert_eq!(cfg.hidden_size, 768);
+        assert_eq!(cfg.intermediate_size, 3072);
+        assert_eq!(cfg.num_attention_heads, 8);
+        assert_eq!(cfg.vocab_size, 128);
+        assert_eq!(cfg.sliding_window, 512);
+        assert_eq!(cfg.max_position_embeddings, 32768);
+        assert_eq!(
+            cfg.layer_types,
+            vec![
+                LayerType::SlidingAttention,
+                LayerType::SlidingAttention,
+                LayerType::SlidingAttention,
+                LayerType::SlidingAttention,
+                LayerType::SlidingAttention,
+                LayerType::FullAttention,
+            ]
+        );
+
+        for i in 0..5 {
+            assert_eq!(cfg.get_head_dim(i), 256);
+            assert_eq!(cfg.get_num_kv_heads(i), 2);
+            assert!((cfg.get_rope_theta(i) - 10_000.0).abs() < 1e-6);
+        }
+        assert_eq!(cfg.get_head_dim(5), 512);
+        assert_eq!(cfg.get_num_kv_heads(5), 1);
+        assert!((cfg.get_rope_theta(5) - 1_000_000.0).abs() < 1e-6);
+        assert!(cfg.per_layer_config.contains_key("05"));
+        assert!(!cfg.per_layer_config.contains_key("00"));
+    }
+
+    #[test]
+    fn test_vision_and_audio_config_from_gguf_metadata() {
+        let empty = HashMap::new();
+        assert!(VisionConfig::from_gguf_metadata(&empty).is_none());
+        assert!(AudioConfig::from_gguf_metadata(&empty).is_none());
+        let mm_empty = MultimodalConfig::from_gguf_metadata(&empty);
+        assert!(mm_empty.vision_config.is_none());
+        assert!(mm_empty.audio_config.is_none());
+
+        let mut meta = HashMap::new();
+        meta.insert("clip.has_vision_encoder".to_string(), Value::Bool(true));
+        meta.insert("clip.vision.embedding_length".to_string(), Value::U32(512));
+        meta.insert(
+            "clip.vision.feed_forward_length".to_string(),
+            Value::U32(2048),
+        );
+        meta.insert("clip.vision.block_count".to_string(), Value::U32(12));
+        meta.insert(
+            "clip.vision.attention.head_count".to_string(),
+            Value::U32(8),
+        );
+        meta.insert("clip.vision.patch_size".to_string(), Value::U32(14));
+        meta.insert("clip.vision.projection_dim".to_string(), Value::U32(256));
+        meta.insert(
+            "clip.vision.attention.layer_norm_epsilon".to_string(),
+            Value::F64(1e-5),
+        );
+
+        meta.insert("clip.has_audio_encoder".to_string(), Value::Bool(true));
+        meta.insert("clip.audio.embedding_length".to_string(), Value::U32(640));
+        meta.insert(
+            "clip.audio.feed_forward_length".to_string(),
+            Value::U32(1920),
+        );
+        meta.insert("clip.audio.block_count".to_string(), Value::U32(6));
+        meta.insert(
+            "clip.audio.attention.head_count".to_string(),
+            Value::U32(10),
+        );
+        meta.insert("clip.audio.num_mel_bins".to_string(), Value::U32(80));
+        meta.insert("clip.audio.projection_dim".to_string(), Value::U32(384));
+        meta.insert(
+            "clip.audio.attention.layer_norm_epsilon".to_string(),
+            Value::F32(1e-5),
+        );
+
+        let mm = MultimodalConfig::from_gguf_metadata(&meta);
+        let vis = mm.vision_config.expect("vision config present");
+        assert_eq!(vis.hidden_size, 512);
+        assert_eq!(vis.intermediate_size, 2048);
+        assert_eq!(vis.num_hidden_layers, 12);
+        assert_eq!(vis.num_attention_heads, 8);
+        assert_eq!(vis.num_key_value_heads, 8);
+        assert_eq!(vis.head_dim, 64);
+        assert_eq!(vis.patch_size, 14);
+        assert_eq!(vis.projection_dim, 256);
+        assert!((vis.rms_norm_eps - 1e-5).abs() < 1e-12);
+
+        let aud = mm.audio_config.expect("audio config present");
+        assert_eq!(aud.hidden_size, 640);
+        assert_eq!(aud.intermediate_size, 1920);
+        assert_eq!(aud.num_hidden_layers, 6);
+        assert_eq!(aud.num_attention_heads, 10);
+        assert_eq!(aud.num_mel_bins, 80);
+        assert_eq!(aud.projection_dim, 384);
+        assert!((aud.rms_norm_eps - 1e-5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_text_config_from_json_nested_and_flat() {
+        let mut rope_parameters = HashMap::new();
+        rope_parameters.insert(
+            "sliding_attention".to_string(),
+            RoPEParameters {
+                rope_theta: 10_000.0,
+                rope_type: "default".to_string(),
+            },
+        );
+        rope_parameters.insert(
+            "full_attention".to_string(),
+            RoPEParameters {
+                rope_theta: 1_000_000.0,
+                rope_type: "default".to_string(),
+            },
+        );
+        let mut per_layer_config = HashMap::new();
+        per_layer_config.insert(
+            "01".to_string(),
+            LayerOverride {
+                head_dim: 16,
+                num_key_value_heads: 1,
+            },
+        );
+
+        let sample = TextConfig {
+            hidden_size: 32,
+            intermediate_size: 64,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: 2,
+            head_dim: 8,
+            vocab_size: 128,
+            embedding_dim: 32,
+            max_position_embeddings: 256,
+            sliding_window: 16,
+            rms_norm_eps: 1e-6,
+            hidden_size_per_layer_input: 16,
+            layer_types: vec![LayerType::SlidingAttention, LayerType::FullAttention],
+            per_layer_config,
+            rope_parameters,
+            pad_token_id: 0,
+            bos_token_id: 2,
+            eos_token_id: 1,
+        };
+
+        let dir = std::env::temp_dir().join(format!("glypr_cfg_json_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let flat_path = dir.join("flat.json");
+        let nested_path = dir.join("nested.json");
+
+        std::fs::write(&flat_path, serde_json::to_string_pretty(&sample).unwrap()).unwrap();
+        let nested_val = serde_json::json!({ "text_config": &sample });
+        std::fs::write(
+            &nested_path,
+            serde_json::to_string_pretty(&nested_val).unwrap(),
+        )
+        .unwrap();
+
+        let flat_cfg = TextConfig::from_json_file(&flat_path).unwrap();
+        let nested_cfg = TextConfig::from_json_file(&nested_path).unwrap();
+
+        assert_eq!(flat_cfg.hidden_size, 32);
+        assert_eq!(nested_cfg.hidden_size, 32);
+        assert_eq!(flat_cfg.get_head_dim(0), 8);
+        assert_eq!(flat_cfg.get_head_dim(1), 16);
+        assert_eq!(nested_cfg.get_num_kv_heads(0), 2);
+        assert_eq!(nested_cfg.get_num_kv_heads(1), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

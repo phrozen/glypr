@@ -153,7 +153,8 @@ pub struct AudioRelPositionalEncoding {
 
 impl AudioRelPositionalEncoding {
     pub fn new(config: &AudioConfig) -> Self {
-        let context_size = config.attention_chunk_size + config.attention_context_left - 1
+        let context_size = config.attention_chunk_size
+            + config.attention_context_left.saturating_sub(1)
             + config.attention_context_right;
         let num_timescales = config.hidden_size / 2;
         let min_timescale = 1.0f64;
@@ -202,11 +203,13 @@ pub struct AudioAttention {
     pub k_proj: ClippableLinearOp,
     pub v_proj: ClippableLinearOp,
     pub post: ClippableLinearOp,
-    pub precomputed_rel_k: Tensor, // [1, num_heads, head_dim, 13] in F32
+    pub precomputed_rel_k: Tensor, // [1, num_heads, head_dim, num_rel_pos] in F32
     pub per_dim_scale: Tensor,     // [head_dim], pre-computed softplus in F32
     pub num_heads: usize,
     pub head_dim: usize,
+    pub chunk_size: usize,
     pub max_past_horizon: usize,
+    pub context_right: usize,
     pub softcap: f64,
     pub q_scale: f64,
     pub k_scale: f64,
@@ -215,6 +218,34 @@ pub struct AudioAttention {
 impl AudioAttention {
     pub fn forward(&self, hidden_states: &Tensor, mask_tensor: &Tensor) -> Result<Tensor> {
         let (batch, seq_len, _hidden_size) = hidden_states.dims3()?;
+
+        #[cfg(feature = "metal")]
+        if hidden_states.device().is_metal()
+            && hidden_states.dtype() == DType::BF16
+            && self.head_dim <= 256
+        {
+            let q = self.q_proj.forward(hidden_states)?;
+            let k = self.k_proj.forward(hidden_states)?;
+            let v = self.v_proj.forward(hidden_states)?;
+            let context_size = self.chunk_size + self.max_past_horizon + self.context_right;
+            let attn_out = crate::metal_kernels::fused_metal_audio_chunked_rel_attn(
+                &q,
+                &k,
+                &v,
+                &self.per_dim_scale,
+                &self.precomputed_rel_k,
+                mask_tensor,
+                self.num_heads,
+                self.head_dim,
+                self.chunk_size,
+                self.max_past_horizon,
+                context_size,
+                self.q_scale,
+                self.k_scale,
+                self.softcap,
+            )?;
+            return self.post.forward(&attn_out);
+        }
 
         let q = self.q_proj.forward(hidden_states)?.to_dtype(DType::F32)?;
         let k = self.k_proj.forward(hidden_states)?.to_dtype(DType::F32)?;
@@ -228,7 +259,12 @@ impl AudioAttention {
         let q_scaled = (q.broadcast_mul(&self.per_dim_scale)? * self.q_scale)?;
         let k_scaled = (k * self.k_scale)?;
 
-        let chunk_size = 12;
+        let chunk_size = self.chunk_size;
+        let pad_left = self.max_past_horizon;
+        let pad_right = self.context_right + chunk_size.saturating_sub(1);
+        let context_size = chunk_size + self.max_past_horizon + self.context_right;
+        let num_rel_pos = self.precomputed_rel_k.dim(3)?;
+
         let num_blocks = seq_len.div_ceil(chunk_size);
         let pad_amount = num_blocks * chunk_size - seq_len;
 
@@ -243,30 +279,30 @@ impl AudioAttention {
             .permute((0, 3, 1, 2, 4))?
             .contiguous()?;
 
-        // 2. Context keys and values: pad 12 on left, 11 on right along sequence dimension
-        let k_padded = k_scaled.pad_with_zeros(1, 12, 11)?;
-        let v_padded = v.pad_with_zeros(1, 12, 11)?;
+        // 2. Context keys and values: pad along sequence dimension
+        let k_padded = k_scaled.pad_with_zeros(1, pad_left, pad_right)?;
+        let v_padded = v.pad_with_zeros(1, pad_left, pad_right)?;
 
         let mut k_blocks_vec = Vec::with_capacity(num_blocks);
         let mut v_blocks_vec = Vec::with_capacity(num_blocks);
         for b in 0..num_blocks {
-            k_blocks_vec.push(k_padded.narrow(1, b * 12, 24)?);
-            v_blocks_vec.push(v_padded.narrow(1, b * 12, 24)?);
+            k_blocks_vec.push(k_padded.narrow(1, b * chunk_size, context_size)?);
+            v_blocks_vec.push(v_padded.narrow(1, b * chunk_size, context_size)?);
         }
-        let k_ctx = Tensor::stack(&k_blocks_vec, 1)?; // [batch, num_blocks, 24, num_heads, head_dim]
-        let v_ctx = Tensor::stack(&v_blocks_vec, 1)?; // [batch, num_blocks, 24, num_heads, head_dim]
+        let k_ctx = Tensor::stack(&k_blocks_vec, 1)?; // [batch, num_blocks, context_size, num_heads, head_dim]
+        let v_ctx = Tensor::stack(&v_blocks_vec, 1)?; // [batch, num_blocks, context_size, num_heads, head_dim]
 
         // 3. matrix_ac
         let k_perm = k_ctx.permute((0, 3, 1, 4, 2))?.contiguous()?;
         let b_h_n = batch * self.num_heads * num_blocks;
         let q_flat_ac = q_blocks.reshape((b_h_n, chunk_size, self.head_dim))?;
-        let k_flat_ac = k_perm.reshape((b_h_n, self.head_dim, 24))?;
+        let k_flat_ac = k_perm.reshape((b_h_n, self.head_dim, context_size))?;
         let matrix_ac = q_flat_ac.matmul(&k_flat_ac)?.reshape((
             batch,
             self.num_heads,
             num_blocks,
             chunk_size,
-            24,
+            context_size,
         ))?;
 
         // 4. matrix_bd (relative position bias using precomputed static rel_k)
@@ -278,18 +314,30 @@ impl AudioAttention {
                 self.head_dim,
             ))?
             .contiguous()?;
-        let bd_flat = q_flat.matmul(&self.precomputed_rel_k)?; // [batch, num_heads, num_blocks * 12, 13]
-        let bd = bd_flat.reshape((batch, self.num_heads, num_blocks, chunk_size, 13))?;
+        let bd_flat = q_flat.matmul(&self.precomputed_rel_k)?; // [batch, num_heads, num_blocks * chunk_size, num_rel_pos]
+        let bd = bd_flat.reshape((batch, self.num_heads, num_blocks, chunk_size, num_rel_pos))?;
 
-        // 5. _rel_shift: pad right by 12, flatten last two dims, slice to 12 * 24, reshape to (12, 24)
-        let bd_padded = bd.pad_with_zeros(4, 0, 12)?; // [batch, num_heads, num_blocks, 12, 25]
-        let bd_flat2 = bd_padded.reshape((batch, self.num_heads, num_blocks, chunk_size * 25))?;
-        let matrix_bd = bd_flat2.narrow(3, 0, chunk_size * 24)?.reshape((
+        // 5. _rel_shift: pad right, flatten last two dims, slice to chunk_size * context_size, reshape
+        let rel_pad = (context_size + 1).checked_sub(num_rel_pos).ok_or_else(|| {
+            candle_core::Error::Msg(format!(
+                "Invalid audio relative position dimension: num_rel_pos={} > context_size+1={}",
+                num_rel_pos,
+                context_size + 1
+            ))
+        })?;
+        let bd_padded = bd.pad_with_zeros(4, 0, rel_pad)?; // [batch, num_heads, num_blocks, chunk_size, context_size + 1]
+        let bd_flat2 = bd_padded.reshape((
+            batch,
+            self.num_heads,
+            num_blocks,
+            chunk_size * (context_size + 1),
+        ))?;
+        let matrix_bd = bd_flat2.narrow(3, 0, chunk_size * context_size)?.reshape((
             batch,
             self.num_heads,
             num_blocks,
             chunk_size,
-            24,
+            context_size,
         ))?;
 
         // 6. Combine and softcap
@@ -306,9 +354,9 @@ impl AudioAttention {
         let attn_probs = candle_nn::ops::softmax(&attn_weights, D::Minus1)?.contiguous()?;
 
         // 9. Multiply values
-        let v_perm = v_ctx.permute((0, 3, 1, 2, 4))?.contiguous()?; // [batch, num_heads, num_blocks, 24, head_dim]
-        let probs_flat = attn_probs.reshape((b_h_n, chunk_size, 24))?;
-        let v_flat = v_perm.reshape((b_h_n, 24, self.head_dim))?;
+        let v_perm = v_ctx.permute((0, 3, 1, 2, 4))?.contiguous()?; // [batch, num_heads, num_blocks, context_size, head_dim]
+        let probs_flat = attn_probs.reshape((b_h_n, chunk_size, context_size))?;
+        let v_flat = v_perm.reshape((b_h_n, context_size, self.head_dim))?;
         let attn_out = probs_flat.matmul(&v_flat)?.reshape((
             batch,
             self.num_heads,
@@ -493,31 +541,40 @@ impl AudioTower {
         // 1. Subsampling convolution down to [1, num_frames / 4, 1024]
         let mut hidden_states = self.subsampler.forward(&input_features)?;
 
-        // 2. Precompute causal sliding window attention mask ONCE for all 12 Conformer layers
+        // 2. Precompute causal sliding window attention mask ONCE for all Conformer layers
         let seq_len = hidden_states.dim(1)?;
-        let chunk_size = 12;
+        let chunk_size = self.config.attention_chunk_size;
+        let max_past_horizon = self.config.attention_context_left.saturating_sub(1);
+        let context_right = self.config.attention_context_right;
+        let context_size = chunk_size + max_past_horizon + context_right;
         let num_blocks = seq_len.div_ceil(chunk_size);
 
-        let mut mask_vec = vec![-1e9f32; num_blocks * chunk_size * 24];
+        let mut mask_vec = vec![-1e9f32; num_blocks * chunk_size * context_size];
         for b in 0..num_blocks {
             for q_idx in 0..chunk_size {
                 let t_q = b * chunk_size + q_idx;
                 if t_q < seq_len {
-                    for c in 0..24 {
-                        let t_k = (b as i32) * 12 - 12 + (c as i32);
+                    for c in 0..context_size {
+                        let t_k = (b as i32) * (chunk_size as i32) - (max_past_horizon as i32)
+                            + (c as i32);
                         if t_k >= 0
                             && (t_k as usize) < seq_len
-                            && (t_k as usize) <= t_q
-                            && (t_q - (t_k as usize)) <= 11
+                            && (t_k as usize) <= t_q + context_right
+                            && t_q.saturating_sub(t_k as usize)
+                                <= max_past_horizon.saturating_sub(1)
                         {
-                            mask_vec[b * chunk_size * 24 + q_idx * 24 + c] = 0.0f32;
+                            mask_vec[b * chunk_size * context_size + q_idx * context_size + c] =
+                                0.0f32;
                         }
                     }
                 }
             }
         }
-        let mask_tensor =
-            Tensor::from_vec(mask_vec, (1, 1, num_blocks, chunk_size, 24), &self.device)?;
+        let mask_tensor = Tensor::from_vec(
+            mask_vec,
+            (1, 1, num_blocks, chunk_size, context_size),
+            &self.device,
+        )?;
 
         // 3. 12 Conformer layers with cached mask
         for layer in &self.layers {
@@ -579,11 +636,30 @@ impl AudioTower {
             input_proj_linear,
         };
 
-        // 2. Relative position encoding
+        // 2. Validate audio config invariants before dividing
+        if config.num_attention_heads == 0 {
+            candle_core::bail!("AudioConfig num_attention_heads must be > 0");
+        }
+        if !config
+            .hidden_size
+            .is_multiple_of(config.num_attention_heads)
+        {
+            candle_core::bail!(
+                "AudioConfig hidden_size ({}) must be divisible by num_attention_heads ({})",
+                config.hidden_size,
+                config.num_attention_heads
+            );
+        }
+        if config.attention_chunk_size == 0 {
+            candle_core::bail!("AudioConfig attention_chunk_size must be > 0");
+        }
+
+        // 3. Relative position encoding
         let rel_pos_enc = AudioRelPositionalEncoding::new(&config);
         let rel_pos_emb = rel_pos_enc.get_embeddings(device, dtype)?;
+        let num_rel_pos = rel_pos_emb.dim(0)?;
 
-        // 3. 12 Conformer layers
+        // 4. Conformer layers
         let head_dim = config.hidden_size / config.num_attention_heads;
         let q_scale = (head_dim as f64).powf(-0.5) / 2.0f64.ln();
         let k_scale = (1.0 + std::f64::consts::E).ln() / 2.0f64.ln();
@@ -678,7 +754,7 @@ impl AudioTower {
                 .forward(&rel_pos_emb)?
                 .to_dtype(DType::F32)?;
             let precomputed_rel_k = rel_k
-                .reshape((13, config.num_attention_heads, head_dim))?
+                .reshape((num_rel_pos, config.num_attention_heads, head_dim))?
                 .permute((1, 2, 0))?
                 .unsqueeze(0)?
                 .contiguous()?;
@@ -693,7 +769,9 @@ impl AudioTower {
                 per_dim_scale: per_dim_scale_f32,
                 num_heads: config.num_attention_heads,
                 head_dim,
+                chunk_size: config.attention_chunk_size,
                 max_past_horizon: config.attention_context_left.saturating_sub(1),
+                context_right: config.attention_context_right,
                 softcap: 50.0,
                 q_scale,
                 k_scale,

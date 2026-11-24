@@ -15,8 +15,6 @@ pub enum AttentionMode {
     /// Dedicated Metal FlashAttention with hardware tile-skipping (0 MB mask overhead).
     #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
     MetalFlash,
-    #[cfg(feature = "cuda-flash-attn")]
-    CudaFlash,
 }
 
 #[allow(clippy::derivable_impls)]

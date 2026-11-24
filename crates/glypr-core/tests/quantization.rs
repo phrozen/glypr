@@ -1,10 +1,11 @@
+mod common;
+
 use anyhow::Result;
-use candle_core::Device;
+use glypr_core::Task;
 use glypr_core::util::{
     binary_cosine_similarity, cosine_similarity, hamming_distance, int8_cosine_similarity,
     quantize_binary, quantize_int8, truncate_mrl,
 };
-use glypr_core::{GlyprEmbedder, Task};
 
 #[test]
 fn test_quantization_unit_invariants() {
@@ -33,19 +34,10 @@ fn test_quantization_unit_invariants() {
 
 #[test]
 fn test_quantization_mrl_parity_across_dimensions() -> Result<()> {
-    let device = if candle_core::utils::metal_is_available() {
-        Device::new_metal(0).unwrap_or(Device::Cpu)
-    } else {
-        Device::Cpu
-    };
-
-    let model_path = glypr_core::hub::resolve_default_gguf()?;
-    if !model_path.exists() {
-        eprintln!("Model not found at {:?}, skipping parity test", model_path);
+    let Some(shared) = common::shared_gguf_bf16_metal()? else {
         return Ok(());
-    }
-
-    let embedder = GlyprEmbedder::load_gguf_bf16(&model_path, &device)?;
+    };
+    let embedder = shared.lock().unwrap_or_else(|e| e.into_inner());
 
     // Define 3 real text items for semantic similarity and ranking tests
     let query = "what is gravitational lensing in astronomy?";

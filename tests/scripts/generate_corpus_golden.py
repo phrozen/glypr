@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Generate Golden Reference vectors for the expanded multi-domain, multilingual corpus."""
 
+import argparse
+from datetime import datetime, timezone
 import os
 import sys
 import json
@@ -8,20 +10,40 @@ import time
 from pathlib import Path
 import numpy as np
 import safetensors.numpy
+import sentence_transformers
 import torch
+import transformers
 
-import sys
 # Ensure tests directory is on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from baseline.embedder import EmbeddingGemmaBaseline
+from baseline.embedder import EmbeddingGemmaBaseline, MODEL_ID
 
 GOLDEN_DIR = Path(__file__).resolve().parent.parent / "golden_vectors"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Torch device to run corpus golden generation on (default: cpu)",
+    )
+    parser.add_argument(
+        "--dtype",
+        default="float32",
+        choices=["float32", "bfloat16"],
+        help="Model torch dtype (default: float32)",
+    )
+    return parser.parse_args()
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 def run():
+    args = parse_args()
+    torch_dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
+
     corpus_path = GOLDEN_DIR / "corpus_8k.json"
     if not corpus_path.exists():
         print(f"Error: {corpus_path} not found. Run generate_corpus.py first.")
@@ -33,10 +55,10 @@ def run():
     entries = corpus_data["entries"]
     print(f"Loaded {len(entries)} corpus entries from {corpus_path}")
 
-    device = "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"
-    print(f"Initializing EmbeddingGemmaBaseline on {device} (bfloat16)...")
+    device = args.device
+    print(f"Initializing EmbeddingGemmaBaseline on {device} ({args.dtype})...")
     t0 = time.perf_counter()
-    embedder = EmbeddingGemmaBaseline(mode="text_only", device=device, torch_dtype=torch.bfloat16)
+    embedder = EmbeddingGemmaBaseline(mode="text_only", device=device, torch_dtype=torch_dtype)
     print(f"Loaded baseline in {time.perf_counter() - t0:.2f} s")
 
     dimensions = [768, 512, 256, 128]
@@ -149,17 +171,32 @@ def run():
             }
             print(f"  Lang [{lang:2s}]: Pos = {pos_sim:.4f} | Neg = {neg_sim:.4f} | Margin = {margin:+.4f}")
 
-    # Save safetensors
+    provenance = {
+        "model_id": MODEL_ID,
+        "dtype": args.dtype,
+        "device": device,
+        "transformers_version": transformers.__version__,
+        "sentence_transformers_version": sentence_transformers.__version__,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    safetensors_metadata = {
+        "schema_version": "2",
+        **{k: str(v) for k, v in provenance.items()},
+    }
+
+    # Save safetensors with provenance metadata header
     weights_path = GOLDEN_DIR / "corpus_8k_vectors.safetensors"
-    safetensors.numpy.save_file(tensors_to_save, str(weights_path))
+    safetensors.numpy.save_file(tensors_to_save, str(weights_path), metadata=safetensors_metadata)
     print(f"\n✓ Saved {len(tensors_to_save)} golden tensors to {weights_path}")
 
     # Save manifest
     manifest_path = GOLDEN_DIR / "corpus_8k_manifest.json"
     with open(manifest_path, "w") as f:
         json.dump({
-            "model_id": "google/embeddinggemma-2",
+            "schema_version": 2,
+            "model_id": MODEL_ID,
             "description": "Expanded golden reference oracle embeddings (8k scaling, 10 languages, task prompts)",
+            "provenance": provenance,
             "dimensions": dimensions,
             "entries": manifest_entries,
             "pairwise_evaluations": pairwise_similarities,

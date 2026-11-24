@@ -1,3 +1,4 @@
+use crate::error::{GlyprError, GlyprResult};
 use anyhow::{Result, bail};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use rayon::prelude::*;
@@ -13,14 +14,13 @@ pub const VISION_BUDGET_MIN: usize = 16;
 pub const VISION_BUDGET_MAX: usize = 2048;
 
 /// Validate that a vision token budget is within supported bounds [16..2048]
-pub fn validate_vision_budget(budget: usize) -> Result<()> {
+pub fn validate_vision_budget(budget: usize) -> GlyprResult<()> {
     if !(VISION_BUDGET_MIN..=VISION_BUDGET_MAX).contains(&budget) {
-        bail!(
-            "Vision token budget {} is out of supported range [{}..{}]",
+        return Err(GlyprError::InvalidVisionBudget {
             budget,
-            VISION_BUDGET_MIN,
-            VISION_BUDGET_MAX
-        );
+            min: VISION_BUDGET_MIN,
+            max: VISION_BUDGET_MAX,
+        });
     }
     Ok(())
 }
@@ -148,6 +148,26 @@ const fn make_pixel_norm_lut() -> [f32; 256] {
 
 pub const PIXEL_NORM_LUT: [f32; 256] = make_pixel_norm_lut();
 
+/// Precomputed 256-entry BF16 lookup table matching `half::bf16::from_f32(PIXEL_NORM_LUT[i])`.
+const fn f32_to_bf16_const(x: f32) -> half::bf16 {
+    let bits = x.to_bits();
+    let lsb = (bits >> 16) & 1;
+    let rounding_bias = 0x7fff + lsb;
+    half::bf16::from_bits(((bits + rounding_bias) >> 16) as u16)
+}
+
+const fn make_pixel_norm_lut_bf16() -> [half::bf16; 256] {
+    let mut lut = [half::bf16::ZERO; 256];
+    let mut i = 0;
+    while i < 256 {
+        lut[i] = f32_to_bf16_const(PIXEL_NORM_LUT[i]);
+        i += 1;
+    }
+    lut
+}
+
+pub const PIXEL_NORM_LUT_BF16: [half::bf16; 256] = make_pixel_norm_lut_bf16();
+
 /// Preprocess image matching Google Gemma 4 Vision Image Processor
 pub fn preprocess_image(
     img: &DynamicImage,
@@ -168,13 +188,14 @@ pub fn preprocess_image(
         pooling_kernel_size,
     )?;
 
-    // 2. Resize image using Catmull-Rom bicubic interpolation (matching PIL BICUBIC)
-    let resized = img.resize_exact(
+    // 2. Convert to RGB before resizing to match Python PIL .convert("RGB").resize(...)
+    let rgb_img = DynamicImage::ImageRgb8(img.to_rgb8());
+    let resized = rgb_img.resize_exact(
         target_width as u32,
         target_height as u32,
         FilterType::CatmullRom,
     );
-    let rgb = resized.to_rgb8();
+    let rgb = resized.into_rgb8();
 
     let patch_width = target_width / patch_size;
     let patch_height = target_height / patch_size;
@@ -262,6 +283,157 @@ mod tests {
             assert!((-1.0..=1.0).contains(&v));
         }
 
+        // Verify BF16 LUT matches half::bf16::from_f32 bit-for-bit
+        for i in 0..256 {
+            assert_eq!(
+                PIXEL_NORM_LUT_BF16[i].to_bits(),
+                half::bf16::from_f32(PIXEL_NORM_LUT[i]).to_bits()
+            );
+        }
+
         Ok(())
+    }
+
+    #[test]
+    fn test_get_aspect_ratio_preserving_size_edge_cases() {
+        // 0xN and Nx0 must error
+        assert!(get_aspect_ratio_preserving_size(0, 100, 16, 2520, 3).is_err());
+        assert!(get_aspect_ratio_preserving_size(100, 0, 16, 2520, 3).is_err());
+
+        // Extreme 1000x10 banner (height=1000, width=10) at budget=70 (max_patches=630):
+        // width collapses below 48 and clamps to side_mult=48, height clamps to max_side_length=3360
+        let (h_tall, w_tall) = get_aspect_ratio_preserving_size(1000, 10, 16, 70 * 9, 3).unwrap();
+        assert_eq!(w_tall, 48);
+        assert_eq!(h_tall, 70 * 48);
+        assert_eq!(h_tall % 48, 0);
+        assert_eq!(w_tall % 48, 0);
+
+        // Extreme 10x1000 banner (height=10, width=1000) clamps symmetrically
+        let (h_wide, w_wide) = get_aspect_ratio_preserving_size(10, 1000, 16, 70 * 9, 3).unwrap();
+        assert_eq!(h_wide, 48);
+        assert_eq!(w_wide, 70 * 48);
+
+        // Tiny 16x16 image at budget=16 (max_patches=144) scales cleanly to 192x192
+        let (h_tiny, w_tiny) = get_aspect_ratio_preserving_size(16, 16, 16, 16 * 9, 3).unwrap();
+        assert_eq!((h_tiny, w_tiny), (192, 192));
+
+        // Landscape 1080x1920 vs Portrait 1920x1080 at budget=280 (max_patches=2520)
+        let (lh, lw) = get_aspect_ratio_preserving_size(1080, 1920, 16, 280 * 9, 3).unwrap();
+        let (ph, pw) = get_aspect_ratio_preserving_size(1920, 1080, 16, 280 * 9, 3).unwrap();
+        assert!(lw > lh, "landscape expected lw > lh, got {lh}x{lw}");
+        assert!(ph > pw, "portrait expected ph > pw, got {ph}x{pw}");
+        assert_eq!((lh, lw), (pw, ph));
+        assert_eq!(lh % 48, 0);
+        assert_eq!(lw % 48, 0);
+        assert!((lh / 16) * (lw / 16) <= 280 * 9);
+    }
+
+    #[test]
+    fn test_validate_vision_budget_bounds() {
+        assert!(matches!(
+            validate_vision_budget(15).unwrap_err(),
+            GlyprError::InvalidVisionBudget {
+                budget: 15,
+                min: 16,
+                max: 2048
+            }
+        ));
+        assert!(validate_vision_budget(16).is_ok());
+        assert!(validate_vision_budget(2048).is_ok());
+        assert!(matches!(
+            validate_vision_budget(2049).unwrap_err(),
+            GlyprError::InvalidVisionBudget {
+                budget: 2049,
+                min: 16,
+                max: 2048
+            }
+        ));
+    }
+
+    #[test]
+    fn test_image_preprocessor_matches_golden_json() {
+        #[derive(serde::Deserialize)]
+        struct PreprocessorGolden {
+            image: ImageGolden,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ImageGolden {
+            orig_width: u32,
+            orig_height: u32,
+            budget: usize,
+            target_width: usize,
+            target_height: usize,
+            patch_width: usize,
+            patch_height: usize,
+            pixel_values: Vec<f32>,
+        }
+
+        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/golden_vectors/preprocessor_golden.json");
+        if !golden_path.exists() {
+            let allow_missing = matches!(
+                std::env::var("GLYPR_ALLOW_MISSING_WEIGHTS")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "1" | "true"
+            );
+            if allow_missing {
+                eprintln!(
+                    "Skipping test_image_preprocessor_matches_golden_json ({} missing and GLYPR_ALLOW_MISSING_WEIGHTS=1)",
+                    golden_path.display()
+                );
+                return;
+            }
+            panic!(
+                "Missing preprocessor golden fixture at {}",
+                golden_path.display()
+            );
+        }
+
+        let raw = std::fs::read_to_string(&golden_path).unwrap();
+        let golden: PreprocessorGolden = serde_json::from_str(&raw).unwrap();
+        let img_meta = golden.image;
+
+        let mut img_buf = RgbImage::new(img_meta.orig_width, img_meta.orig_height);
+        for y in 0..img_meta.orig_height {
+            for x in 0..img_meta.orig_width {
+                let r = ((x * 7) % 256) as u8;
+                let g = ((y * 5) % 256) as u8;
+                let b = (((x + y) * 3) % 256) as u8;
+                img_buf.put_pixel(x, y, image::Rgb([r, g, b]));
+            }
+        }
+
+        let dynamic_img = DynamicImage::ImageRgb8(img_buf);
+        let processed = preprocess_image(&dynamic_img, img_meta.budget, 16, 3).unwrap();
+
+        assert_eq!(processed.target_width, img_meta.target_width);
+        assert_eq!(processed.target_height, img_meta.target_height);
+        assert_eq!(processed.patch_width, img_meta.patch_width);
+        assert_eq!(processed.patch_height, img_meta.patch_height);
+        assert_eq!(processed.pixel_values.len(), img_meta.pixel_values.len());
+
+        let mut max_abs_diff = 0.0f32;
+        for (&got, &expected) in processed
+            .pixel_values
+            .iter()
+            .zip(img_meta.pixel_values.iter())
+        {
+            assert!(got.is_finite(), "non-finite pixel value encountered");
+            max_abs_diff = max_abs_diff.max((got - expected).abs());
+        }
+        assert!(
+            max_abs_diff < 0.025,
+            "image preprocessor max_abs_diff={max_abs_diff:.6} >= 0.025"
+        );
+
+        let cos = crate::cosine_similarity(&processed.pixel_values, &img_meta.pixel_values);
+        assert!(
+            cos >= 0.9999,
+            "image preprocessor cosine similarity {cos:.6} < 0.9999"
+        );
     }
 }

@@ -35,8 +35,12 @@ impl AttentionBackend for StandardAttention {
                 let mut attn_weights = q_chunk.matmul(&k_t)?;
 
                 if let Some(mask) = attention_mask {
-                    let mask_chunk = mask.narrow(2, q_start, q_len)?;
-                    attn_weights = attn_weights.broadcast_add(&mask_chunk)?;
+                    if mask.dim(2)? == 1 {
+                        attn_weights = attn_weights.broadcast_add(mask)?;
+                    } else {
+                        let mask_chunk = mask.narrow(2, q_start, q_len)?;
+                        attn_weights = attn_weights.broadcast_add(&mask_chunk)?;
+                    }
                 }
 
                 let attn_weights_f32 = if orig_dtype != DType::F32 {

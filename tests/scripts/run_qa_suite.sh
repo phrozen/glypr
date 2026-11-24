@@ -1,27 +1,65 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
+TIER="tier1"
+for arg in "$@"; do
+  case "$arg" in
+    --tier1)
+      TIER="tier1"
+      ;;
+    --tier2)
+      TIER="tier2"
+      ;;
+    -h|--help)
+      echo "Usage: $0 [--tier1 | --tier2]"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      echo "Usage: $0 [--tier1 | --tier2]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+run_step() {
+  local label="$1"
+  shift
+  local start_ts=$SECONDS
+  echo -e "\n==> ${label}"
+  "$@"
+  local elapsed=$((SECONDS - start_ts))
+  echo "    [done in ${elapsed}s]"
+}
+
+SUITE_START=$SECONDS
+
 echo "================================================================================"
-echo "                   GLYPR E2E QA & PARITY VERIFICATION SUITE                     "
+echo "                   GLYPR QA & PARITY VERIFICATION SUITE (${TIER})               "
 echo "================================================================================"
 
-# 1. Environment & HF Cache Verification
-echo -e "\n[1/4] Verifying HF Cache Resolution & Python Tools..."
-uv run python tests/scripts/verify_cache.py
+# Tier 1: Golden integrity, full Apple Silicon compile check, fast tests
+run_step "[Tier 1] Verify golden vector integrity" \
+  uv run python tests/scripts/verify_goldens.py
 
-# 2. Python Unit & MRL Tests
-echo -e "\n[2/4] Running Python Baseline Tests..."
-uv run pytest tests/test_baseline.py
+run_step "[Tier 1] Cargo check workspace (metal,metal-flash-attn,ane)" \
+  cargo check --locked --workspace --all-targets --features metal,metal-flash-attn,ane,accelerate
 
-# 3. Build & Lint Verification
-echo -e "\n[3/4] Verifying Cargo Checks & Zero-Warning Hygiene..."
-cargo check --all --tests
-cargo check --all --examples --features metal
+run_step "[Tier 1] Cargo test workspace (metal,metal-flash-attn,ane)" \
+  cargo test --locked --workspace --features metal,metal-flash-attn,ane,accelerate
 
-# 4. Full Rust Test Suite (CPU SIMD, Golden Parity, Corpus Parity, Multimodal Parity)
-echo -e "\n[4/4] Running Full Test Suite on Apple Silicon (Release + Metal + FlashAttn)..."
-cargo test --all --release --features metal,metal-flash-attn -- --nocapture
+if [[ "$TIER" == "tier2" ]]; then
+  run_step "[Tier 2] Cargo ignored heavy parity tests (release + metal,metal-flash-attn,ane)" \
+    cargo test --locked --workspace --release --features metal,metal-flash-attn,ane,accelerate -- --ignored
 
+  run_step "[Tier 2] Python baseline pytest suite" \
+    uv run pytest tests/test_baseline.py
+
+  run_step "[Tier 2] Live warm differential parity (Rust server vs Python baseline)" \
+    uv run python tests/scripts/differential_parity.py
+fi
+
+TOTAL_ELAPSED=$((SECONDS - SUITE_START))
 echo -e "\n================================================================================"
-echo "          ✓ ALL QA SUITE CHECKS & GOLDEN PARITY TESTS PASSED (> 0.999)          "
+echo "          ✓ ALL ${TIER} QA CHECKS PASSED (elapsed: ${TOTAL_ELAPSED}s)"
 echo "================================================================================"

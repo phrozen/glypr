@@ -47,6 +47,44 @@ fn load_gguf_linear_op<R: std::io::Read + std::io::Seek>(
     LinearOp::from_gguf_tensor(content, reader, name, device, dtype)
 }
 
+fn build_ropes(config: &TextConfig, device: &Device) -> Result<(RotaryEmbedding, RotaryEmbedding)> {
+    let sliding_idx = config
+        .layer_types
+        .iter()
+        .position(|&lt| lt == LayerType::SlidingAttention);
+    let (sliding_head_dim, sliding_theta) = match sliding_idx {
+        Some(idx) => (config.get_head_dim(idx), config.get_rope_theta(idx)),
+        None => (
+            config.head_dim,
+            config
+                .rope_parameters
+                .get("sliding_attention")
+                .map(|p| p.rope_theta)
+                .unwrap_or(10_000.0),
+        ),
+    };
+
+    let full_idx = config
+        .layer_types
+        .iter()
+        .position(|&lt| lt == LayerType::FullAttention);
+    let (full_head_dim, full_theta) = match full_idx {
+        Some(idx) => (config.get_head_dim(idx), config.get_rope_theta(idx)),
+        None => (
+            config.head_dim,
+            config
+                .rope_parameters
+                .get("full_attention")
+                .map(|p| p.rope_theta)
+                .unwrap_or(1_000_000.0),
+        ),
+    };
+
+    let rope_sliding = RotaryEmbedding::new(sliding_head_dim, sliding_theta, device)?;
+    let rope_full = RotaryEmbedding::new(full_head_dim, full_theta, device)?;
+    Ok((rope_sliding, rope_full))
+}
+
 impl EmbeddingGemma2Model {
     pub fn from_safetensors(
         tensors: &SafeTensors,
@@ -54,6 +92,9 @@ impl EmbeddingGemma2Model {
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
+        config
+            .validate()
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         let load_tensor = |name: &str| -> Result<Tensor> {
             let view = tensors
                 .tensor(name)
@@ -105,8 +146,7 @@ impl EmbeddingGemma2Model {
         );
 
         // 3. RoPE
-        let rope_sliding = RotaryEmbedding::new(config.head_dim, config.get_rope_theta(0), device)?;
-        let rope_full = RotaryEmbedding::new(512, config.get_rope_theta(5), device)?;
+        let (rope_sliding, rope_full) = build_ropes(&config, device)?;
 
         // 4. Layers
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
@@ -248,9 +288,37 @@ impl EmbeddingGemma2Model {
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
+        config
+            .validate()
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         // 1. Embeddings
-        let embed_qt = content.tensor(reader, "token_embd.weight", device)?;
-        let embed_weight = embed_qt.dequantize(device)?.to_dtype(dtype)?;
+        #[cfg(feature = "metal")]
+        let embed_weight = if device.is_metal()
+            && dtype == DType::BF16
+            && config.hidden_size.is_multiple_of(32)
+            && content
+                .tensor_infos
+                .get("token_embd.weight")
+                .is_some_and(|info| {
+                    info.ggml_dtype == candle_core::quantized::GgmlDType::Q8_0
+                        && info.shape.rank() == 2
+                }) {
+            let info = &content.tensor_infos["token_embd.weight"];
+            let (vocab_size, hidden_size) = info.shape.dims2()?;
+            let qt_cpu = content.tensor(reader, "token_embd.weight", &Device::Cpu)?;
+            let raw_bytes = qt_cpu.data()?;
+            let row_bytes = (hidden_size / 32) * 34;
+            let q8_bytes = Tensor::from_slice(&raw_bytes, (vocab_size, row_bytes), device)?;
+            crate::metal_kernels::dequantize_q8_0_to_bf16(&q8_bytes, vocab_size, hidden_size)?
+        } else {
+            let embed_qt = content.tensor(reader, "token_embd.weight", device)?;
+            embed_qt.dequantize(device)?.to_dtype(dtype)?
+        };
+        #[cfg(not(feature = "metal"))]
+        let embed_weight = {
+            let embed_qt = content.tensor(reader, "token_embd.weight", device)?;
+            embed_qt.dequantize(device)?.to_dtype(dtype)?
+        };
         let embed_tokens = Embedding::new(embed_weight, config.hidden_size);
         let embed_scale = (config.hidden_size as f64).sqrt();
 
@@ -275,8 +343,7 @@ impl EmbeddingGemma2Model {
         );
 
         // 3. RoPE
-        let rope_sliding = RotaryEmbedding::new(config.head_dim, config.get_rope_theta(0), device)?;
-        let rope_full = RotaryEmbedding::new(512, config.get_rope_theta(5), device)?;
+        let (rope_sliding, rope_full) = build_ropes(&config, device)?;
 
         // 4. Layers
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
@@ -525,10 +592,19 @@ impl EmbeddingGemma2Model {
             );
         }
 
-        // 2. Per-layer embeddings: [24, batch, seq_len, 512]
-        // Single-pass 4D PLE projection, scaling, RMSNorm, and permutation so each layer's
-        // .get(i) slice is already normalized and 100% contiguous.
-        let per_layer_inputs = self.ple.project_and_norm_per_layer(inputs_embeds)?;
+        // 2. Per-layer embeddings:
+        // Hybrid threshold (OPT-05):
+        // - For short inputs (B * S < 1024): single-pass 4D PLE projection + fused transpose kernel.
+        // - For long inputs (B * S >= 1024): per-layer PLE slice projection inside the layer loop,
+        //   capping PLE transient VRAM from [24, B, S, 512] (402.6 MB @ 8K) to [B, S, 512] (16.8 MB).
+        const PER_LAYER_PLE_THRESHOLD: usize = 1024;
+        let use_per_layer_ple =
+            batch * seq_len >= PER_LAYER_PLE_THRESHOLD && self.ple.has_layer_views();
+        let per_layer_inputs = if use_per_layer_ple {
+            None
+        } else {
+            Some(self.ple.project_and_norm_per_layer(inputs_embeds)?)
+        };
 
         // 3. Precompute RoPE (cos, sin)
         let (cos_sliding, sin_sliding) =
@@ -538,7 +614,7 @@ impl EmbeddingGemma2Model {
             .rope_full
             .get_cos_sin(seq_len, &self.device, self.dtype)?;
 
-        // 4. Create attention masks
+        // 4. Create attention masks (reusing full_mask for sliding_mask when sliding_window_for_mask is None)
         let is_chunked_or_flash = !self.layers.is_empty()
             && match self.layers[0].self_attn.attention_mode {
                 crate::attention::AttentionMode::ChunkedSliding => true,
@@ -551,9 +627,12 @@ impl EmbeddingGemma2Model {
         } else {
             Some(self.config.sliding_window)
         };
-        let sliding_mask =
-            self.build_attention_mask(batch, seq_len, sliding_window_for_mask, attention_mask)?;
         let full_mask = self.build_attention_mask(batch, seq_len, None, attention_mask)?;
+        let sliding_mask = if sliding_window_for_mask.is_none() {
+            full_mask.clone()
+        } else {
+            self.build_attention_mask(batch, seq_len, sliding_window_for_mask, attention_mask)?
+        };
 
         // 5. Execute 24 layers
         let mut hidden_states = inputs_embeds.clone();
@@ -562,7 +641,10 @@ impl EmbeddingGemma2Model {
             let layer_type = self.config.layer_types[i];
 
             // Contiguous zero-copy slice for layer i: [batch, seq_len, 512]
-            let per_layer_slice = per_layer_inputs.get(i)?;
+            let per_layer_slice = match &per_layer_inputs {
+                Some(ple_all) => ple_all.get(i)?,
+                None => self.ple.project_and_norm_layer(inputs_embeds, i)?,
+            };
 
             let (cos, sin, mask) = match layer_type {
                 LayerType::SlidingAttention => (&cos_sliding, &sin_sliding, sliding_mask.as_ref()),
@@ -657,6 +739,15 @@ impl EmbeddingGemma2Model {
         attention_mask: Option<&Tensor>,
         truncate_dim: Option<usize>,
     ) -> Result<Tensor> {
+        #[cfg(feature = "metal")]
+        if token_embeddings.device().is_metal() && token_embeddings.dtype() == DType::BF16 {
+            return crate::metal_kernels::fused_metal_pool_and_l2norm(
+                token_embeddings,
+                attention_mask,
+                truncate_dim,
+            );
+        }
+
         let (_batch, _seq_len, hidden_dim) = token_embeddings.dims3()?;
         let orig_dtype = token_embeddings.dtype();
 
@@ -688,13 +779,20 @@ impl EmbeddingGemma2Model {
         let mut normalized_f32 = pooled_f32.broadcast_div(&norm_clamped)?;
 
         // Optional Matryoshka dimension truncation
-        if let Some(dim) = truncate_dim
-            && dim < hidden_dim
-        {
-            let sliced = normalized_f32.narrow(D::Minus1, 0, dim)?;
-            let slice_norm = sliced.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?;
-            let slice_norm_clamped = Tensor::clamp(&slice_norm, 1e-12f32, f32::MAX)?;
-            normalized_f32 = sliced.broadcast_div(&slice_norm_clamped)?;
+        if let Some(dim) = truncate_dim {
+            if dim == 0 || dim > hidden_dim {
+                candle_core::bail!(
+                    "Invalid Matryoshka truncate_dim {}: must be in 1..={}",
+                    dim,
+                    hidden_dim
+                );
+            }
+            if dim < hidden_dim {
+                let sliced = normalized_f32.narrow(D::Minus1, 0, dim)?;
+                let slice_norm = sliced.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?;
+                let slice_norm_clamped = Tensor::clamp(&slice_norm, 1e-12f32, f32::MAX)?;
+                normalized_f32 = sliced.broadcast_div(&slice_norm_clamped)?;
+            }
         }
 
         if orig_dtype != DType::F32 {

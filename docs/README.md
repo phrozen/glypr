@@ -133,42 +133,40 @@ print("Vector dimension:", truncated_emb.shape[-1])  # 512
 
 ### Native Rust Engine (`glypr-core`) Quickstart
 
-High-performance, zero-overhead Rust inference on Apple Silicon Metal and Linux/macOS CPU:
+High-performance, zero-overhead Rust inference on Apple Silicon Metal, Apple Neural Engine (ANE), and Linux/macOS CPU:
 
 ```rust
-use candle_core::Device;
 use glypr_core::{
-    cosine_similarity, truncate_mrl, AttentionMode, GlyprEmbedder, ModalityPart, Task,
-    VISION_BUDGET_DEFAULT,
+    cosine_similarity, truncate_mrl, AttentionMode, GlyprEmbedder, GlyprResult, Task,
 };
 
-// Initialize Metal GPU device (or Device::Cpu with pulp SIMD acceleration)
-let device = Device::new_metal(0)?;
+fn main() -> GlyprResult<()> {
+    // Auto-detect Metal GPU (or CPU SIMD) and load canonical Q8_0 GGUF (295.5 MB disk)
+    let embedder = GlyprEmbedder::builder()
+        .gguf_canonical(true)
+        .attention_mode(AttentionMode::MetalFlash) // 564.91 ms @ 8K tokens (Q8_0), 620.81 ms (BF16)
+        .build()?;
 
-// Load quantized GGUF (295.5 MB footprint) with embedded tokenizer
-let mut embedder = GlyprEmbedder::load_gguf_q8("embeddinggemma-2-Q8_0.gguf", &device)?;
+    // 1. Embed query with strongly-typed Task conditioning (returns native 768d vector)
+    let query_vec = embedder.embed_text(
+        "Fast inverse square root algorithm",
+        Task::CodeRetrieval,
+    )?;
 
-// Enable hardware-fused Metal FlashAttention (zero-copy GQA, 868 ms @ 8k tokens, beats PyTorch MPS)
-embedder.set_attention_mode(AttentionMode::MetalFlash);
+    // 2. Embed document passage with optional title conditioning
+    let doc_vec = embedder.embed_text(
+        "float Q_rsqrt(float number) { long i; ... }",
+        Task::Document { title: Some("Q_rsqrt.c") },
+    )?;
 
-// 1. Embed query with strongly-typed Task conditioning (returns native 768d vector)
-let query_vec = embedder.embed_text(
-    "Fast inverse square root algorithm",
-    Task::CodeRetrieval,
-)?;
+    // 3. Truncate to 512d with O(K) L2 re-normalization
+    let query_512 = truncate_mrl(&query_vec, 512)?;
+    let doc_512 = truncate_mrl(&doc_vec, 512)?;
 
-// 2. Embed document passage with optional title conditioning
-let doc_vec = embedder.embed_text(
-    "float Q_rsqrt(float number) { long i; ... }",
-    Task::Document { title: Some("Q_rsqrt.c") },
-)?;
-
-// 3. Truncate to 512d with O(K) L2 re-normalization via dedicated util module
-let query_512 = truncate_mrl(&query_vec, 512)?;
-let doc_512 = truncate_mrl(&doc_vec, 512)?;
-
-let sim = cosine_similarity(&query_512, &doc_512);
-println!("Cosine Similarity (512d): {:.4}", sim);
+    let sim = cosine_similarity(&query_512, &doc_512);
+    println!("Cosine Similarity (512d): {:.4}", sim);
+    Ok(())
+}
 ```
 
 ### Native Rust CLI & OpenAI-Compatible HTTP Serving Engine (`glypr`)
@@ -177,12 +175,16 @@ println!("Cosine Similarity (512d): {:.4}", sim);
 # 1. Pre-fetch canonical models into local Hugging Face cache
 glypr pull
 
-# 2. Inspect active device, cache, and attention backend
+# 2. Inspect active device, cache, GGUF headers, or CoreML .mlmodelc bundles
 glypr info
+glypr inspect models/coreml/gemma2_text_backbone_s512_w8a16.mlmodelc
 
-# 3. Embed text or multimodal sequences (multimodal requires explicit mmproj flag)
+# 3. Embed text, batch/JSONL streams, or multimodal sequences (ANE & mmproj opt-in)
 glypr embed "What is quantum mechanics?"
+printf "First query\nSecond query\n" | glypr embed --batch -o json
+printf '{"text":"What causes aurora?","task":"SearchQuery"}\n' | glypr embed --jsonl
 glypr --bf16-mmproj embed "Card illustration:" ./card.png --image-token-budget 140
+glypr --ane embed ./portrait.png --image-token-budget 140
 
 # 4. Launch high-throughput OpenAI-compatible HTTP server with dynamic batching
 glypr serve --port 8080 --max-batch-size 32

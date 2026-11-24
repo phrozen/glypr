@@ -1,56 +1,43 @@
 #![cfg(feature = "coreml")]
 
-use candle_core::{DType, Device};
-use glypr_core::{GlyprEmbedder, MediaItem, VisionBackendPolicy, coreml::CoreMLComputeUnits, hub};
+mod common;
+
+use glypr_core::{MediaItem, VisionBackendPolicy, coreml::CoreMLComputeUnits, hub};
 use image::DynamicImage;
-use std::path::Path;
+use std::path::PathBuf;
 
-fn setup_embedder() -> anyhow::Result<GlyprEmbedder> {
-    let device = if candle_core::utils::metal_is_available() {
-        Device::new_metal(0).unwrap_or(Device::Cpu)
-    } else {
-        Device::Cpu
-    };
-    let dtype = if device.is_metal() {
-        DType::BF16
-    } else {
-        DType::F32
-    };
-
-    let base_gguf = hub::resolve_default_gguf()?;
-    let mut embedder = GlyprEmbedder::load_gguf(&base_gguf, &device, dtype)?;
-
-    // Attach GGUF multimodal projector if available
-    if let Ok(mmproj) = hub::resolve_default_mmproj()
-        && mmproj.exists()
+fn find_coreml_dir() -> Option<PathBuf> {
+    if let Some(dir) = hub::resolve_coreml_dir(None)
+        && dir.is_dir()
     {
-        let _ = embedder.attach_multimodal_projector(&mmproj);
+        return Some(dir);
     }
-
-    // Attach CoreML Vision Tower
-    let candidates = ["models/coreml", "../../models/coreml"];
-    for cand in candidates {
-        if Path::new(cand).is_dir() {
-            let _ = embedder.attach_coreml_vision_dir(cand, CoreMLComputeUnits::CpuAndNeuralEngine);
-            break;
+    for cand in ["models/coreml", "../../models/coreml"] {
+        let p = PathBuf::from(cand);
+        if p.is_dir() {
+            return Some(p);
         }
     }
-
-    Ok(embedder)
+    None
 }
 
 #[test]
 fn test_hybrid_ane_vision_with_gpu_backbone() -> anyhow::Result<()> {
-    let mut embedder = match setup_embedder() {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("Skipping test: setup failed ({})", e);
-            return Ok(());
-        }
+    let Some(coreml_dir) = find_coreml_dir() else {
+        eprintln!("Skipping test: CoreML vision directory not found");
+        return Ok(());
     };
 
-    if embedder.coreml_vision.is_none() {
-        eprintln!("Skipping test: CoreML vision models not found");
+    let Some(shared) = common::shared_gguf_bf16_metal()? else {
+        return Ok(());
+    };
+    let mut embedder = shared.lock().unwrap_or_else(|e| e.into_inner());
+
+    if embedder.coreml_vision().is_none()
+        && let Err(e) =
+            embedder.attach_coreml_vision_dir(&coreml_dir, CoreMLComputeUnits::CpuAndNeuralEngine)
+    {
+        eprintln!("Skipping test: failed to load CoreML vision models ({e})");
         return Ok(());
     }
 
@@ -64,43 +51,29 @@ fn test_hybrid_ane_vision_with_gpu_backbone() -> anyhow::Result<()> {
         budget: Some(140),
     }];
 
-    println!(
-        "Running hybrid multimodal embedding (Vision on ANE, Backbone on {:?})...",
-        embedder.device
-    );
     let emb_hybrid = embedder.embed_composite(Some("Describe the image"), &items, None)?;
 
     assert_eq!(emb_hybrid.len(), 768);
     let norm: f32 = emb_hybrid.iter().map(|&x| x * x).sum::<f32>().sqrt();
-    println!(
-        "✓ Hybrid ANE embedding generated: length {}, L2 norm {:.6}",
-        emb_hybrid.len(),
-        norm
-    );
     assert!(
         (norm - 1.0).abs() < 1e-3,
-        "Embedding norm should be ~1.0 in BF16, got {}",
-        norm
+        "Embedding norm should be ~1.0 in BF16, got {norm}"
+    );
+    assert!(
+        emb_hybrid.iter().all(|x| x.is_finite()),
+        "Hybrid embedding contains non-finite values"
     );
 
-    let nan_count = emb_hybrid.iter().filter(|x| x.is_nan()).count();
-    assert_eq!(nan_count, 0, "Hybrid embedding contains NaNs");
-
     // 2. If GGUF mmproj is attached, compare cosine similarity between ANE and GPU mmproj
-    if embedder.multimodal.is_some() {
+    if embedder.multimodal().is_some() {
         embedder.set_vision_backend(VisionBackendPolicy::Metal);
-        println!("Running pure Metal/CPU multimodal embedding for parity check...");
         let emb_metal = embedder.embed_composite(Some("Describe the image"), &items, None)?;
+        embedder.set_vision_backend(VisionBackendPolicy::Auto);
 
         let sim = glypr_core::cosine_similarity(&emb_hybrid, &emb_metal);
-        println!(
-            "✓ Parity between Hybrid ANE and Pure Metal/CPU: {:.6} Cosine Similarity",
-            sim
-        );
         assert!(
             sim > 0.995,
-            "Hybrid ANE vs Metal parity failed: {} <= 0.995",
-            sim
+            "Hybrid ANE vs Metal parity failed: {sim} <= 0.995"
         );
     }
 

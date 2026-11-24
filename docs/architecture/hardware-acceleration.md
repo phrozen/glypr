@@ -58,7 +58,7 @@ K += tidl.z * params->K_strides[0] + kv_head_idx * params->K_strides[1];
 V += tidl.z * params->V_strides[0] + kv_head_idx * params->V_strides[1];
 ```
 
-**Empirical Impact:** Eliminating `repeat_kv`, fusing backbone operations, and employing zero-VRAM-overhead weight concatenation views dropped peak Metal VRAM at 8,192 tokens from **$4,079.5\text{ MB} \to 1,473.5\text{ MB}$ (BF16) / $1,582.7\text{ MB}$ (Q8_0)** (**$-79.1\%$ transient VRAM reduction**).
+**Empirical Impact:** Eliminating `repeat_kv`, fusing backbone operations, and employing zero-VRAM-overhead weight concatenation views dropped peak Metal VRAM at 8,192 tokens from **$4,079.5\text{ MB}$** down to **$1,473.5\text{ MB}$** (`v0.3.0`) and **$1,177.5\text{ MB}$ (BF16) / $1,102.8\text{ MB}$ (Q8_0)** in `v0.4.0` (with only **$512.0\text{ MB}$ / $496.0\text{ MB}$** transient VRAM).
 
 
 ---
@@ -235,37 +235,37 @@ Processes gate and up tensors in-place using SIMD lane unrolling:
 
 ---
 
-### C. Kernel Microbenchmark Results
+### C. Kernel Microbenchmark Results (`v0.4.0`, `--features accelerate`)
 
-Benchmarked across 100 warm iterations on full Gemma-2-2B layer dimensions ($512$ tokens, $D_{\text{model}} = 2304$, $D_{\text{ffn}} = 9216$):
+Benchmarked on full Gemma-2 layer dimensions ($512$ tokens, $D_{\text{model}} = 2304$, $D_{\text{ffn}} = 9216$) with Rayon + `pulp` SIMD and optional Apple Accelerate (`vvtanhf`):
 
-| Operation | Input Dimensions | Candle CPU Baseline | Pulp SIMD (Rayon) | Speedup | Intermediate Allocations |
+| Operation | Input Dimensions | Candle CPU Baseline | Pulp SIMD (Rayon + Accelerate) | Speedup | Intermediate Allocations |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **RMSNorm** | $512 \times 2,304$ | $0.340\text{ ms}$ | **$0.219\text{ ms}$** | **$1.55\times$** | **0** (vs 5 baseline) |
-| **GeGLU** | $512 \times 9,216$ | $21.509\text{ ms}$ | **$2.050\text{ ms}$** | **$10.49\times$ 🚀** | **0** (vs 10 baseline) |
+| **RMSNorm** | $512 \times 2,304$ | $0.312\text{ ms}$ | **$0.237\text{ ms}$** | **$1.32\times$** | **0** (vs 5 baseline) |
+| **GeGLU** | $512 \times 9,216$ | $5.583\text{ ms}$ | **$0.676\text{ ms}$** | **$8.26\times$ 🚀** | **0** (vs 10 baseline) |
 
 ---
 
-## 4. End-to-End Latency & Throughput Scaling
+## 4. End-to-End Latency & Throughput Scaling (`v0.4.0` Metal + CPU SIMD Reference)
 
-Empirically measured on Apple Silicon M-series unified hardware across sequence lengths:
+Empirically measured on Apple Silicon M-series unified hardware across sequence lengths (`compare_models --models gguf-bf16,gguf-q8 --device metal --attn flash` for `v0.4.0` Metal columns; CPU SIMD columns from prior reference capture):
 
-| Context Length | Standard Dense (Metal) | Chunked Sliding (Metal) | Metal Flash (BF16) | Metal Flash (Q8_0) | CPU SIMD (BF16) | CPU SIMD (Q8_0) |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **64 tokens** | $10.47\text{ ms}$ | $10.47\text{ ms}$ | **$10.30\text{ ms}$** | **$9.47\text{ ms}$** | $165.9\text{ ms}$ | **$152.9\text{ ms}$** |
-| **256 tokens** | $19.42\text{ ms}$ | $19.41\text{ ms}$ | **$19.09\text{ ms}$** | **$15.88\text{ ms}$** | $316.1\text{ ms}$ | **$326.0\text{ ms}$** |
-| **512 tokens** | $37.59\text{ ms}$ | $40.86\text{ ms}$ | **$28.77\text{ ms}$** | **$24.34\text{ ms}$** | **$591.2\text{ ms}$** | $642.1\text{ ms}$ |
-| **1,024 tokens** | $90.59\text{ ms}$ | $94.74\text{ ms}$ | **$52.28\text{ ms}$** | **$43.93\text{ ms}$** | **$1,231.0\text{ ms}$** | $1,383.0\text{ ms}$ |
-| **2,048 tokens** | $257.64\text{ ms}$ | $203.50\text{ ms}$ | **$107.19\text{ ms}$** | **$87.68\text{ ms}$** | **$2,604.4\text{ ms}$** | $2,977.9\text{ ms}$ |
-| **4,096 tokens** | $830.42\text{ ms}$ | $461.29\text{ ms}$ | **$255.29\text{ ms}$** | **$225.10\text{ ms}$** | **$5,878.8\text{ ms}$** | $6,797.6\text{ ms}$ |
-| **8,192 tokens** | $2,946.44\text{ ms}$ | $1,121.50\text{ ms}$ | **$670.79\text{ ms}$** | **$615.30\text{ ms}$ 🏆** | N/A | N/A |
+| Context Length | Standard Dense (Metal, `v0.4.0`) | Chunked Sliding (BF16, `v0.4.0`) | Chunked Sliding (Q8_0, `v0.4.0`) | Metal Flash (BF16, `v0.4.0`) | Metal Flash (Q8_0, `v0.4.0`) | CPU SIMD (BF16, *prior ref*) | CPU SIMD (Q8_0, *prior ref*) |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **64 tokens** | $10.54\text{ ms}$ | $10.56\text{ ms}$ | $9.42\text{ ms}$ | **$9.94\text{ ms}$** | **$9.25\text{ ms}$** | $165.9\text{ ms}$ | **$152.9\text{ ms}$** |
+| **256 tokens** | $19.64\text{ ms}$ | $19.35\text{ ms}$ | $16.43\text{ ms}$ | **$17.81\text{ ms}$** | **$14.59\text{ ms}$** | $316.1\text{ ms}$ | **$326.0\text{ ms}$** |
+| **512 tokens** | $38.79\text{ ms}$ | $41.08\text{ ms}$ | $35.86\text{ ms}$ | **$27.03\text{ ms}$** | **$22.41\text{ ms}$** | **$591.2\text{ ms}$** | $642.1\text{ ms}$ |
+| **1,024 tokens** | $90.23\text{ ms}$ | $94.16\text{ ms}$ | $84.32\text{ ms}$ | **$47.37\text{ ms}$** | **$39.05\text{ ms}$** | **$1,231.0\text{ ms}$** | $1,383.0\text{ ms}$ |
+| **2,048 tokens** | $258.71\text{ ms}$ | $202.98\text{ ms}$ | $183.51\text{ ms}$ | **$95.29\text{ ms}$** | **$76.91\text{ ms}$** | **$2,604.4\text{ ms}$** | $2,977.9\text{ ms}$ |
+| **4,096 tokens** | $831.79\text{ ms}$ | $459.22\text{ ms}$ | $426.93\text{ ms}$ | **$228.92\text{ ms}$** | **$199.54\text{ ms}$** | **$5,878.8\text{ ms}$** | $6,797.6\text{ ms}$ |
+| **8,192 tokens** | $2,940.54\text{ ms}$ | $1,113.36\text{ ms}$ | $1,055.63\text{ ms}$ | **$620.81\text{ ms}$** | **$564.91\text{ ms}$** 🏆 | N/A | N/A |
 
 > [!NOTE]
-> **PyTorch MPS Comparison at 8,192 Tokens:**
-> - PyTorch MPS Golden Baseline: **$875.00\text{ ms}$**
-> - Glypr Q8_0 M5 Neural Flash: **$615.30\text{ ms}$** (Glypr is faster by **$259.7\text{ ms} / 1.42\text{x}$**)
-> - Glypr BF16 M5 Neural Flash: **$670.79\text{ ms}$** (Glypr is faster by **$204.2\text{ ms} / 1.30\text{x}$**)
-> - Peak Throughput: **$13,314\text{ tok/s}$** (8K context) and **$23,359\text{ tok/s}$** (2K context).
+> **PyTorch MPS Reference Comparison at 8,192 Tokens (`v0.4.0` vs prior MPS capture):**
+> - PyTorch MPS Golden Baseline (*prior reference*): **$845.83\text{ ms} - 875.00\text{ ms}$**
+> - Glypr Q8_0 Metal Flash (`v0.4.0`): **$564.91\text{ ms}$** (`14,502 tok/s`; 292-vec parity Avg **`0.999896`** / Min **`0.999741`**, suite `3.22 s`)
+> - Glypr BF16 Metal Flash (`v0.4.0`): **$620.81\text{ ms}$** (`13,196 tok/s`; 292-vec parity Avg **`0.999967`** / Min **`0.999897`**, suite `3.61 s`)
+> - Peak Throughput (`v0.4.0` Q8_0 Flash): **$26,627\text{ tok/s}$** at 2K context and **$26,221\text{ tok/s}$** at 1K context.
 
 ---
 
@@ -283,14 +283,14 @@ In addition to text backbone acceleration, `glypr-core` optimizes the multimodal
 4. **Fused Metal SDPA Attention (Zero Matrix Materialization):**
    Utilizes hardware-accelerated fused SDPA on Metal GPU, eliminating the $82\text{ MB}$ attention matrix, $160\text{ MB}$ F32 upcast, and softmax allocations across 16 layers (~$3.9\text{ GB}$ transient allocation reduction). CPU track seamlessly falls back to high-precision float32 softmax attention.
 
-### Empirical Multimodal Benchmarks:
+### Empirical Multimodal Vision Benchmarks (`v0.4.0` Metal BF16, 480×680 Card):
 
-| Component / Metric | Baseline (Pre-Optimization) | Phase 2 | Phase 3 Optimized (`main`) | Speedup vs Baseline |
+| Component / Metric | Baseline (Pre-Optimization) | `v0.3.0` Optimized | `v0.4.0` (`bench_multimodal`) | Speedup vs Baseline |
 | :--- | :--- | :--- | :--- | :--- |
-| **Vision Tower Only (Budget 140)** | ~200.0 ms | 7.77 ms | **6.19 ms** | **~32x** |
-| **Vision Tower Only (Budget 280)** | ~1,100.0 ms | 11.01 ms | **9.42 ms** | **~116x** |
-| **Total Card Embedding (Budget 140)** | **269.60 ms** (3.71 cards/sec) | 67.50 ms | **50.87 ms (56.78 ms avg, 17.61 cards/s)** | **5.30x** |
-| **Total Card Embedding (Budget 280)** | **1,260.99 ms** (0.79 cards/sec) | 140.20 ms | **106.07 ms (120.51 ms avg, 8.30 cards/s)** | **11.89x** |
+| **Vision Tower Only (Budget 140)** | ~200.0 ms | 6.19 ms | **5.51 ms** | **~36x** |
+| **Vision Tower Only (Budget 280)** | ~1,100.0 ms | 9.42 ms | **8.72 ms** | **~126x** |
+| **Total Card Embedding (Budget 140)** | **269.60 ms** (3.71 cards/sec) | 50.87 ms (56.78 ms avg) | **56.65 ms avg (warm `50.34–51.16 ms`, 17.65 cards/s)** | **4.76x avg / ~5.3x warm** |
+| **Total Card Embedding (Budget 280)** | **1,260.99 ms** (0.79 cards/sec) | 106.07 ms (120.51 ms avg) | **119.98 ms avg (warm `105.40–106.10 ms`, 8.33 cards/s)** | **10.51x avg / ~11.9x warm** |
 
 ---
 
@@ -300,8 +300,8 @@ Building upon the multimodal projector architecture, `glypr-core` accelerates th
 
 ### Architectural Optimizations:
 1. **Rayon Multi-Core STFT Streaming & OnceLock Filterbank Caching:**
-   - 128-channel HTK Mel filterbank matrix ($257 \times 128$) and 320-point periodic Hann window are allocated and initialized once via `std::sync::OnceLock`.
-   - Radix-2 512-point FFT twiddle factors and 9-bit reversal permutation pairs are precomputed into static lookup tables, eliminating runtime trigonometric calls.
+   - 128-channel HTK Mel filterbank matrix ($257 \times 128$) and `f64`-computed 320-point periodic Hann window are allocated and initialized once via `std::sync::OnceLock`.
+   - Radix-2 512-point FFT twiddle factors (`f64` trig) and 9-bit reversal permutation pairs are precomputed into static lookup tables, eliminating runtime trigonometric calls and preserving exact PyTorch FP32 parity.
    - Independent time frames (up to 1,200+ for speech clips) are processed in parallel across CPU cores using Rayon's `par_chunks_exact_mut`, writing directly into the pre-allocated log-mel spectrogram buffer.
 2. **Precomputed Relative Position Bias (`precomputed_rel_k`):**
    - Relative sinusoidal positional embeddings ($13 \times 1024$) and per-layer relative key projections (`relative_k_proj`) are static across all audio inputs.
@@ -313,26 +313,26 @@ Building upon the multimodal projector architecture, `glypr-core` accelerates th
    - Replaced Candle's default `conv1d` behavior for `groups = 1024` (which dynamically partitioned the sequence into 1,024 chunk views, launched 1,024 single-channel conv kernels, and performed a 1,024-tensor concatenation per layer).
    - Evaluated as a direct fused 5-tap broadcast multiply-accumulate across the channel dimension directly on GPU ($Y = \sum_{k=0}^4 X_k \cdot W_k$), reducing 12,288 tensor allocations and dispatches down to 60 hardware operations per audio pass.
 
-### Empirical Audio Benchmarks (Apple Silicon Metal GPU, BF16):
+### Empirical Audio Benchmarks (`v0.4.0` Apple Silicon Metal GPU, BF16):
 
-| Audio Clip Duration | Metric | Baseline | Phase 2 | Phase 3 Optimized (`main`) | Speedup / Throughput |
+| Audio Clip Duration | Metric | Baseline | `v0.3.0` | `v0.4.0` (`bench_multimodal`) | Speedup / Throughput |
 | :--- | :--- | :---: | :---: | :---: | :---: |
-| **Short (1.0s Synthetic)**<br>*(16,000 samples $\to 25$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 2.30 ms<br>2,896.61 ms<br>**2,946.68 ms** | 0.62 ms<br>5.47 ms<br>23.90 ms | **0.19 ms**<br>**5.16 ms**<br>**21.54 ms (23.07 ms avg)** | **12.1x**<br>**561x 🚀**<br>**43.4x real-time** |
-| **Medium (5.0s Music)**<br>*(80,000 samples $\to 125$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 11.16 ms<br>3,170.47 ms<br>**3,219.75 ms** | 1.20 ms<br>8.33 ms<br>33.50 ms | **0.29 ms**<br>**6.65 ms**<br>**29.85 ms (32.05 ms avg)** | **38.5x**<br>**476x 🚀**<br>**156.0x real-time** |
-| **Long (12.3s Speech)**<br>*(196,348 samples $\to 307$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**End-to-End Latency** | 27.12 ms<br>3,184.88 ms<br>**3,222.78 ms** | 2.65 ms<br>10.70 ms<br>60.00 ms | **0.72 ms**<br>**9.10 ms**<br>**52.99 ms (57.62 ms avg)** | **37.7x**<br>**350x 🚀**<br>**213.0x real-time 🏆** |
+| **Short (1.0s Synthetic)**<br>*(16,000 samples $\to 25$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**Backbone**<br>**End-to-End Avg** | 2.30 ms<br>2,896.61 ms<br>—<br>**2,946.68 ms** | 0.19 ms<br>5.16 ms<br>—<br>23.07 ms | **0.25 ms**<br>**3.80 ms**<br>**18.11 ms**<br>**21.91 ms** | **762× Tower** 🚀<br>**45.6× real-time** |
+| **Medium (5.0s Music)**<br>*(80,000 samples $\to 125$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**Backbone**<br>**End-to-End Avg** | 11.16 ms<br>3,170.47 ms<br>—<br>**3,219.75 ms** | 0.29 ms<br>6.65 ms<br>—<br>32.05 ms | **0.49 ms**<br>**6.01 ms**<br>**23.45 ms**<br>**29.46 ms** | **527× Tower** 🚀<br>**169.7× real-time** |
+| **Long (12.3s Speech)**<br>*(196,348 samples $\to 307$ tokens)* | **STFT Preprocessor**<br>**Audio Tower**<br>**Backbone**<br>**End-to-End Avg** | 27.12 ms<br>3,184.88 ms<br>—<br>**3,222.78 ms** | 0.72 ms<br>9.10 ms<br>—<br>57.62 ms | **0.77 ms**<br>**8.33 ms**<br>**43.41 ms**<br>**51.74 ms** | **382× Tower** 🚀<br>**237.2× real-time 🏆** |
 
 > [!TIP]
 > **Real-Time Factor (RTF):**
-> Embedding a 12.3-second spoken sentence takes **$< 100\text{ ms}$** end-to-end ($\text{RTF} = 0.008\text{x}$), processing auditory inputs over **$125\times$ faster than real-time speech**.
+> In `v0.4.0`, embedding a 12.3-second spoken sentence takes **51.74 ms** end-to-end (**8.33 ms** Conformer Audio Tower), processing auditory inputs **237.2× faster than real-time speech**.
 
 ---
 
 ## 7. Track 3: Apple Neural Engine (ANE) Acceleration Subsystem
 
-Introduced in **v0.3.0**, Glypr integrates native Apple Neural Engine execution for both the 170M SigLIP Vision Tower and the 270M resident Text Backbone via `coreml-native` (under optional `coreml` / `ane` Cargo features).
+Introduced in **v0.3.0** and expanded in **v0.4.0**, Glypr integrates native Apple Neural Engine execution for both the 170M SigLIP Vision Tower and multi-bucket 270M Text Backbones via `coreml-native` (under optional `coreml` / `ane` Cargo features).
 
 ### A. Architectural Rationale: Why ANE?
-While Apple Silicon Metal GPUs deliver massive throughput at long sequence lengths (e.g. 23,000+ tok/s at 2K tokens), GPU invocation incurs non-trivial dispatch latency and unified memory power overhead. For visual feature extraction (e.g., fixed-grid image patches) and resident low-latency text embeddings (e.g. 512-token RAG retrieval queries), the Apple Neural Engine provides:
+While Apple Silicon Metal GPUs deliver massive throughput at long sequence lengths (up to 26,627 tok/s at 2K tokens for Q8_0), GPU invocation incurs non-trivial dispatch latency and unified memory power overhead. For visual feature extraction (fixed-grid image patches) and resident low-latency text embeddings (e.g. 128–1024 token RAG retrieval queries), the Apple Neural Engine provides:
 1. **Ultra-Low Latency:** Dedicated fixed-function systolic array ALUs operating independently from the GPU.
 2. **Zero Unified Memory Contention:** Keeps GPU execution pipelines completely free for concurrent LLM generation or large text context processing.
 3. **Thermal & Energy Efficiency:** Enables persistent background embedding pipelines in local search services and mobile applications without degrading GPU thermal envelopes.
@@ -341,8 +341,9 @@ While Apple Silicon Metal GPUs deliver massive throughput at long sequence lengt
 
 ### B. Clean Module Exporter & W8A16 Quantization (`scripts/export_coreml.py`)
 Standard HuggingFace classes fail Core ML conversion due to dynamic TorchScript graphs. Glypr resolves this with pure PyTorch clean modules:
-- **Direct Safetensors Extraction:** Model parameters are extracted directly from `model.safetensors`.
-- **Static Shape Guarantee:** Compiles models for deterministic hardware shapes ($1,134$ patches for Budget 140 portrait, $2,394$ patches for Budget 280 portrait, $512$ tokens for Text Backbone).
+- **Direct Safetensors Extraction & `config.json` Reading:** Transfers weights from single or sharded Safetensors checkpoints and writes `manifest.json` alongside compiled `.mlmodelc` bundles (cleaning intermediate `.mlpackage` artifacts by default unless `--keep-mlpackage` is passed).
+- **Multi-Aspect Vision Presets (`(patch_h, patch_w)` Grid Keying):** Exports 8 static aspect-ratio presets (`140-portrait`, `140-std`, `140-square`, `140-landscape`, `280-portrait`, `280-std`, `280-square`, `280-landscape`), tagged with `_h{H}_w{W}` and `glypr.patch_height` / `glypr.patch_width` metadata so portrait (`42×27`) and landscape (`27×42`) orientations never collide on patch count.
+- **Multi-Bucket Text Backbone & Sliding-Window Mask (`--text-seq-lens`):** Supports static sequence-length buckets (e.g., `128,512,1024`) with exact `|i - j| <= 512` sliding-window attention masking on the 20 sliding layers when `seq_len > 512`.
 - **Hardware Pooling & Trigonometry:** Replaces runtime loops with native Core ML `AvgPool2d` layers and precomputed 2D/1D RoPE buffers.
 - **W8A16 Linear Symmetric Quantization:** Weights are quantized to INT8 with per-tensor scales while compute activations remain in native Apple Silicon FP16. This strictly avoids BF16 (which is unsupported by ANE ALUs).
 
@@ -350,35 +351,42 @@ Standard HuggingFace classes fail Core ML conversion due to dynamic TorchScript 
 
 ### C. Native Rust Core ML Runtime (`crates/glypr-core/src/coreml/`)
 1. **Zero C++ Interop / Pure Objective-C Runtime:**
-   Implemented via `coreml-native = "0.2.0"`, binding directly into Apple's Objective-C runtime via `objc2 v0.3.2`. This eliminates third-party C++ libraries, static toolchain dependencies, and linking hazards.
-2. **Zero-Copy MultiArray Interop:**
-   Input tensors are wrapped into `BorrowedTensor` directly from raw pixel slices (`image.pixel_values`), avoiding intermediate heap allocations.
-3. **Automatic DType Alignment for Splicing:**
-   Core ML outputs FP32 float buffers. `CoreMLVisionTower::encode_to_tensor_dtype` automatically casts the tensor to the active model `DType` (e.g. BF16 on Metal) before concatenation into the multimodal token stream.
+   Implemented via `coreml-native`, binding directly into Apple's Objective-C runtime via `objc2`. This eliminates third-party C++ libraries, static toolchain dependencies, and linking hazards.
+2. **Zero-Copy MultiArray Interop & Startup Warmup:**
+   Input tensors are wrapped into `BorrowedTensor` directly from raw slices, avoiding intermediate heap allocations, and `GlyprEmbedder::warmup_coreml()` warms up all attached vision and text bundles on boot.
+3. **Deterministic Model Discovery (`resolve_coreml_dir`):**
+   CoreML directories resolve in deterministic order: `--coreml-dir <DIR>` $\to$ `$GLYPR_COREML_DIR` $\to$ `./models/coreml` $\to$ user data/cache dir (`~/Library/Application Support/glypr/coreml` on macOS, or `$XDG_DATA_HOME/glypr/coreml` / `~/.cache/glypr/coreml`). Inspect any `.mlmodelc` bundle directly with `glypr inspect <PATH>`.
 
 ---
 
-### D. Transparent Vision Routing Policy (`VisionBackendPolicy`)
-The embedder manages vision execution through an explicit gating policy:
-- **`Auto` (default):** Automatically routes matching portrait image patch counts (e.g., $1,134$ and $2,394$) to the Apple Neural Engine. If an image produces an unsupported patch count (such as custom budgets or landscape aspect ratios), it seamlessly falls back to the GPU Metal `mmproj` projector.
-- **`AneStrict`:** Enforces execution strictly on ANE, failing fast with descriptive diagnostics if an image dimension cannot run on the Neural Engine.
-- **`Metal`:** Enforces all image encoding to execute on the GPU Metal `mmproj` projector.
-- **Zero-`mmproj` Standalone Image Embedding:** When `--ane` is enabled, images matching compiled dimensions can be embedded directly without downloading or attaching any GGUF `mmproj` file.
+### D. Transparent Vision & Text Routing Policies (`VisionBackendPolicy`, `TextBackendPolicy`)
+The embedder manages vision and pure-text ANE execution through explicit gating policies:
+- **Vision (`--vision-backend <auto|ane|metal>`):**
+  - `Auto` (default): Keyed by `(patch_height, patch_width)` grid, routes matching portrait, square, and landscape grids to ANE and falls back to Metal `mmproj` for unmatched dimensions or budgets.
+  - `AneStrict` (`ane`): Enforces ANE execution and fails fast with supported-grid diagnostics if unmatched.
+  - `Metal` (`metal`): Forces GPU Metal `mmproj` execution.
+  - **Zero-`mmproj` Standalone Image Embedding:** Images matching compiled grids embed via `--ane` without downloading or attaching any GGUF `mmproj` file.
+- **Pure Text (`--text-backend <auto|ane|metal>`):**
+  - `Auto` (default): Routes pure-text sequences in the `[64..=seq_len]` ANE sweet spot with `batch_size <= 4` to the smallest fitting `CoreMLTextBackbone` bucket, keeping `<64` tokens, `>seq_len`, `batch_size > 4`, and multimodal sequences on Metal/CPU.
+  - `AneStrict` (`ane`): Enforces ANE text execution, failing if no CoreML text model is attached or sequence length exceeds the largest loaded bucket.
+  - `Metal` (`metal`): Forces Metal/CPU text execution even when CoreML text models are attached.
 
 ---
 
-### E. Empirical Benchmarks: Apple Neural Engine vs Metal GPU & Python Baseline
+### E. Live CoreML / ANE Parity (`v0.4.0`) & Reference Benchmarks
 
-Tested in native release mode on Apple Silicon hardware against Python PyTorch MPS reference:
+**Verified `v0.4.0` CoreML / ANE Export Parity (`scripts/export_coreml.py`):**
+- **`140-landscape`** (`27×42`, `1134p -> 126t`, `_h27_w42`): ANE vs Metal `mmproj` **`0.999955`** cosine similarity.
+- **`140-square`** (`33×33` `lenna.png`, `1089p -> 121t`, `_h33_w33`): CoreML vs PyTorch FP32 **`0.999267`**; ANE vs Metal `mmproj` **`0.999836`**.
+- **`s1024` Text Backbone** (`gemma2_text_backbone_s1024_w8a16.mlmodelc`, sliding-window mask for `> 512t`): CoreML vs PyTorch FP32 **`0.999684`**; live `doc_science_512t` (522 tokens) ANE vs FP32 golden **`0.999601`** (vs Metal `0.999571`); live `~770t` (`> 512` sliding-window span) ANE vs Metal **`0.999700`**.
 
-#### 1. Vision Tower Execution (Single Image)
-| Modality / Budget | Input Patches | Soft Tokens | Apple Neural Engine (ANE) | Apple Silicon Metal GPU (ViT) | Python Reference (PyTorch MPS) | Speedup vs Python | Speedup vs Metal | Parity vs GPU mmproj |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Budget 140 Portrait** | 1,134 patches | 126 tokens | **11.07 ms (90.3 img/s)** 🚀 | 24.03 ms (41.6 img/s) | 74.66 ms (13.4 img/s) | **6.74× faster** | **2.17× faster** | **`0.999928` Cosine Sim** |
-| **Budget 280 Portrait** | 2,394 patches | 266 tokens | **23.36 ms (42.8 img/s)** 🚀 | 36.54 ms (27.4 img/s) | 73.06 ms (13.7 img/s) | **3.13× faster** | **1.56× faster** | **`0.999928` Cosine Sim** |
+#### Prior Reference Telemetry (`v0.3.0` Vision & 512t Text ANE vs Metal/PyTorch MPS):
+| Modality / Budget | Input Patches | Soft Tokens | Apple Neural Engine *(v0.3.0 ref)* | Metal GPU (ViT) *(v0.3.0 ref)* | Python Reference *(MPS ref)* | Speedup vs Python | Speedup vs Metal |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Budget 140 Portrait** | 1,134 patches | 126 tokens | **11.07 ms (90.3 img/s)** 🚀 | 24.03 ms (41.6 img/s) | 74.66 ms (13.4 img/s) | **6.74× faster** | **2.17× faster** |
+| **Budget 280 Portrait** | 2,394 patches | 266 tokens | **23.36 ms (42.8 img/s)** 🚀 | 36.54 ms (27.4 img/s) | 73.06 ms (13.7 img/s) | **3.13× faster** | **1.56× faster** |
 
-#### 2. Resident Text Backbone (Static 512 Tokens)
-| Sequence Length | Hardware Engine | Compute Units | Latency | Throughput | Python Reference | Speedup vs Python Reference |
+| Sequence Length | Hardware Engine | Compute Units | Latency *(v0.3.0 ref)* | Throughput | Python Reference | Speedup vs Python |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: |
 | **16 tokens** | Apple Silicon Metal GPU | GPU | $4.21\text{ ms}$ | $237.5\text{ q/s}$ | $8.12\text{ ms}$ | 1.93× |
 | **16 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | $8.27\text{ ms}$ | $120.9\text{ q/s}$ | $8.12\text{ ms}$ | 0.98× |
@@ -392,16 +400,16 @@ Tested in native release mode on Apple Silicon hardware against Python PyTorch M
 ### F. Hybrid Multimodal Routing Architecture
 
 When embedding mixed documents (e.g., long 2,048-token context passages accompanied by attached visual card images), neither single-engine approach is optimal:
-- The ANE text model is compiled with a fixed 512-token sequence shape and cannot natively process 2,048 tokens.
+- Static ANE text buckets (e.g. 512 or 1,024 tokens) cannot natively process 2,048 tokens without falling back to Metal GPU (`TextBackendPolicy::Auto`).
 - Running the Vision Tower on Metal GPU consumes GPU cycles and unified memory bandwidth that could otherwise serve long-context attention.
 
 **The Solution: Cross-Engine Asynchronous Routing:**
-1. **Vision Tower Offload to ANE:** The SigLIP vision tower runs on the Neural Engine in **11.07 ms** (140b) or **23.36 ms** (280b), outputting FP32 projector activations directly into unified RAM.
-2. **Text Backbone Routing to Metal GPU:** The 2,048-token document text is tokenized and processed via Glypr's zero-copy FlashAttention Metal pipeline.
-3. **End-to-End Multimodal Execution:**
+1. **Vision Tower Offload to ANE:** The SigLIP vision tower runs on the Neural Engine (**11.07 ms** 140b / **23.36 ms** 280b in `v0.3.0` ref), outputting FP32 projector activations directly into unified RAM.
+2. **Text Backbone Routing to Metal GPU:** The 2,048-token document text is tokenized and processed via Glypr's zero-copy FlashAttention Metal pipeline (**95.29 ms** BF16 / **76.91 ms** Q8_0 in `v0.4.0`).
+3. **End-to-End Hybrid Multimodal Reference (`v0.3.0` capture):**
    - **Python PyTorch MPS:** 165.20 ms
-   - **Pure Metal GPU:** 145.28 ms
-   - **Hybrid Routing (ANE ViT + GPU Backbone):** **122.76 ms** (**1.35× faster than Python baseline**).
+   - **Pure Metal GPU (`v0.3.0` ref):** 145.28 ms
+   - **Hybrid Routing (ANE ViT + GPU Backbone, `v0.3.0` ref):** **122.76 ms** (**1.35× faster than Python baseline**).
 
 ---
 

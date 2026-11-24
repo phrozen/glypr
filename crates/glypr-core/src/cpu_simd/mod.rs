@@ -45,3 +45,14 @@ pub fn cpu_geglu(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
     };
     gate_cont.apply_op2_no_bwd(&up_cont, &CpuGeGLUOp)
 }
+
+/// Fast CPU GeGLU directly on concatenated `[..., 2 * D]` gate_up tensors,
+/// avoiding intermediate `.narrow().contiguous()` copies.
+pub fn cpu_geglu_gate_up(gate_up: &Tensor) -> Result<Tensor> {
+    let cont = if !gate_up.is_contiguous() {
+        gate_up.contiguous()?
+    } else {
+        gate_up.clone()
+    };
+    cont.apply_op1_no_bwd(&CpuGeGLUGateUpOp)
+}

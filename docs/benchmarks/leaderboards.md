@@ -78,90 +78,87 @@ All scores reflect the full-precision (BF16) 768-dimensional model:
 
 To establish ground-truth runtime metrics, `glypr-core` was evaluated against the official PyTorch MPS Golden Oracle on Apple Silicon unified memory using direct Metal hardware queries (`[MTLDevice currentAllocatedSize]`) and POSIX RSS telemetry.
 
-### A. Comprehensive 4-Backend Runtime Matrix (Ground-Truth Empirical Telemetry)
+### A. Comprehensive 4-Backend Runtime Matrix (`v0.4.0` Metal 4 GPU + Prior Hardware References)
 
-The following benchmark matrix compares Python (PyTorch MPS reference baseline) against Glypr's three native acceleration engines across representative real-world workloads:
+The following benchmark matrix summarizes **`v0.4.0`** Metal 4 GPU measurements (`compare_models`, `bench_memory`, `bench_multimodal`) alongside prior Python PyTorch MPS, Apple Neural Engine (ANE), and full-model CPU SIMD reference captures on the same Apple Silicon baseline:
 
-| Workload / Modality | Target Input / Dimensions | Python Reference (PyTorch MPS) | Glypr (Metal 4 GPU) | Glypr (Apple Neural Engine) | Glypr (CPU SIMD) | Speedup vs. Python Reference |
+| Workload / Modality | Target Input / Dimensions | Python Reference *(PyTorch MPS, prior ref)* | Glypr Metal 4 GPU (`v0.4.0`) | Glypr ANE *(prior ref)* | Glypr CPU SIMD *(prior ref)* | Highlight (`v0.4.0` / Ref) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Text @ 512 Tokens** | Standard RAG passage chunk | 24.65 ms | 25.72 ms | **8.27 ms** 🚀 | 497.61 ms | **2.98× faster on ANE** |
-| **Vision @ 140 Budget** | Portrait doc (1,134 patches) | 74.66 ms | 24.03 ms | **11.07 ms** 🚀 | 1,276.56 ms | **6.74× faster on ANE** |
-| **Vision @ 280 Budget** | Standard image (2,394 patches) | 73.06 ms | 36.54 ms | **23.36 ms** 🚀 | 3,757.40 ms | **3.13× faster on ANE** |
-| **Hybrid @ $\le 512$ Tokens** | Query text + 140b image | 74.38 ms | 50.79 ms | **24.67 ms** 🚀 | — | **3.01× faster on ANE** |
-| **Text @ 8,192 Tokens** | Full context window (8K) | 845.83 ms | **644.36 ms** 🏆 | — *(Exceeds 512t limit)* | 6,222.30 ms | **1.31× faster on Metal GPU** |
-| **Vision @ 560 Budget** | High-res inspection (4,788 patches)| 73.84 ms *(Clamped to 280t)* | **86.29 ms** | — *(Fallback to GPU)* | — | **Native Dynamic Budget** |
-| **Hybrid @ $> 512$ Tokens** | 2K doc + 140b image | 165.20 ms | 145.28 ms | **122.76 ms (Hybrid)** ⚡ | — | **1.35× faster on Hybrid Routing** |
-| **Peak Memory @ 8K** | Physical unified memory (RAM+VRAM)| 6,592 MB (6.44 GB) | **1,473 MB (1.44 GB)** | — | **1,135 MB (1.11 GB)** | **5.1 GB saved (-77%)** |
-| **Golden Parity (Cosine)** | 292-vector suite vs Oracle | 1.000000 *(Oracle)* | **0.999951 *(Avg)*** | **0.999928 *(Avg)*** | **0.999943 *(Avg)*** | **Bitwise / Four-9s Parity** |
+| **Text @ 512 Tokens** | Standard RAG passage chunk | 24.65 ms | **22.41 ms** (Q8_0) / **27.03 ms** (BF16) | **8.27 ms** 🚀 | 497.61 ms | **22,851 tok/s** (Metal Q8_0) / **2.98×** (ANE ref) |
+| **Text @ 2,048 Tokens** | 2K document context | — | **76.91 ms** (Q8_0) / **95.29 ms** (BF16) | — | — | **26,627 tok/s** (Metal Q8_0) |
+| **Text @ 8,192 Tokens** | Full context window (8K) | 845.83 ms | **564.91 ms** (Q8_0) / **620.81 ms** (BF16) 🏆 | — *(Exceeds 1024t ANE)* | 6,222.30 ms | **1.50× faster** vs MPS ref (`14,502 tok/s`) |
+| **Vision @ 140 Budget** | 480×680 card (Tower / Total) | 74.66 ms | **5.51 ms** Tower / **56.65 ms** avg (warm `50.34–51.16 ms`) | **11.07 ms** 🚀 | 1,276.56 ms | **17.65 cards/sec** (Metal BF16) |
+| **Vision @ 280 Budget** | 480×680 card (Tower / Total) | 73.06 ms | **8.72 ms** Tower / **119.98 ms** avg (warm `105.40–106.10 ms`) | **23.36 ms** 🚀 | 3,757.40 ms | **8.33 cards/sec** (Metal BF16) |
+| **Audio @ 12.3s Speech** | 196,348 samples (307 tokens) | — | **8.33 ms** Tower / **51.74 ms** avg | — | — | **237.2× real-time** (Metal BF16) |
+| **Hybrid @ $\le 512$ Tokens** | Query text + 140b image | 74.38 ms | 50.79 ms *(v0.3 ref)* | **24.67 ms** 🚀 | — | **3.01× faster on ANE** *(ref)* |
+| **Hybrid @ $> 512$ Tokens** | 2K doc + 140b image | 165.20 ms | 145.28 ms *(v0.3 ref)* | **122.76 ms (Hybrid)** ⚡ | — | **1.35× faster on Hybrid Routing** *(ref)* |
+| **Peak Memory @ 8K** | `[MTLDevice currentAllocatedSize]` / RSS | 6,592.8 MB *(MPS ref)* | **1,102.8 MB** (Q8_0, **662.9 MB** RSS) / **1,177.5 MB** (BF16) | — | 1,135 MB *(RSS ref)* | **> 5.4 GB saved** (`496–512 MB` transient) |
+| **Golden Parity (Cosine)** | 292-vector suite vs Oracle | 1.000000 *(Oracle)* | **0.999967** (BF16) / **0.999896** (Q8_0) | **0.999928** *(Hybrid ref)* | **0.999943** *(ref)* | **Four-9s Parity** (`3.22 s` Q8_0 / `3.61 s` BF16) |
 
 #### Execution Regimes & Routing Highlights:
-1. **Low-Latency Regimes ($\le 512$ Tokens / Vision $\le 280$ Budget):** The Apple Neural Engine dominates short-context embedding generation and portrait image processing, executing in **8.27 ms** for 512 tokens (**2.98× speedup vs Python**) and **11.07 ms** for 140b images (**6.74× speedup vs Python**).
-2. **High-Throughput & Long-Context Regimes ($> 512$ Tokens up to 8K):** Metal 4 FlashAttention takes over, scaling cleanly to 8,192 tokens in **644.36 ms** (**1.31× faster than Python PyTorch MPS's 845.83 ms**) while saving **5.1 GB of physical memory (-77%)**.
-3. **Hybrid Multimodal Routing:** When processing rich documents exceeding 512 tokens with attached visual cards, Glypr seamlessly splits execution: the SigLIP vision tower runs on the Neural Engine while the 2K+ token text backbone executes on Metal FlashAttention, clocking **122.76 ms** (**1.35× faster than PyTorch MPS**).
-4. **Universal CPU Execution:** On systems without Apple Silicon GPUs or in server environments, Glypr's multi-core `pulp` SIMD kernels deliver deterministic zero-heap inference across ARM64 and x86_64, holding peak RSS to **1,135 MB** at 8K tokens.
+1. **Low-Latency ANE Regimes ($\le 1,024$ Tokens / Multi-Aspect Vision Grids):** The Apple Neural Engine handles short-context RAG queries (`TextBackendPolicy::Auto` `[64..=seq_len]` with `batch <= 4`, including `s1024` sliding-window at **`0.999700`** cosine vs Metal) and compiled vision grids (`140-portrait`, `140-square` at `0.999836`, `140-landscape` at `0.999955`, `280-*`). Prior reference telemetry clocked 512t ANE text at **8.27 ms** (**2.98× vs Python**) and 140b portrait vision at **11.07 ms** (**6.74× vs Python**).
+2. **High-Throughput & Long-Context Regimes (Up to 8K):** Metal 4 FlashAttention takes over, scaling to 8,192 tokens in **564.91 ms** (`14,502 tok/s`, Q8_0) / **620.81 ms** (`13,196 tok/s`, BF16) in `v0.4.0`—**1.36×–1.50× faster** than the prior PyTorch MPS reference (**845.83 ms**) while reducing peak Metal VRAM to **1,102.8–1,177.5 MB**.
+3. **HTTP Server Dynamic Batching (`v0.4.0`, `bench_server --features metal`):** Single-query 768d float latency is **7.82 ms median** (`7.72 ms` min, `8.58 ms` P95; `base64` `7.67 ms`, `int8` `7.66 ms`, `binary` `7.63 ms`). Batch 32 executes in **24.23 ms** (`0.76 ms/vec`, **`1,320.6 vec/s`**), Batch 16 in **15.17 ms** (`1,054.7 vec/s`), Batch 8 in **11.11 ms** (`720.3 vec/s`), Batch 4 in **9.79 ms** (`408.6 vec/s`), and concurrent clients scale to **1,226.9 req/s** at 32 clients (`25.84 ms` median; `4` $\to$ `235.6 req/s` / `9.39 ms`, `8` $\to$ `449.0 req/s` / `17.76 ms`, `16` $\to$ `811.1 req/s` / `19.63 ms`).
+4. **Universal CPU Execution:** On systems without Apple Silicon GPUs or in server environments, `pulp` SIMD kernels (with optional `--features accelerate`) run RMSNorm (`512×2304`) in **0.237 ms** (`1.32×` vs Candle) and GeGLU (`512×9216`) in **0.676 ms** (`8.26×` vs Candle) with zero intermediate allocations.
 
 ---
 
-### B. High-Throughput Batch Inference Highlights (Batch Size = 8)
+### B. High-Throughput Batch Inference Highlights (`v0.4.0` Metal BF16, Batch Size = 8)
 
-While the Apple Neural Engine delivers unbeatable single-item latency for small models, GPU parallelism dominates in batched production serving. The following empirical scorecard benchmarks Glypr's Metal 4 FlashAttention batch pipeline against Python PyTorch MPS across text context lengths, vision token budgets, and hybrid multimodal inputs ($B = 8$):
+While the Apple Neural Engine delivers ultra-low single-item latency for static shapes, GPU parallelism dominates in batched production serving. The following scorecard compares **`v0.4.0`** `bench_batch` (`B = 8`, Metal BF16) against the prior Python PyTorch MPS reference:
 
-| Workload / Modality | Batch Input ($B = 8$) | Python Reference (PyTorch MPS) | Glypr (Metal 4 GPU) | Throughput (Glypr) | Speedup vs. Python Reference |
+| Workload / Modality | Batch Input ($B = 8$) | Python Reference *(PyTorch MPS, prior ref)* | Glypr Metal 4 GPU (`v0.4.0` BF16) | Throughput (`v0.4.0`) | Comparison vs. Python Ref |
 | :--- | :--- | :---: | :---: | :---: | :---: |
-| **Text @ 512 Tokens** | 8 × 512t passages (4,096 tokens) | 125.30 ms | **161.05 ms** (20.1 ms/item) | **49.7 items/s** | Near-native parity |
-| **Text @ 2,048 Tokens** | 8 × 2Kt documents (16,384 tokens) | 730.06 ms | **839.33 ms** (104.9 ms/item) | **9.5 items/s** | Near-native parity |
-| **Text @ 4,096 Tokens** | 8 × 4Kt documents (32,768 tokens) | 2,110.59 ms | **2,161.63 ms** (270.2 ms/item) | **3.7 items/s** | Near-native parity |
-| **Text @ 8,192 Tokens** | 8 × 8Kt full contexts (65,536 tokens) | 6,860.00 ms | **6,340.92 ms** (792.6 ms/item) 🏆 | **1.3 items/s** | **1.08× faster on Metal** |
-| **Vision @ 70 Budget** | 8 × compact images (4,536 patches) | 508.53 ms *(Clamped to 280t)* | **153.83 ms** (19.2 ms/item) 🚀 | **52.0 items/s** | **3.31× faster on Metal** |
-| **Vision @ 140 Budget** | 8 × portrait docs (9,072 patches) | 506.73 ms *(Clamped to 280t)* | **321.53 ms** (40.2 ms/item) 🚀 | **24.9 items/s** | **1.58× faster on Metal** |
-| **Vision @ 280 Budget** | 8 × standard images (19,152 patches) | 494.74 ms | **718.34 ms** (89.8 ms/item) | **11.1 items/s** | Full-resolution extraction |
-| **Vision @ 560 Budget** | 8 × high-res images (38,304 patches) | 497.63 ms *(Clamped to 280t)* | **1,837.45 ms** (229.7 ms/item) | **4.4 items/s** | **Native Dynamic Budget** |
-| **Hybrid: Text + Vision** | 8 × [Query text + 140b image] | 508.55 ms | **322.60 ms** (40.3 ms/item) 🚀 | **24.8 items/s** | **1.58× faster on Metal** |
-| **Hybrid: Text + Vision + Audio** | 8 × [Text + 140b image + 1.0s audio] | 540.90 ms | **447.08 ms** (55.9 ms/item) 🚀 | **17.9 items/s** | **1.21× faster on Metal** |
+| **Text @ 512 Tokens** | 8 × 512t passages (4,096 tokens) | 125.30 ms | **132.93 ms** (`16.62 ms/item`) | **60.2 items/s** | Near-native parity |
+| **Text @ 2,048 Tokens** | 8 × 2Kt documents (16,384 tokens) | 730.06 ms | **687.90 ms** (`85.99 ms/item`) 🏆 | **11.6 items/s** | **1.06× faster on Metal** |
+| **Text @ 4,096 Tokens** | 8 × 4Kt documents (32,768 tokens) | 2,110.59 ms | **1,759.32 ms** (`219.91 ms/item`) 🏆 | **4.5 items/s** | **1.20× faster on Metal** |
+| **Text @ 8,192 Tokens** | 8 × 8Kt full contexts (65,536 tokens) | 6,860.00 ms | **5,072.81 ms** (`634.10 ms/item`) 🏆 | **1.6 items/s** | **1.35× faster on Metal** |
+| **Vision @ 70 Budget** | 8 × compact images (4,536 patches) | 508.53 ms *(Clamped to 280t)* | **152.76 ms** (`19.10 ms/item`) 🚀 | **52.4 items/s** | **3.33× faster on Metal** |
+| **Vision @ 140 Budget** | 8 × portrait docs (9,072 patches) | 506.73 ms *(Clamped to 280t)* | **315.96 ms** (`39.50 ms/item`) 🚀 | **25.3 items/s** | **1.60× faster on Metal** |
+| **Vision @ 280 Budget** | 8 × standard images (19,152 patches) | 494.74 ms | **703.62 ms** (`87.95 ms/item`) | **11.4 items/s** | Full-resolution extraction |
+| **Vision @ 560 Budget** | 8 × high-res images (38,304 patches) | 497.63 ms *(Clamped to 280t)* | **1,789.17 ms** (`223.65 ms/item`) | **4.5 items/s** | **Native Dynamic Budget** |
+| **Hybrid: Text + Vision** | 8 × [Query text + 140b image] | 508.55 ms | **315.76 ms** (`39.47 ms/item`) 🚀 | **25.3 items/s** | **1.61× faster on Metal** |
+| **Hybrid: Text + Vision + Audio** | 8 × [Text + 140b image + 1.0s audio] | 540.90 ms | **423.20 ms** (`52.90 ms/item`) 🚀 | **18.9 items/s** | **1.28× faster on Metal** |
 
 ---
 
-### C. Head-to-Head Hardware Performance (8,192 Tokens):
+### C. Head-to-Head Hardware Performance (8,192 Tokens, `v0.4.0` vs Prior MPS Reference):
 
-| Metric | PyTorch MPS (Golden) | `glypr-core` BF16 (Standard) | `glypr-core` BF16 (Chunked) | `glypr-core` BF16 (Metal Flash) | `glypr-core` Q8_0 (Metal Flash) | Delta (Q8_0 Flash vs PyTorch) |
+| Metric | PyTorch MPS *(prior ref)* | `glypr-core` BF16 (`Standard`, `v0.4.0`) | `glypr-core` BF16 (`Chunked`, `v0.4.0`) | `glypr-core` BF16 (`MetalFlash`, `v0.4.0`) | `glypr-core` Q8_0 (`MetalFlash`, `v0.4.0`) | Delta (Q8_0 Flash vs PyTorch Ref) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Execution Latency** | $875.00\text{ ms}$ | $2,946.44\text{ ms}$ | $1,121.50\text{ ms}$ | **$670.79\text{ ms}$** | **$615.30\text{ ms}$** 🏆 | **$-259.7\text{ ms} / 1.42\text{x}$ (Faster!)** |
-| **Peak Throughput** | $9,360\text{ tok/s}$ | $2,780\text{ tok/s}$ | $7,304\text{ tok/s}$ | **$12,212\text{ tok/s}$** | **$13,314\text{ tok/s}$** 🏆 | **$+3,954\text{ tok/s}$** |
-| **Peak Hardware Metal VRAM** | $6,592.8\text{ MB} (6.44\text{ GB})$ | $4,608.2\text{ MB}$ | **$2,880.0\text{ MB}$** | **$1,473.5\text{ MB}$** | **$1,582.7\text{ MB}$** | **$-76.0\%$ ($5.01\text{ GB}$ saved)** |
-| **Transient VRAM Churn** | $5,120.3\text{ MB}$ | $3,827.2\text{ MB}$ | **$2,095.0\text{ MB}$** | **$688.4\text{ MB}$** | **$976.4\text{ MB}$** | **$-81.0\%$ ($4.14\text{ GB}$ saved)** |
+| **Execution Latency** | $875.00\text{ ms}$ | $2,940.54\text{ ms}$ | $1,113.36\text{ ms}$ | **$620.81\text{ ms}$** | **$564.91\text{ ms}$** 🏆 | **$-310.09\text{ ms} / 1.55\text{x}$ (Faster!)** |
+| **Peak Throughput** | $9,360\text{ tok/s}$ | $2,786\text{ tok/s}$ | $7,358\text{ tok/s}$ | **$13,196\text{ tok/s}$** | **$14,502\text{ tok/s}$** 🏆 | **$+5,142\text{ tok/s}$** |
+| **Peak Hardware Metal VRAM** | $6,592.8\text{ MB} (6.44\text{ GB})$ | — | — | **$1,177.5\text{ MB}$** | **$1,102.8\text{ MB}$** | **$-83.3\%$ ($5.49\text{ GB}$ saved)** |
+| **Transient VRAM Churn** | $5,120.3\text{ MB}$ | — | — | **$512.0\text{ MB}$** | **$496.0\text{ MB}$** | **$-90.3\%$ ($4.62\text{ GB}$ saved)** |
 | **Active Mask Tensor Overhead** | $134.2\text{ MB}$ | $134.2\text{ MB}$ | $134.2\text{ MB}$ | **$0.0\text{ MB}$ (Tile-Skipping)** | **$0.0\text{ MB}$ (Tile-Skipping)** | **$-100\%$ (Eliminated)** |
 | **Model Disk Size** | $1,420.0\text{ MB}$ | $532.1\text{ MB}$ | $532.1\text{ MB}$ | $532.1\text{ MB}$ | **$295.5\text{ MB}$** | **$-79.2\%$** |
-| **Avg Cosine Parity (292 vec)** | $1.000000$ (Ref) | **$0.999943$** | **$0.999943$** | **$0.999951$** | **$0.999873$** | $-0.000127$ |
-| **Min Cosine Parity (292 vec)** | $1.000000$ (Ref) | **$0.999839$** | **$0.999839$** | **$0.999860$** | **$0.999668$** | $-0.000332$ |
-| **Multilingual Margin** | $+0.2950$ | $+0.2953$ | $+0.2953$ | **$+0.2949$** | **$+0.2951$** | $+0.0001$ |
-| **Length Scaling Margin** | $+0.1493$ | $+0.1497$ | $+0.1497$ | **$+0.1499$** | **$+0.1498$** | $+0.0005$ |
+| **Cold Load Time** | — | $1.197\text{ s}$ | $1.197\text{ s}$ | $1.197\text{ s}$ | **$0.543\text{ s}$** | Sub-second GGUF load |
+| **Avg Cosine Parity (292 vec)** | $1.000000$ (Ref) | **$0.999960$** | **$0.999960$** | **$0.999967$** | **$0.999896$** | $-0.000104$ |
+| **Min Cosine Parity (292 vec)** | $1.000000$ (Ref) | **$0.999896$** | **$0.999896$** | **$0.999897$** | **$0.999741$** | $-0.000259$ |
 
 ---
 
-### Total Execution Time Scorecard (292 Golden Parity Vectors):
+### Total Execution Time Scorecard (292 Golden Parity Vectors, `v0.4.0` vs Prior MPS Ref):
 
-| Model & Attention Engine | Total Parity Suite Time | Evaluation Rate | Avg Parity | Min Parity | Speedup vs Baseline |
+| Model & Attention Engine | Total Parity Suite Time | Evaluation Rate | Avg Parity | Min Parity | Speedup vs MPS Ref |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| 🏆 **Glypr GGUF Q8_0 (Fused Metal Flash)** | **$3.50\text{ s}$** | **$83.43\text{ vec/s}$** | **$0.999873$** | **$0.999668$** | **$4.03\times$** |
-| 🥈 **Glypr GGUF BF16 (Fused Metal Flash)** | **$4.10\text{ s}$** | **$71.22\text{ vec/s}$** | **$0.999951$** | **$0.999860$** | **$3.44\times$** |
-| 🥉 **PyTorch MPS (`bfloat16` Golden Reference)** | **$5.73\text{ s}$** | **$50.96\text{ vec/s}$** | $1.000000$ | $1.000000$ | **$2.46\times$** |
-| **Glypr GGUF BF16 (Chunked Sliding)** | **$6.34\text{ s}$** | **$46.06\text{ vec/s}$** | **$0.999943$** | **$0.999839$** | **$2.23\times$** |
-| **Glypr GGUF Q8_0 (Chunked Sliding)** | **$5.99\text{ s}$** | **$48.75\text{ vec/s}$** | **$0.999862$** | **$0.999674$** | **$2.36\times$** |
-| **Glypr GGUF BF16 (Standard Dense Attention)** | **$14.12\text{ s}$** | **$20.68\text{ vec/s}$** | **$0.999943$** | **$0.999839$** | **$1.00\times$ (ref)** |
+| 🏆 **Glypr GGUF Q8_0 (Fused Metal Flash, `v0.4.0`)** | **$3.22\text{ s}$** | **$90.68\text{ vec/s}$** | **$0.999896$** | **$0.999741$** | **$1.78\times$** |
+| 🥈 **Glypr GGUF BF16 (Fused Metal Flash, `v0.4.0`)** | **$3.61\text{ s}$** | **$80.89\text{ vec/s}$** | **$0.999967$** | **$0.999897$** | **$1.59\times$** |
+| 🥉 **PyTorch MPS (`bfloat16`, *prior ref*)** | **$5.73\text{ s}$** | **$50.96\text{ vec/s}$** | $1.000000$ | $1.000000$ | **$1.00\times$ (ref)** |
 
 ---
 
-### Token Latency and Throughput Scaling (Apple Silicon Metal GPU):
+### Token Latency and Throughput Scaling (`v0.4.0`, Apple Silicon Metal GPU):
 
-| Context Length | Standard Attention | Chunked Sliding | Metal Flash (BF16) | Metal Flash (Q8_0) | Speedup vs Standard | Peak Throughput |
+| Context Length | Standard BF16 | Chunked BF16 | Chunked Q8_0 | Metal Flash (BF16) | Metal Flash (Q8_0) | Peak Throughput (Q8_0 Flash) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **64 tokens** | $10.47\text{ ms}$ | $10.47\text{ ms}$ | **$10.30\text{ ms}$** | **$9.47\text{ ms}$** | **$1.11\times$** | $6,756\text{ tok/s}$ |
-| **256 tokens** | $19.42\text{ ms}$ | $19.41\text{ ms}$ | **$19.09\text{ ms}$** | **$15.88\text{ ms}$** | **$1.22\times$** | $16,125\text{ tok/s}$ |
-| **512 tokens** | $37.59\text{ ms}$ | $40.86\text{ ms}$ | **$28.77\text{ ms}$** | **$24.34\text{ ms}$** | **$1.54\times$** | $21,039\text{ tok/s}$ |
-| **1,024 tokens** | $90.59\text{ ms}$ | $94.74\text{ ms}$ | **$52.28\text{ ms}$** | **$43.93\text{ ms}$** | **$2.06\times$** | **$23,311\text{ tok/s}$** 🚀 |
-| **2,048 tokens** | $257.64\text{ ms}$ | $203.50\text{ ms}$ | **$107.19\text{ ms}$** | **$87.68\text{ ms}$** | **$2.94\times$** | **$23,359\text{ tok/s}$** 🚀 |
-| **4,096 tokens** | $830.42\text{ ms}$ | $461.29\text{ ms}$ | **$255.29\text{ ms}$** | **$225.10\text{ ms}$** | **$3.69\times$** | $18,197\text{ tok/s}$ |
-| **8,192 tokens** | $2,946.44\text{ ms}$ | $1,121.50\text{ ms}$ | **$670.79\text{ ms}$** | **$615.30\text{ ms}$ 🏆** | **$4.79\times$** | **$13,314\text{ tok/s}$** |
+| **64 tokens** | $10.54\text{ ms}$ | $10.56\text{ ms}$ | $9.42\text{ ms}$ | **$9.94\text{ ms}$** | **$9.25\text{ ms}$** | $6,922\text{ tok/s}$ |
+| **256 tokens** | $19.64\text{ ms}$ | $19.35\text{ ms}$ | $16.43\text{ ms}$ | **$17.81\text{ ms}$** | **$14.59\text{ ms}$** | $17,551\text{ tok/s}$ |
+| **512 tokens** | $38.79\text{ ms}$ | $41.08\text{ ms}$ | $35.86\text{ ms}$ | **$27.03\text{ ms}$** | **$22.41\text{ ms}$** | $22,851\text{ tok/s}$ |
+| **1,024 tokens** | $90.23\text{ ms}$ | $94.16\text{ ms}$ | $84.32\text{ ms}$ | **$47.37\text{ ms}$** | **$39.05\text{ ms}$** | **$26,221\text{ tok/s}$** 🚀 |
+| **2,048 tokens** | $258.71\text{ ms}$ | $202.98\text{ ms}$ | $183.51\text{ ms}$ | **$95.29\text{ ms}$** | **$76.91\text{ ms}$** | **$26,627\text{ tok/s}$** 🚀 |
+| **4,096 tokens** | $831.79\text{ ms}$ | $459.22\text{ ms}$ | $426.93\text{ ms}$ | **$228.92\text{ ms}$** | **$199.54\text{ ms}$** | $20,527\text{ tok/s}$ |
+| **8,192 tokens** | $2,940.54\text{ ms}$ | $1,113.36\text{ ms}$ | $1,055.63\text{ ms}$ | **$620.81\text{ ms}$** | **$564.91\text{ ms}$** 🏆 | **$14,502\text{ tok/s}$** |
 
 ---
 
@@ -169,10 +166,12 @@ While the Apple Neural Engine delivers unbeatable single-item latency for small 
 
 Evaluated on multi-core CPU using auto-dispatched SIMD (ARM NEON / x86 AVX2/AVX-512):
 
-| Kernel Operation | Candle CPU Baseline | Pulp SIMD (Parallel Rayon) | Speedup | Intermediate Tensor Allocations |
+| Kernel Operation (`v0.4.0 --features accelerate`) | Candle CPU Baseline | Pulp SIMD (Parallel Rayon + Accelerate) | Speedup | Intermediate Tensor Allocations |
 | :--- | :---: | :---: | :---: | :---: |
-| **RMSNorm** ($512 \times 2,304$) | $0.340\text{ ms}$ | **$0.219\text{ ms}$** | **$1.55\times$** | **0** (vs 5 in baseline) |
-| **GeGLU** ($512 \times 9,216$) | $21.509\text{ ms}$ | **$2.050\text{ ms}$** | **$10.49\times$ 🚀** | **0** (vs 10 in baseline) |
+| **RMSNorm** ($512 \times 2,304$) | $0.312\text{ ms}$ | **$0.237\text{ ms}$** | **$1.32\times$** | **0** (vs 5 in baseline) |
+| **GeGLU** ($512 \times 9,216$) | $5.583\text{ ms}$ | **$0.676\text{ ms}$** | **$8.26\times$ 🚀** | **0** (vs 10 in baseline) |
+
+*(End-to-end CPU context scaling below reflects prior `v0.2.x` reference capture.)*
 
 | Context Length | Model Precision | CPU SIMD Latency | CPU SIMD Throughput | Peak Process RSS (RAM) |
 | :---: | :---: | :---: | :---: | :---: |
@@ -193,16 +192,23 @@ Evaluated on multi-core CPU using auto-dispatched SIMD (ARM NEON / x86 AVX2/AVX-
 
 ## 6. Apple Neural Engine (ANE) Hardware Scorecard & Mathematical Parity
 
-Introduced in **v0.3.0**, `glypr` measures dedicated hardware acceleration for portrait vision encoding and 512-token resident text retrieval on the Apple Neural Engine (ANE) vs Apple Silicon Metal GPU and Python PyTorch MPS reference:
+Introduced in **v0.3.0** and expanded in **v0.4.0**, `glypr` supports dedicated Apple Neural Engine (ANE) acceleration for multi-aspect vision grids and `[64..=seq_len]` resident text buckets (`batch_size <= 4` under `TextBackendPolicy::Auto`):
 
-### A. Vision Tower Execution (Single Image)
-| Modality / Budget | Input Patches | Soft Tokens | Apple Neural Engine (ANE) | Apple Silicon Metal GPU (ViT) | Python Reference (PyTorch MPS) | ANE Speedup vs Python | ANE Speedup vs Metal | Parity vs GPU mmproj |
+### A. Verified `v0.4.0` CoreML / ANE Export Parity (`scripts/export_coreml.py`)
+- **`140-landscape`** (`27×42`, `1134p -> 126t`, `_h27_w42`): ANE vs Metal `mmproj` **`0.999955`** cosine similarity.
+- **`140-square`** (`33×33` `lenna.png`, `1089p -> 121t`, `_h33_w33`): CoreML vs PyTorch FP32 **`0.999267`**; ANE vs Metal `mmproj` **`0.999836`**.
+- **`s1024` Text Backbone** (`gemma2_text_backbone_s1024_w8a16.mlmodelc`, sliding-window mask for `> 512t`): CoreML vs PyTorch FP32 **`0.999684`**; live `doc_science_512t` (522 tokens) ANE vs FP32 golden **`0.999601`** (vs Metal `0.999571`); live `~770t` (`> 512` sliding-window span) ANE vs Metal **`0.999700`**.
+
+### B. Prior Reference Telemetry (`v0.3.0` Vision & 512t Text ANE vs Metal/PyTorch MPS)
+
+#### 1. Vision Tower Execution (Single Image)
+| Modality / Budget | Input Patches | Soft Tokens | Apple Neural Engine *(v0.3.0 ref)* | Apple Silicon Metal GPU (ViT) *(v0.3.0 ref)* | Python Reference *(PyTorch MPS ref)* | ANE Speedup vs Python | ANE Speedup vs Metal | Parity vs GPU mmproj |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Budget 140 Portrait** | 1,134 patches | 126 tokens | **11.07 ms (90.3 img/s)** 🚀 | 24.03 ms (41.6 img/s) | 74.66 ms (13.4 img/s) | **6.74× faster** | **2.17× faster** | **`0.999928` Cosine Sim** |
 | **Budget 280 Portrait** | 2,394 patches | 266 tokens | **23.36 ms (42.8 img/s)** 🚀 | 36.54 ms (27.4 img/s) | 73.06 ms (13.7 img/s) | **3.13× faster** | **1.56× faster** | **`0.999928` Cosine Sim** |
 
-### B. Resident Text Backbone (Static 512 Tokens)
-| Sequence Length | Hardware Engine | Compute Units | Latency | Throughput | Python Reference | Speedup vs Python Reference |
+#### 2. Resident Text Backbone (Static 512 Tokens)
+| Sequence Length | Hardware Engine | Compute Units | Latency *(v0.3.0 ref)* | Throughput | Python Reference | Speedup vs Python Reference |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: |
 | **16 tokens** | Apple Silicon Metal GPU | GPU | $4.21\text{ ms}$ | $237.5\text{ q/s}$ | $8.12\text{ ms}$ | 1.93× |
 | **16 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | $8.27\text{ ms}$ | $120.9\text{ q/s}$ | $8.12\text{ ms}$ | 0.98× |
@@ -210,11 +216,6 @@ Introduced in **v0.3.0**, `glypr` measures dedicated hardware acceleration for p
 | **128 tokens** | Apple Neural Engine (ANE) | ANE (W8A16) | **$8.27\text{ ms}$** | **$120.9\text{ q/s}$** | $11.40\text{ ms}$ | 1.38× |
 | **512 tokens (RAG chunk)** | Apple Silicon Metal GPU | GPU | $25.72\text{ ms}$ | $38.9\text{ q/s}$ | $24.65\text{ ms}$ | 0.96× |
 | **512 tokens (RAG chunk)** | **Apple Neural Engine (ANE)** | **ANE (W8A16)** | **$8.27\text{ ms}$** 🚀 | **$120.9\text{ q/s}$** | $24.65\text{ ms}$ | **2.98× faster** 🏆 |
-
-### C. End-to-End Mathematical Parity
-Across golden test vectors and realistic multimodal inputs:
-- Hybrid execution (ANE Vision Tower + GPU Metal Text Backbone) achieves **`0.999928`** cosine similarity against the pure GPU Metal reference.
-- Standalone Core ML text backbone produces zero NaNs and exact $1.0$ unit norm vectors.
 
 ---
 

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] - 2026-11-23
+
+### Breaking Changes
+- **Encapsulated `GlyprEmbedder` Fields (`UX-10`):** Privatized `GlyprEmbedder` internal fields (`model`, `tokenizer`, `device`, `dtype`, `multimodal`, `max_seq_len`, `coreml_vision`, `coreml_text`, `vision_backend`, `text_backend`). Use the read/write accessors (`model()`, `model_mut()`, `tokenizer()`, `device()`, `dtype()`, `multimodal()`, `multimodal_mut()`, `max_seq_len()`, `set_max_seq_len()`, `with_max_seq_len()`, `embedding_dim()`, `vision_backend()`, `text_backend()`, `coreml_vision()`, `coreml_text()`, `has_multimodal()`, `has_audio_projector()`, `has_coreml_vision()`, `has_coreml_text()`), `GlyprEmbedder::builder()`, or `GlyprEmbedder::from_parts(...)` + `set_multimodal_projector(...)` / `with_multimodal_projector(...)`.
+- **Structured `GlyprError` & `GlyprResult<T>` API Migration (`UX-10`):** Marked `GlyprError` as `#[non_exhaustive]`, exported `GlyprResult<T>`, and migrated public fallible methods on `GlyprEmbedder`, `GlyprBuilder`, `CoreMLVisionTower`, `CoreMLTextBackbone`, `glypr_core::hub`, `truncate_mrl`, and `validate_vision_budget` from `anyhow::Result<T>` to `GlyprResult<T>`.
+- **Strict Validation & Preflight Guards:** Enforced strict MRL dimension bounds (`1..=embedding_dim`), interleaved/composite media & splicing checks, and CLI flag/pre-load validation (`--bf16` vs `--q8` conflict, `--ane` error without `coreml` feature, missing media path rejection, `--dim` bounds).
+- **Default-Off Server Local File Reads:** `glypr-server` disables local filesystem media path reads by default across all bind addresses (`allow_local_files: false`); pass `--allow-local-files` to opt in.
+
+### Added & Improved
+- **M5 Metal 4 FlashAttention & Kernel Fusion:** Added unaligned sequence-length (`s`) FlashAttention support on M5 NAX, Q8_0 GEMM/GEMV tuning, Vision/Audio kernel fusion, and hybrid PLE optimizations.
+- **Fast Loading & Startup Warmup:** Switched Safetensors loading to `mmap`, GGUF loading to an `8 MiB` `BufReader`, and added RoPE, Metal pipeline, and CoreML ANE startup warmup passes.
+- **ANE Text Routing & CoreML Discovery (`UX-01`, `UX-02`, `UX-09`):** Added `CoreMLTextBackbone` multi-bucket discovery and `TextBackendPolicy::Auto` `[64..=512]`-token pure-text ANE routing (`batch_size <= 4`), `(patch_height, patch_width)` vision grid keying, deterministic `resolve_coreml_dir` lookup, and `scripts/export_coreml.py` square/landscape presets + `manifest.json`.
+- **Builder & Offline Hub Ergonomics (`UX-05`, `UX-10`):** Added fluent `GlyprEmbedder::builder()` (`GlyprBuilder`) with safe Metal auto-detection and `--offline` / `HF_HUB_OFFLINE` cache-miss diagnostics.
+- **CLI Batch/JSONL & Inspection (`UX-03`, `UX-12`):** Added `glypr embed --batch` / `--jsonl`, explicit `--image` / `--audio` / `--text-file` flags, and `glypr inspect <PATH>` for `.gguf` and `.mlmodelc` bundles.
+- **Hardened `glypr-server` (`UX-04`):** Added `tracing_subscriber` initialization, `32 MiB` default body limit, `/ready` probe, graceful `SIGINT`/`SIGTERM` shutdown, worker panic isolation, per-item batch error isolation, and length-bucketed micro-batching.
+- **CPU SIMD & Accelerate:** Added Rayon-parallelized BF16 CPU SIMD kernels and optional Apple Accelerate (`vvtanhf`) support.
+- **Testing Pyramid & FP32 Golden Provenance:** Added weightless Tier 0 synthetic/mock/CLI tests (`GLYPR_ALLOW_MISSING_WEIGHTS=1`, `EngineHandle::mock`), Tier 1 (`./tests/scripts/run_qa_suite.sh --tier1`, 132 passed / 0 failed in 36s), and Tier 2 (`--tier2`, 106s including `9/9` `--release` tests, `pytest` `4/4`, and `26/26` live `differential_parity.py` checks). Regenerated all golden fixtures in FP32 CPU with `schema_version: 2` provenance (`verify_goldens.py --strict-fp32`).
+
+### Fixed
+- **GGUF Sliding-Window Radius:** Halved `gemma-embedding2.attention.sliding_window` (`1024 -> 512`) so GGUF long-context masking matches Safetensors/HuggingFace.
+- **Audio Anti-Aliased Resampling:** Replaced naive linear resampling (`48 kHz -> 16 kHz`) with a zero-dependency windowed-sinc FIR low-pass resampler.
+- **Metal BF16 NaN Guard & Kernel Safety:** Added BF16 NaN guards (`MLX_BF16`), sliding-window fallback fixes, and strict shape/dtype guards across Metal/CPU kernels.
+- **Multimodal Prompt Ordering (`MultimodalInput`):** Fixed `MultimodalInput::image_with_prompt` and `MultimodalInput::audio_with_prompt` to emit `[Media, Text]` ordering matching `embed_composite`, `embed_interleaved`, and the Python baseline.
+- **Audio STFT & Hann Precision Parity:** Updated audio preprocessor Hann window and FFT twiddle arithmetic to `f64` for exact parity against the PyTorch FP32 reference.
+- **Padding Mask Broadcasting (`[B, 1, 1, S]`):** Fixed padded-batch `[B, 1, 1, S]` attention-mask slicing in `attention/chunked.rs` and `attention/standard.rs` (caught via Tier 0 synthetic tiny-model tests).
+
+### Performance
+- **Text Backbone Scaling (Metal 4 FlashAttention, `compare_models`):**
+  - **GGUF BF16 (Metal Flash):** `64t = 9.94 ms` (`6,439 tok/s`), `256t = 17.81 ms` (`14,372 tok/s`), `512t = 27.03 ms` (`18,940 tok/s`), `1024t = 47.37 ms` (`21,616 tok/s`), `2048t = 95.29 ms` (`21,493 tok/s`), `4096t = 228.92 ms` (`17,892 tok/s`), `8192t = 620.81 ms` (`13,196 tok/s`); 292-vec parity Avg **`0.999967`** / Min **`0.999897`** (suite `3.61 s`).
+  - **GGUF Q8_0 (Metal Flash):** `64t = 9.25 ms` (`6,922 tok/s`), `256t = 14.59 ms` (`17,551 tok/s`), `512t = 22.41 ms` (`22,851 tok/s`), `1024t = 39.05 ms` (`26,221 tok/s`), `2048t = 76.91 ms` (`26,627 tok/s`), `4096t = 199.54 ms` (`20,527 tok/s`), `8192t = 564.91 ms` (`14,502 tok/s`); 292-vec parity Avg **`0.999896`** / Min **`0.999741`** (suite `3.22 s`).
+- **8K Metal Memory Footprint (`bench_memory`, `flash`):**
+  - **BF16 Flash @ 8192t:** Peak Metal VRAM **`1,177.5 MB`** (down from `1,473.5 MB` in v0.3.0), Transient **`512.0 MB`** (down from `688.4 MB`), Model VRAM `665.4 MB`, End `590.3 MB`, Cold `628.55 ms`, Warm `621.14 ms`, Max RSS `2,046.4 MB`.
+  - **Q8_0 Flash @ 8192t:** Peak Metal VRAM **`1,102.8 MB`** (down from `1,582.7 MB` in v0.3.0), Transient **`496.0 MB`** (down from `976.4 MB`), Max RSS **`662.9 MB`** (down from `1,678.5 MB`), Model VRAM `606.7 MB`, End `534.8 MB`, Cold `572.26 ms`, Warm `560.64 ms`.
+- **Batched Execution (`bench_batch`, `B = 8`, Metal BF16):** `text_512_b8 = 132.93 ms` (`60.2 items/s`), `text_2048_b8 = 687.90 ms` (`11.6 items/s`), `text_4096_b8 = 1,759.32 ms` (`4.5 items/s`), `text_8192_b8 = 5,072.81 ms` (`1.6 items/s`), `vision_70_b8 = 152.76 ms` (`52.4 items/s`), `vision_140_b8 = 315.96 ms` (`25.3 items/s`), `vision_280_b8 = 703.62 ms` (`11.4 items/s`), `vision_560_b8 = 1,789.17 ms` (`4.5 items/s`), `hybrid_text_vision_b8 = 315.76 ms` (`25.3 items/s`), `hybrid_text_vision_audio_b8 = 423.20 ms` (`18.9 items/s`).
+- **Multimodal Towers (`bench_multimodal`, Metal BF16):** 480×680 Vision Budget 140 averages `56.65 ms` (warm `50.34–51.16 ms`, Vision Tower `5.51 ms`, `17.65 cards/sec`); Budget 280 averages `119.98 ms` (warm `105.40–106.10 ms`, Vision Tower `8.72 ms`, `8.33 cards/sec`). Audio 1.0s averages `21.91 ms` (`45.6x` real-time), 5.0s averages `29.46 ms` (`169.7x` real-time), and 12.3s speech averages `51.74 ms` (Tower **`8.33 ms`**, **`237.2x`** real-time).
+- **CPU SIMD (`--features accelerate`) & HTTP Server (`--features metal`):** CPU RMSNorm (`512x2304`) `0.237 ms` vs Candle `0.312 ms` (`1.32x`, 0 intermediate allocs); CPU GeGLU (`512x9216`) `0.676 ms` vs Candle `5.583 ms` (`8.26x`, 0 intermediate allocs). `glypr-server` achieves `7.82 ms` median single-query latency (`7.72 ms` min, `8.58 ms` P95), `24.23 ms` Batch 32 (**`1,320.6 vec/s`**), and **`1,226.9 req/s`** at 32 concurrent clients (`25.84 ms` median).
+- **Live CoreML / ANE Export Parity (`scripts/export_coreml.py`):** `140-landscape` (`27x42`, `_h27_w42`) **`0.999955`** ANE vs Metal `mmproj`; `140-square` (`33x33`, `_h33_w33`) `0.999267` CoreML vs PyTorch FP32 / **`0.999836`** ANE vs Metal `mmproj`; `s1024` text backbone `0.999684` CoreML vs PyTorch FP32, **`0.999601`** ANE vs FP32 golden on `doc_science_512t`, and **`0.999700`** ANE vs Metal on `~770t` sliding-window text.
+
+---
+
 ## [0.3.0] - 2026-10-20
 
 ### Added

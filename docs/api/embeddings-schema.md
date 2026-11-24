@@ -17,7 +17,7 @@ Content-Type: application/json
 {
   "input": "string | object | array",
   "model": "string (optional, default: 'embeddinggemma-2')",
-  "dimensions": "integer (optional, default: 768, values: 128..768)",
+  "dimensions": "integer (optional, default: 768, values: 1..=768; multiple of 64 for 'binary')",
   "encoding_format": "string (optional, default: 'float', values: 'float' | 'int' | 'binary' | 'base64')",
   "task": "string (optional, default: 'Raw')",
   "title": "string (optional, used when task='Document')",
@@ -27,7 +27,7 @@ Content-Type: application/json
 
 ### Input Field Formats (`input`)
 
-The `input` field accepts:
+The `input` field accepts (up to `max_batch_items`, default `256`, within the default `32 MiB` body limit):
 1. **Single string:** `"Search query text"`
 2. **Batch array of strings:** `["First text", "Second text"]`
 3. **Single multimodal object:** `{"text": "...", "image": "...", "budget": 280}`
@@ -37,11 +37,13 @@ The `input` field accepts:
 ```json
 {
   "text": "Optional text or query prompt",
-  "image": "Base64 data URI | raw base64 string | local file path",
-  "audio": "Base64 data URI (WAV) | raw base64 WAV | local file path",
+  "image": "Base64 data URI | raw base64 string | local file path (requires --allow-local-files)",
+  "audio": "Base64 data URI (WAV) | raw base64 WAV | local file path (requires --allow-local-files)",
   "budget": 280
 }
 ```
+> [!NOTE]
+> Local filesystem paths are disabled over HTTP by default (`allow_local_files = false`). Pass a `data:...;base64,...` URI or raw base64 string, or explicitly start the server with `glypr serve --allow-local-files`. A single multimodal object may specify `image` or `audio`, not both.
 
 ---
 
@@ -105,7 +107,7 @@ Conditioning embeddings on a specific task applies official prompt prefixes to o
 The `image` field accepts:
 1. **Base64 Data URI:** `data:image/png;base64,...`, `data:image/jpeg;base64,...`, `data:image/webp;base64,...`
 2. **Raw Base64 string:** Raw base64-encoded image file bytes.
-3. **Local File Path:** Absolute or relative path to a readable file on disk.
+3. **Local File Path** *(opt-in only)*: Absolute or relative path on the server host when started with `--allow-local-files`.
 
 ### Container Formats Supported
 * **PNG** (`.png`)
@@ -204,19 +206,22 @@ curl http://127.0.0.1:8080/v1/models
       "created": 1729123200,
       "owned_by": "glypr",
       "device": "metal",
-      "quantization": "BF16",
-      "has_multimodal": true,
-      "max_context": 8192,
+      "vision_backend": "hybrid (ane + metal)",
+      "text_backend": "hybrid (ane + metal)",
       "ane_enabled": true,
-      "vision_backend": "auto",
-      "ane_supported_patches": [1134, 2394]
+      "ane_text_enabled": true,
+      "ane_text_seq_len": 512,
+      "has_multimodal": true,
+      "has_audio_projector": true,
+      "max_context": 8320,
+      "embedding_dim": 768
     }
   ]
 }
 ```
 
 ### B. Health Status (`GET /health`)
-Lightweight liveness probe for Kubernetes and load balancers:
+Lightweight liveness and capability probe for Kubernetes and load balancers:
 
 ```bash
 curl http://127.0.0.1:8080/health
@@ -225,9 +230,26 @@ curl http://127.0.0.1:8080/health
 #### Response Example
 ```json
 {
-  "status": "healthy",
+  "status": "ok",
+  "model": "embeddinggemma-2",
   "device": "metal",
-  "has_multimodal": true,
-  "ane_enabled": true
+  "multimodal": true,
+  "has_audio_projector": true,
+  "vision_backend": "hybrid (ane + metal)",
+  "text_backend": "hybrid (ane + metal)",
+  "ane_enabled": true,
+  "ane_supported_patches": [1134, 2394],
+  "ane_text_enabled": true,
+  "ane_text_seq_len": 512
+}
+```
+
+### C. Readiness Probe (`GET /ready`)
+Returns `200 OK` when the inference worker channel is active, or `503 Service Unavailable` during shutdown:
+
+```json
+{
+  "status": "ready",
+  "model": "embeddinggemma-2"
 }
 ```

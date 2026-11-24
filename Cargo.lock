@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "glypr"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "glypr-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1285,6 +1285,7 @@ dependencies = [
  "hound",
  "image",
  "libc",
+ "memmap2",
  "objc2-metal",
  "pulp 0.22.3",
  "rayon",
@@ -1297,7 +1298,7 @@ dependencies = [
 
 [[package]]
 name = "glypr-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1307,6 +1308,7 @@ dependencies = [
  "glypr-core",
  "hound",
  "image",
+ "rayon",
  "reqwest",
  "serde",
  "serde_json",

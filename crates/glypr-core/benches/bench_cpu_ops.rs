@@ -2,8 +2,7 @@ use candle_core::{Device, Tensor};
 use glypr_core::cpu_simd::{cpu_geglu, cpu_rmsnorm};
 use std::time::Instant;
 
-#[test]
-fn bench_cpu_simd_vs_baseline() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let dev = Device::Cpu;
     let seq_len = 512;
     let d = 2304; // Gemma-2 hidden dim

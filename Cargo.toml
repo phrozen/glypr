@@ -7,17 +7,15 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["Guillermo Estrada <213238+phrozen@users.noreply.github.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/phrozen/glypr"
-homepage = "https://github.com/phrozen/glypr"
 documentation = "https://docs.rs/glypr-core"
 readme = "README.md"
 keywords = ["embeddings", "gemma", "metal", "coreml", "multimodal"]
 categories = ["science", "multimedia", "command-line-utilities"]
-description = "Native Rust embedding and retrieval engine for EmbeddingGemma 2"
 
 [workspace.dependencies]
 candle-core = { version = "0.11.0", default-features = false }
@@ -38,6 +36,7 @@ coreml-native = { version = "0.2.0", default-features = false }
 pulp = { version = "0.22.3", features = ["macro"] }
 libc = "0.2"
 rayon = "1.12"
+memmap2 = "0.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 hound = "3.5"
 hf-hub = "0.4"

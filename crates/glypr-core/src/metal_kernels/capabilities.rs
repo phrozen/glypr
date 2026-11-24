@@ -14,17 +14,33 @@ pub enum MetalTier {
 }
 
 impl MetalTier {
-    /// Resolve tier from `GLYPR_METAL_TIER` environment variable (`auto` default).
-    pub fn from_env() -> Self {
-        match std::env::var("GLYPR_METAL_TIER")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+    fn parse_from_env() -> Self {
+        let raw = std::env::var("GLYPR_METAL_TIER").unwrap_or_default();
+        let trimmed = raw.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
+            "" | "auto" => Self::Auto,
             "m5" | "metal4" | "nax" => Self::M5,
             "legacy" | "m1" | "m2" | "m3" | "m4" | "simdgroup" => Self::Legacy,
-            _ => Self::Auto,
+            _ => {
+                eprintln!(
+                    "Warning: unrecognized GLYPR_METAL_TIER={trimmed:?}; falling back to 'auto'"
+                );
+                Self::Auto
+            }
+        }
+    }
+
+    /// Resolve tier from `GLYPR_METAL_TIER` environment variable (`auto` default).
+    /// Cached once in production builds; dynamically read in tests.
+    pub fn from_env() -> Self {
+        #[cfg(not(test))]
+        {
+            static CACHED_TIER: OnceLock<MetalTier> = OnceLock::new();
+            *CACHED_TIER.get_or_init(Self::parse_from_env)
+        }
+        #[cfg(test)]
+        {
+            Self::parse_from_env()
         }
     }
 
@@ -169,17 +185,24 @@ impl MetalCapabilities {
     }
 
     /// Returns `true` if M5 Neural Accelerator (`mpp::tensor_ops`) kernels should be used
-    /// after accounting for hardware support, compiler probe, and `GLYPR_METAL_TIER`.
+    /// for the specified [`MetalTier`] after accounting for hardware support and compiler probe.
     #[inline]
-    pub fn use_m5_tensor_ops(&self) -> bool {
+    pub fn use_m5_tensor_ops_for_tier(&self, tier: MetalTier) -> bool {
         if !self.has_tensor_ops_compiler {
             return false;
         }
-        match MetalTier::from_env() {
+        match tier {
             MetalTier::Legacy => false,
             MetalTier::M5 => true,
             MetalTier::Auto => self.has_apple10_m5 && self.has_metal4_family,
         }
+    }
+
+    /// Returns `true` if M5 Neural Accelerator (`mpp::tensor_ops`) kernels should be used
+    /// after accounting for hardware support, compiler probe, and `GLYPR_METAL_TIER`.
+    #[inline]
+    pub fn use_m5_tensor_ops(&self) -> bool {
+        self.use_m5_tensor_ops_for_tier(MetalTier::from_env())
     }
 }
 

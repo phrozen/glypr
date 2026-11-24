@@ -21,10 +21,58 @@ pub fn gelu_tanh(x: &Tensor) -> Result<Tensor> {
 #[derive(Debug, Clone)]
 pub struct TextPLE {
     pub projection: LinearOp,
+    pub layer_views: Vec<LinearOp>,
     pub scale: f64,
     pub norm: RMSNorm,
     pub num_layers: usize,
     pub hidden_size_per_layer_input: usize,
+}
+
+fn build_layer_views(
+    projection: &LinearOp,
+    num_layers: usize,
+    hidden_size_per_layer_input: usize,
+) -> Vec<LinearOp> {
+    let mut views = Vec::with_capacity(num_layers);
+    match projection {
+        LinearOp::Standard(l) if l.bias().is_none() => {
+            let w = l.weight();
+            for i in 0..num_layers {
+                let Ok(slice) = w.narrow(
+                    0,
+                    i * hidden_size_per_layer_input,
+                    hidden_size_per_layer_input,
+                ) else {
+                    return Vec::new();
+                };
+                views.push(LinearOp::new_standard(candle_nn::Linear::new(slice, None)));
+            }
+            views
+        }
+        #[cfg(feature = "metal")]
+        LinearOp::MetalQ8_0 {
+            weight_q8_bytes,
+            in_dim,
+            ..
+        } => {
+            for i in 0..num_layers {
+                let Ok(slice) = weight_q8_bytes.narrow(
+                    0,
+                    i * hidden_size_per_layer_input,
+                    hidden_size_per_layer_input,
+                ) else {
+                    return Vec::new();
+                };
+                views.push(LinearOp::new_metal_q8_0(
+                    slice,
+                    hidden_size_per_layer_input,
+                    *in_dim,
+                ));
+            }
+            views
+        }
+        _ => Vec::new(),
+    }
 }
 
 impl TextPLE {
@@ -35,13 +83,44 @@ impl TextPLE {
         num_layers: usize,
         hidden_size_per_layer_input: usize,
     ) -> Self {
+        let layer_views = build_layer_views(&projection, num_layers, hidden_size_per_layer_input);
         Self {
             projection,
+            layer_views,
             scale,
             norm,
             num_layers,
             hidden_size_per_layer_input,
         }
+    }
+
+    pub fn has_layer_views(&self) -> bool {
+        self.layer_views.len() == self.num_layers
+    }
+
+    /// Project, scale, and RMSNorm a single layer's PLE slice `[batch, seq_len, hidden_size_per_layer_input]`.
+    /// Used for large `batch * seq_len` to cap PLE transient VRAM to a single layer (`1/24` of 4D buffer).
+    pub fn project_and_norm_layer(
+        &self,
+        inputs_embeds: &Tensor,
+        layer_idx: usize,
+    ) -> Result<Tensor> {
+        let proj = self.layer_views[layer_idx].forward(inputs_embeds)?;
+        #[cfg(feature = "metal")]
+        if proj.device().is_metal()
+            && proj.dtype() == candle_core::DType::BF16
+            && self.norm.weight().is_some()
+        {
+            return crate::metal_kernels::fused_metal_ple_scale_rmsnorm(
+                &proj,
+                self.norm.weight().unwrap(),
+                self.scale,
+                self.norm.eps(),
+                self.hidden_size_per_layer_input,
+            );
+        }
+        let scaled = (proj * self.scale)?;
+        self.norm.forward(&scaled)
     }
 
     /// Project and reshape without computing float32 RMSNorm on the full 4D tensor.

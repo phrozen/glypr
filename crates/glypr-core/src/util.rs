@@ -1,18 +1,15 @@
+use crate::error::{GlyprError, GlyprResult};
 use anyhow::{Result, bail};
 use pulp::Simd;
 
 /// Truncate a normalized embedding to a Matryoshka (MRL) dimension (e.g. 512, 256, 128)
 /// and re-normalize with L2 norm.
-pub fn truncate_mrl(embedding: &[f32], target_dim: usize) -> Result<Vec<f32>> {
-    if target_dim == 0 {
-        bail!("Target Matryoshka dimension cannot be 0");
-    }
-    if target_dim > embedding.len() {
-        bail!(
-            "Target dimension {} exceeds embedding dimension {}",
-            target_dim,
-            embedding.len()
-        );
+pub fn truncate_mrl(embedding: &[f32], target_dim: usize) -> GlyprResult<Vec<f32>> {
+    if target_dim == 0 || target_dim > embedding.len() {
+        return Err(GlyprError::InvalidMrlDimension {
+            dim: target_dim,
+            max: embedding.len(),
+        });
     }
     let slice = &embedding[..target_dim];
     Ok(l2_normalize(slice))
@@ -29,7 +26,16 @@ pub fn l2_normalize(vec: &[f32]) -> Vec<f32> {
 }
 
 /// Compute cosine similarity between two float vectors.
+///
+/// Panics if `a.len() != b.len()`. Returns `0.0` if either vector is empty or has zero norm.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "Dimension mismatch in cosine_similarity: {} vs {}",
+        a.len(),
+        b.len()
+    );
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -108,13 +114,15 @@ pub fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
 
 /// Compute angular cosine similarity approximation between two packed `u64` binary vectors
 /// using Charikar's formula: `cos(pi * hamming_distance / dim)`.
+///
+/// Returns `0.0` when both slices are empty (consistent with `cosine_similarity` and `int8_cosine_similarity`).
 #[inline]
 pub fn binary_cosine_similarity(a: &[u64], b: &[u64]) -> f32 {
-    let dim = a.len() * 64;
-    if dim == 0 {
-        return 1.0;
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
     }
     let h = hamming_distance(a, b) as f32;
+    let dim = a.len() * 64;
     (std::f32::consts::PI * (h / dim as f32)).cos()
 }
 
@@ -303,5 +311,51 @@ mod tests {
         assert_eq!(dot, expected);
 
         assert!((int8_cosine_similarity(&q, &q) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_empty_cosine_similarities_consistent() {
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+        assert_eq!(int8_cosine_similarity(&[], &[]), 0.0);
+        assert_eq!(binary_cosine_similarity(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn test_int8_dot_product_unaligned_and_aligned_lengths() {
+        for len in [7usize, 19, 128] {
+            let a: Vec<i8> = (0..len)
+                .map(|i| ((i as isize * 13 % 25) - 12) as i8)
+                .collect();
+            let b: Vec<i8> = (0..len)
+                .map(|i| (((i as isize * 7 + 3) % 21) - 10) as i8)
+                .collect();
+            let expected: i32 = a
+                .iter()
+                .zip(b.iter())
+                .map(|(&x, &y)| (x as i32) * (y as i32))
+                .sum();
+            assert_eq!(
+                int8_dot_product(&a, &b),
+                expected,
+                "int8_dot_product mismatch for len={len}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_quantize_int8_clamping_and_edge_vectors() {
+        let clamped = quantize_int8(&[1.5, -2.0, 1.0, -1.0, 1.0001, -1.0001]);
+        assert_eq!(clamped, vec![127, -127, 127, -127, 127, -127]);
+
+        // Zero vectors in cosine_similarity
+        let zeros = vec![0.0f32; 8];
+        let nonzero = vec![1.0f32; 8];
+        assert_eq!(cosine_similarity(&zeros, &nonzero), 0.0);
+        assert_eq!(cosine_similarity(&nonzero, &zeros), 0.0);
+        assert_eq!(cosine_similarity(&zeros, &zeros), 0.0);
+
+        // Empty slice and zero slice in l2_normalize
+        assert!(l2_normalize(&[]).is_empty());
+        assert_eq!(l2_normalize(&[0.0, 0.0]), vec![0.0, 0.0]);
     }
 }

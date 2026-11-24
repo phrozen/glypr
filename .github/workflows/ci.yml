@@ -34,7 +34,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy (warnings as errors)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   documentation:
     name: Rustdoc Verification
@@ -50,11 +50,14 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Verify documentation builds without warnings
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
 
   test-linux-cpu:
     name: Linux CPU (SIMD)
     runs-on: ubuntu-latest
+    env:
+      GLYPR_ALLOW_MISSING_WEIGHTS: "1"
+      HF_HUB_OFFLINE: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -65,18 +68,18 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Check workspace compilation
-        run: cargo check --workspace --all-targets
+      - name: Check workspace compilation (no default features)
+        run: cargo check --locked --workspace --no-default-features --all-targets
 
-      - name: Run unit tests (CPU SIMD)
-        run: cargo test --workspace --lib
-
-      - name: Run core logic tests
-        run: cargo test -p glypr-core --test context_preflight --test quantization --test test_cpu_simd
+      - name: Run workspace unit & integration tests (CPU SIMD)
+        run: cargo test --locked --workspace --tests --lib -- --nocapture
 
   test-macos-apple-silicon:
     name: macOS Apple Silicon (Metal & ANE)
     runs-on: macos-15
+    env:
+      GLYPR_ALLOW_MISSING_WEIGHTS: "1"
+      HF_HUB_OFFLINE: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -87,14 +90,20 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Check compilation with Metal & ANE features
-        run: cargo check --workspace --all-targets --features metal,ane
+      - name: Check compilation with Accelerate feature
+        run: cargo check --locked --workspace --all-targets --features accelerate
 
-      # Metal & ANE unit tests are temporarily disabled on CI runners pending investigation
+      - name: Check compilation with Metal & ANE features
+        run: cargo check --locked --workspace --all-targets --features metal,ane
+
+      - name: Check compilation with Metal, Flash Attention & ANE features
+        run: cargo check --locked --workspace --all-targets --features metal,metal-flash-attn,ane
+
+      # Metal & ANE runtime feature tests are temporarily disabled on CI runners pending investigation
       # of cross-generation bfloat16 FMA invariance (M1/M2 software emulation vs M3/M4/M5 hardware bfloat ALU).
       # See docs/architecture/hardware-acceleration.md (Section 8) for details.
       # - name: Run unit tests with Metal & ANE features
-      #   run: cargo test --workspace --lib --features metal,ane
+      #   run: cargo test --locked --workspace --lib --features metal,ane
 
-      - name: Run CLI tests
-        run: cargo test -p glypr --test cli_test
+      - name: Run workspace unit & integration tests (CPU fallback)
+        run: cargo test --locked --workspace --tests --lib -- --nocapture

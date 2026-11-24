@@ -26,16 +26,17 @@ impl MultimodalProjector {
             bail!("Multimodal projector file not found at {:?}", p);
         }
 
-        let mut file = std::fs::File::open(p)
+        let file = std::fs::File::open(p)
             .with_context(|| format!("Failed to open mmproj GGUF file {:?}", p))?;
+        let mut reader = std::io::BufReader::with_capacity(8 * 1024 * 1024, file);
 
-        let content = candle_core::quantized::gguf_file::Content::read(&mut file)
+        let content = candle_core::quantized::gguf_file::Content::read(&mut reader)
             .with_context(|| format!("Failed to read mmproj GGUF container from {:?}", p))?;
 
         let config = MultimodalConfig::from_gguf_metadata(&content.metadata);
 
         let vision_tower = if let Some(v_cfg) = config.vision_config.clone() {
-            let tower = VisionTower::from_gguf(&content, &mut file, v_cfg, device, dtype)
+            let tower = VisionTower::from_gguf(&content, &mut reader, v_cfg, device, dtype)
                 .context("Failed to load Vision Tower from mmproj GGUF")?;
             Some(tower)
         } else {
@@ -43,7 +44,7 @@ impl MultimodalProjector {
         };
 
         let audio_tower = if let Some(a_cfg) = config.audio_config.clone() {
-            let tower = AudioTower::from_gguf(&content, &mut file, a_cfg, device, dtype)
+            let tower = AudioTower::from_gguf(&content, &mut reader, a_cfg, device, dtype)
                 .context("Failed to load Audio Tower from mmproj GGUF")?;
             Some(tower)
         } else {
@@ -127,32 +128,35 @@ impl MultimodalProjector {
             processed_images.push(res?);
         }
 
-        // Check if all images have the same patch grid dimensions
-        let is_homogeneous = processed_images.len() > 1
-            && processed_images.windows(2).all(|w| {
-                w[0].num_patches == w[1].num_patches
-                    && w[0].patch_width == w[1].patch_width
-                    && w[0].patch_height == w[1].patch_height
-            });
-
-        if is_homogeneous {
-            let batched_tokens = tower.encode_batch(&processed_images)?; // [b, num_soft_tokens, 512]
-            let b = processed_images.len();
-            let mut result = Vec::with_capacity(b);
-            for (i, p) in processed_images.iter().enumerate() {
-                let single = batched_tokens.get(i)?; // [num_soft_tokens, 512]
-                result.push((single, p.num_soft_tokens));
-            }
-            Ok(result)
-        } else {
-            // Heterogeneous images or single image: encode individually
-            let mut result = Vec::with_capacity(processed_images.len());
-            for p in &processed_images {
-                let soft = tower.encode(p)?;
-                result.push((soft, p.num_soft_tokens));
-            }
-            Ok(result)
+        // Shape-bucketed batching by (patch_width, patch_height), preserving original output order.
+        use std::collections::HashMap;
+        let mut buckets: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (idx, p) in processed_images.iter().enumerate() {
+            buckets
+                .entry((p.patch_width, p.patch_height))
+                .or_default()
+                .push(idx);
         }
+
+        let mut result: Vec<Option<(Tensor, usize)>> = vec![None; processed_images.len()];
+        for (_dims, indices) in buckets {
+            if indices.len() == 1 {
+                let idx = indices[0];
+                let p = &processed_images[idx];
+                let soft = tower.encode(p)?;
+                result[idx] = Some((soft, p.num_soft_tokens));
+            } else {
+                let group_refs: Vec<&ProcessedImage> =
+                    indices.iter().map(|&idx| &processed_images[idx]).collect();
+                let batched_tokens = tower.encode_batch_refs(&group_refs)?; // [g, num_soft_tokens, 512]
+                for (pos, &orig_idx) in indices.iter().enumerate() {
+                    let single = batched_tokens.get(pos)?; // [num_soft_tokens, 512]
+                    result[orig_idx] = Some((single, processed_images[orig_idx].num_soft_tokens));
+                }
+            }
+        }
+
+        Ok(result.into_iter().map(|opt| opt.unwrap()).collect())
     }
 
     /// Encode raw 16 kHz audio samples into soft tokens [num_soft_tokens, 512]
@@ -165,5 +169,77 @@ impl MultimodalProjector {
         let soft_tokens = tower.encode(&processed)?;
         let num_soft_tokens = soft_tokens.dim(0)?;
         Ok((soft_tokens, num_soft_tokens))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{MultimodalConfig, VisionConfig};
+    use crate::linear::LinearOp;
+    use crate::multimodal::vision::{
+        VisionPatchEmbedder, VisionPooler, VisionProjector, VisionRotaryEmbedding,
+    };
+    use crate::norm::RMSNorm;
+    use candle_nn::Linear;
+    use image::{DynamicImage, RgbImage};
+
+    #[test]
+    fn test_encode_images_batch_shape_bucketing_preserves_order() -> Result<()> {
+        // Build a minimal CPU VisionTower with 0 encoder layers and distinct input_proj weights
+        let proj_w = Tensor::ones((768, 768), DType::F32, &Device::Cpu)?;
+        let input_proj = LinearOp::new_standard(Linear::new(proj_w, None));
+        let pos_table = Tensor::zeros((2, 1024, 768), DType::F32, &Device::Cpu)?;
+        let patch_embedder = VisionPatchEmbedder::new(input_proj, &pos_table, 768)?;
+
+        let out_w = Tensor::ones((512, 768), DType::F32, &Device::Cpu)?;
+        let tower = VisionTower {
+            patch_embedder,
+            rotary_emb: VisionRotaryEmbedding::new(64, 100.0),
+            layers: Vec::new(),
+            pooler: VisionPooler::new(3, 768),
+            projector: VisionProjector {
+                norm: RMSNorm::new(None, 1e-6),
+                projection: LinearOp::new_standard(Linear::new(out_w, None)),
+            },
+            config: VisionConfig::default(),
+            device: Device::Cpu,
+            dtype: DType::F32,
+        };
+
+        let projector = MultimodalProjector {
+            vision_tower: Some(tower),
+            audio_tower: None,
+            config: MultimodalConfig::from_gguf_metadata(&std::collections::HashMap::new()),
+            device: Device::Cpu,
+            dtype: DType::F32,
+        };
+
+        // Mix square and landscape images in interleaved order: [square, landscape, square]
+        let img_sq1 =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(128, 128, image::Rgb([10, 20, 30])));
+        let img_wide =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(256, 128, image::Rgb([40, 50, 60])));
+        let img_sq2 =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(128, 128, image::Rgb([70, 80, 90])));
+
+        let batch_out =
+            projector.encode_images_batch(&[(&img_sq1, 140), (&img_wide, 140), (&img_sq2, 140)])?;
+        assert_eq!(batch_out.len(), 3);
+
+        let solo_0 = projector.encode_image_with_budget(&img_sq1, 140)?;
+        let solo_1 = projector.encode_image_with_budget(&img_wide, 140)?;
+        let solo_2 = projector.encode_image_with_budget(&img_sq2, 140)?;
+
+        for (got, solo) in batch_out.iter().zip([solo_0, solo_1, solo_2].iter()) {
+            assert_eq!(got.1, solo.1);
+            assert_eq!(got.0.dims(), solo.0.dims());
+            let gv = got.0.flatten_all()?.to_vec1::<f32>()?;
+            let sv = solo.0.flatten_all()?.to_vec1::<f32>()?;
+            for (a, b) in gv.iter().zip(sv.iter()) {
+                assert!((a - b).abs() < 1e-4, "mismatch: {a} vs {b}");
+            }
+        }
+        Ok(())
     }
 }

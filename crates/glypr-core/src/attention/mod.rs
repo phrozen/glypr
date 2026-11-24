@@ -216,20 +216,16 @@ impl SelfAttention {
         let context = match self.attention_mode {
             #[cfg(any(feature = "metal", feature = "metal-flash-attn"))]
             AttentionMode::MetalFlash => {
-                // Native GQA: zero memory copies or KV head duplication!
-                MetalFlashAttention.compute_attention(
-                    &q,
-                    &k,
-                    &v,
-                    attention_mask,
-                    self.sliding_window,
-                )?
+                // Native GQA + direct [B, S, H, D] output layout: zero transpose/contiguous copy!
+                MetalFlashAttention
+                    .compute_attention_bshd(&q, &k, &v, attention_mask, self.sliding_window)?
+                    .reshape((batch, seq_len, self.num_attention_heads * self.head_dim))?
             }
             _ => {
                 let num_groups = self.num_attention_heads / self.num_key_value_heads;
                 let k_rep = repeat_kv(&k, num_groups)?;
                 let v_rep = repeat_kv(&v, num_groups)?;
-                match self.attention_mode {
+                let attn = match self.attention_mode {
                     AttentionMode::Standard => StandardAttention.compute_attention(
                         &q,
                         &k_rep,
@@ -252,26 +248,17 @@ impl SelfAttention {
                         attention_mask,
                         self.sliding_window,
                     )?,
-                    #[cfg(feature = "cuda-flash-attn")]
-                    AttentionMode::CudaFlash => ChunkedSlidingAttention.compute_attention(
-                        &q,
-                        &k_rep,
-                        &v_rep,
-                        attention_mask,
-                        self.sliding_window,
-                    )?,
                     #[allow(unreachable_patterns)]
                     _ => unreachable!(),
-                }
+                };
+                // Transpose back to [batch, seq_len, num_heads, head_dim] -> reshape [batch, seq_len, num_heads * head_dim]
+                attn.transpose(1, 2)?.contiguous()?.reshape((
+                    batch,
+                    seq_len,
+                    self.num_attention_heads * self.head_dim,
+                ))?
             }
         };
-
-        // Transpose back to [batch, seq_len, num_heads, head_dim] -> reshape [batch, seq_len, num_heads * head_dim]
-        let context = context.transpose(1, 2)?.contiguous()?.reshape((
-            batch,
-            seq_len,
-            self.num_attention_heads * self.head_dim,
-        ))?;
 
         self.o_proj.forward(&context)
     }
