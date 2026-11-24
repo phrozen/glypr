@@ -18,7 +18,7 @@ coreml = ["glypr-core/coreml"]
 ane = ["glypr-core/ane"]
 
 [dependencies]
-glypr-core = { path = "../glypr-core" }
+glypr-core = { version = "0.4.0", path = "../glypr-core" }
 candle-core = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }

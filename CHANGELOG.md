@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.4.0] - 2026-11-20
+## [0.4.0] - 2026-11-23
 
 ### Breaking Changes
 - **Encapsulated `GlyprEmbedder` Fields (`UX-10`):** Privatized `GlyprEmbedder` internal fields (`model`, `tokenizer`, `device`, `dtype`, `multimodal`, `max_seq_len`, `coreml_vision`, `coreml_text`, `vision_backend`, `text_backend`). Use the read/write accessors (`model()`, `model_mut()`, `tokenizer()`, `device()`, `dtype()`, `multimodal()`, `multimodal_mut()`, `max_seq_len()`, `set_max_seq_len()`, `with_max_seq_len()`, `embedding_dim()`, `vision_backend()`, `text_backend()`, `coreml_vision()`, `coreml_text()`, `has_multimodal()`, `has_audio_projector()`, `has_coreml_vision()`, `has_coreml_text()`), `GlyprEmbedder::builder()`, or `GlyprEmbedder::from_parts(...)` + `set_multimodal_projector(...)` / `with_multimodal_projector(...)`.
@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Testing Pyramid & FP32 Golden Provenance:** Added weightless Tier 0 synthetic/mock/CLI tests (`GLYPR_ALLOW_MISSING_WEIGHTS=1`, `EngineHandle::mock`), Tier 1 (`./tests/scripts/run_qa_suite.sh --tier1`, 132 passed / 0 failed in 36s), and Tier 2 (`--tier2`, 106s including `9/9` `--release` tests, `pytest` `4/4`, and `26/26` live `differential_parity.py` checks). Regenerated all golden fixtures in FP32 CPU with `schema_version: 2` provenance (`verify_goldens.py --strict-fp32`).
 
 ### Fixed
+- **GGUF Sliding-Window Radius:** Halved `gemma-embedding2.attention.sliding_window` (`1024 -> 512`) so GGUF long-context masking matches Safetensors/HuggingFace.
+- **Audio Anti-Aliased Resampling:** Replaced naive linear resampling (`48 kHz -> 16 kHz`) with a zero-dependency windowed-sinc FIR low-pass resampler.
+- **Metal BF16 NaN Guard & Kernel Safety:** Added BF16 NaN guards (`MLX_BF16`), sliding-window fallback fixes, and strict shape/dtype guards across Metal/CPU kernels.
 - **Multimodal Prompt Ordering (`MultimodalInput`):** Fixed `MultimodalInput::image_with_prompt` and `MultimodalInput::audio_with_prompt` to emit `[Media, Text]` ordering matching `embed_composite`, `embed_interleaved`, and the Python baseline.
 - **Audio STFT & Hann Precision Parity:** Updated audio preprocessor Hann window and FFT twiddle arithmetic to `f64` for exact parity against the PyTorch FP32 reference.
 - **Padding Mask Broadcasting (`[B, 1, 1, S]`):** Fixed padded-batch `[B, 1, 1, S]` attention-mask slicing in `attention/chunked.rs` and `attention/standard.rs` (caught via Tier 0 synthetic tiny-model tests).
